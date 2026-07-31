@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -490,6 +491,7 @@ static int dispatch_control_request(control_client_t *client,
                                     controller_state_t *state,
                                     pid_t child_pid,
                                     int child_stdin_fd,
+                                    int resize_fd,
                                     int process_completed,
                                     int child_result)
 {
@@ -544,6 +546,35 @@ static int dispatch_control_request(control_client_t *client,
         } else {
             client->kind = CONTROL_CLIENT_ATTACHING_STDIN;
             result = enqueue_response(client, "ok attached stream=stdin\n", 25);
+        }
+    } else if (strncmp(request, "resize ", 7) == 0) {
+        unsigned int rows = 0;
+        unsigned int columns = 0;
+        if (process_completed) {
+            result = enqueue_error_response(client, "process_completed");
+        } else if (resize_fd < 0) {
+            result = enqueue_error_response(client, "resize_unsupported");
+        } else if (sscanf(request + 7, "%u %u", &rows, &columns) != 2 ||
+                   rows == 0 || columns == 0) {
+            result = enqueue_error_response(client, "bad_resize");
+        } else {
+            struct winsize size;
+            memset(&size, 0, sizeof(size));
+            size.ws_row = (unsigned short)rows;
+            size.ws_col = (unsigned short)columns;
+            if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
+                result = enqueue_error_response(client, "resize_failed");
+            } else {
+                char event[128];
+                int event_length = snprintf(event, sizeof(event),
+                                            "type=terminal_resized rows=%u columns=%u",
+                                            rows, columns);
+                if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
+                    append_event(state, event);
+                }
+                client->kind = CONTROL_CLIENT_RESPONDING;
+                result = enqueue_response(client, "ok\n", 3);
+            }
         }
     } else if (strncmp(request, "attach ", 7) == 0) {
         char stream[16];
@@ -615,6 +646,7 @@ static int finish_control_request(control_client_t *client,
                                   controller_state_t *state,
                                   pid_t child_pid,
                                   int child_stdin_fd,
+                                  int resize_fd,
                                   int process_completed,
                                   int child_result)
 {
@@ -625,6 +657,7 @@ static int finish_control_request(control_client_t *client,
 
     client->request[client->request_length] = '\0';
     dispatch_control_request(client, state, child_pid, child_stdin_fd,
+                             resize_fd,
                              process_completed, child_result);
     return 0;
 }
@@ -717,6 +750,7 @@ int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
                                 int child_stdin_fd,
+                                int resize_fd,
                                 int process_completed,
                                 int child_result)
 {
@@ -744,14 +778,16 @@ int read_control_client_request(control_client_t *client,
 
             client->request[client->request_length] = '\0';
             return finish_control_request(client, state, child_pid,
-                                          child_stdin_fd, process_completed,
+                                          child_stdin_fd, resize_fd,
+                                          process_completed,
                                           child_result);
         }
 
         for (ssize_t i = 0; i < result; ++i) {
             if (buffer[i] == '\n') {
                 return finish_control_request(client, state, child_pid,
-                                              child_stdin_fd, process_completed,
+                                              child_stdin_fd, resize_fd,
+                                              process_completed,
                                               child_result);
             }
 

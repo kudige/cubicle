@@ -34,6 +34,7 @@
   - forward foreground terminal stdin to the PTY in raw mode
   - propagate initial and changed terminal window size
   - preserve socket stdin attachment semantics for interactive TTY input
+  - support TTY resize over the control socket
   - keep tty-captured-stderr reserved for the later phase
 - Added initial durable controller state for stream mode:
   - metadata
@@ -46,6 +47,8 @@
   combined output capture, metadata, and exit events.
 - Added a controller foreground TTY integration test covering local stdin
   forwarding and SIGWINCH resize propagation.
+- Added a controller TTY socket integration test covering stdin attachment and
+  resize commands.
 - Added a controller-local control socket for stream mode:
   - status queries
   - stdout/stderr range reads from persisted logs

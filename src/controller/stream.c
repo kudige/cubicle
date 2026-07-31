@@ -340,7 +340,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
-                                            child_stdin_fd, 0,
+                                            child_stdin_fd, resize_fd, 0,
                                             *child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading control request");
@@ -560,7 +560,7 @@ static int completed_retention_loop(controller_state_t *state,
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid, -1,
-                                            1, child_result) < 0) {
+                                            -1, 1, child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading completed control request");
                 close_all_control_clients(clients, state);

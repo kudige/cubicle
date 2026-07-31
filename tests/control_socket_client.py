@@ -61,6 +61,10 @@ def main():
     signal_parser = subparsers.add_parser("signal")
     signal_parser.add_argument("number", type=int)
 
+    resize_parser = subparsers.add_parser("resize")
+    resize_parser.add_argument("rows", type=int)
+    resize_parser.add_argument("columns", type=int)
+
     read_parser = subparsers.add_parser("read")
     read_parser.add_argument("stream", choices=["stdout", "stderr", "out", "err"])
     read_parser.add_argument("start", type=int)
@@ -85,6 +89,8 @@ def main():
         command = f"events after {args.sequence} {args.limit}"
     elif args.command == "signal":
         command = f"signal {args.number}"
+    elif args.command == "resize":
+        command = f"resize {args.rows} {args.columns}"
     elif args.command == "read":
         command = f"read {args.stream} {args.start} {args.length}"
     elif args.command == "attach":

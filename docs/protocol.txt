@@ -165,6 +165,26 @@ process stdin until the client disconnects or the controller detaches the client
 `error stdin_closed` is returned when the process was launched with
 `--stdin-policy eof`.
 
+### resize
+
+Request:
+
+```text
+resize ROWS COLUMNS
+```
+
+Response:
+
+```text
+ok
+error bad_resize
+error resize_failed
+error resize_unsupported
+```
+
+TTY controllers apply the requested window size to the PTY. Stream controllers
+return `resize_unsupported`.
+
 ### terminate
 
 Request:
@@ -205,6 +225,7 @@ Current error codes:
 - `bad_events_command`
 - `bad_read_command`
 - `bad_request`
+- `bad_resize`
 - `bad_signal`
 - `invalid_attach_start`
 - `invalid_range`
@@ -213,6 +234,8 @@ Current error codes:
 - `process_completed`
 - `read_too_large`
 - `request_too_long`
+- `resize_failed`
+- `resize_unsupported`
 - `signal_failed`
 - `state_path_too_long`
 - `stdin_closed`
@@ -239,6 +262,7 @@ seq=N type=process_started controller_id=ID pid=PID pgid=PGID mode=stream
 seq=N type=output stream=stdout start=OFFSET length=N
 seq=N type=output stream=stderr start=OFFSET length=N
 seq=N type=input length=N
+seq=N type=terminal_resized rows=ROWS columns=COLUMNS
 seq=N type=client_attached stream=stdin|stdout|stderr
 seq=N type=client_detached stream=stdin|stdout|stderr
 seq=N type=signal_delivered signal=N

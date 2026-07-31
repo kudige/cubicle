@@ -92,6 +92,7 @@ int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
                                 int child_stdin_fd,
+                                int resize_fd,
                                 int process_completed,
                                 int child_result);
 int flush_control_client_response(control_client_t *client,
