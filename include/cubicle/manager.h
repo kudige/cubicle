@@ -10,10 +10,19 @@ extern "C" {
 
 typedef struct cubicle_client cubicle_client_t;
 
+typedef struct cubicle_manager_ping_result {
+    cubicle_manager_id_t manager_id;
+    uint32_t protocol_major;
+    uint32_t protocol_minor;
+    uint64_t server_time_ms;
+    uint64_t uptime_ms;
+} cubicle_manager_ping_result_t;
+
 typedef struct cubicle_manager_status {
     cubicle_manager_id_t manager_id;
     uint32_t protocol_major;
     uint32_t protocol_minor;
+    cubicle_protocol_capability_mask_t capabilities;
     uint64_t started_at_ms;
     uint64_t server_time_ms;
     uint64_t workspace_count;
@@ -22,19 +31,10 @@ typedef struct cubicle_manager_status {
     uint64_t active_client_sessions;
 } cubicle_manager_status_t;
 
-cubicle_error_code_t cubicle_manager_ping(
-    cubicle_client_t *client);
-
-cubicle_error_code_t cubicle_manager_status(
-    cubicle_client_t *client,
-    cubicle_manager_status_t *status_out);
-
-cubicle_error_code_t cubicle_manager_reconcile(
-    cubicle_client_t *client);
-
-cubicle_error_code_t cubicle_manager_shutdown(
-    cubicle_client_t *client,
-    bool stop_managed_processes);
+cubicle_error_code_t cubicle_manager_ping(cubicle_client_t *client, cubicle_manager_ping_result_t *result_out);
+cubicle_error_code_t cubicle_manager_status(cubicle_client_t *client, cubicle_manager_status_t *status_out);
+cubicle_error_code_t cubicle_manager_reconcile(cubicle_client_t *client);
+cubicle_error_code_t cubicle_manager_shutdown(cubicle_client_t *client, bool stop_managed_processes);
 
 #ifdef __cplusplus
 }
