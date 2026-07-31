@@ -480,6 +480,55 @@ static int process_info_json(const char *manager_id_value,
     return 0;
 }
 
+static const char *api_event_type_name(const char *payload)
+{
+    if (strstr(payload, "type=process_started") != NULL) {
+        return "process_started";
+    }
+    if (strstr(payload, "type=process_exited") != NULL) {
+        return "process_exited";
+    }
+    if (strstr(payload, "type=output ") != NULL) {
+        return "output_available";
+    }
+    if (strstr(payload, "type=client_attached") != NULL) {
+        return "client_attached";
+    }
+    if (strstr(payload, "type=client_detached") != NULL) {
+        return "client_detached";
+    }
+    return "process_state_changed";
+}
+
+static int event_info_json(uint64_t global_sequence,
+                           const char *workspace_id,
+                           const char *process_id,
+                           const char *payload,
+                           char *buffer,
+                           size_t buffer_size)
+{
+    long long workspace_sequence = 0;
+    (void)cubicle_parse_event_sequence(payload, &workspace_sequence);
+
+    char escaped_payload[CUBICLE_EVENT_PAYLOAD_MAX * 2];
+    if (cubicle_json_escape(escaped_payload, sizeof(escaped_payload),
+                            payload) < 0) {
+        return -1;
+    }
+
+    int length = snprintf(buffer, buffer_size,
+                          "{\"global_sequence\":%llu,\"workspace_sequence\":%lld,\"timestamp_ms\":0,\"type\":\"%s\",\"workspace_id\":\"%s\",\"process_id\":\"%s\",\"payload\":\"%s\"}",
+                          (unsigned long long)global_sequence,
+                          workspace_sequence,
+                          api_event_type_name(payload), workspace_id,
+                          process_id, escaped_payload);
+    if (length < 0 || (size_t)length >= buffer_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
 static int find_process_record(const manager_state_t *state,
                                const char *process_id_or_name,
                                const char *workspace_id,
@@ -1944,6 +1993,109 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                      CUBICLE_ERR_RESOURCE_LIMIT,
                                      "process list response too large",
                                      false, 0);
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "events.list") == 0) {
+        char params[1024];
+        char workspace_ref[128];
+        char process_ref[128];
+        char workspace_id[128];
+        const char *workspace_id_ptr = NULL;
+        const char *process_id_ptr = NULL;
+        uint64_t after_sequence = 0;
+        uint64_t limit = 100;
+
+        if (cubicle_rpc_get_object(request, "params", params,
+                                   sizeof(params)) == 0) {
+            if (cubicle_rpc_get_string(params, "workspace_id",
+                                       workspace_ref,
+                                       sizeof(workspace_ref)) == 0 &&
+                workspace_ref[0] != '\0') {
+                cubicle_workspace_record_t workspace;
+                if (find_workspace(state, workspace_ref, &workspace) < 0) {
+                    return manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false, 0);
+                }
+                snprintf(workspace_id, sizeof(workspace_id), "%s",
+                         workspace.id);
+                workspace_id_ptr = workspace_id;
+            }
+            if (cubicle_rpc_get_string(params, "process_id", process_ref,
+                                       sizeof(process_ref)) == 0 &&
+                process_ref[0] != '\0') {
+                process_id_ptr = process_ref;
+            }
+            (void)cubicle_rpc_get_uint64(params, "after_sequence",
+                                         &after_sequence);
+            (void)cubicle_rpc_get_uint64(params, "limit", &limit);
+        }
+
+        FILE *file = open_state_file_for_read(state, "workspace-events.log");
+        char result[8192];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result), "{\"events\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            return -1;
+        }
+        used = (size_t)written;
+
+        size_t count = 0;
+        uint64_t global_sequence = 0;
+        if (file != NULL) {
+            char line[PATH_MAX + 1400];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                ++global_sequence;
+                if (global_sequence <= after_sequence ||
+                    (limit > 0 && count >= limit)) {
+                    continue;
+                }
+
+                char copy[PATH_MAX + 1400];
+                snprintf(copy, sizeof(copy), "%s", line);
+                char *event_workspace_id = strtok(copy, "\t\n");
+                char *event_process_id = strtok(NULL, "\t\n");
+                (void)strtok(NULL, "\t\n");
+                char *payload = strtok(NULL, "\n");
+                if (event_workspace_id == NULL || event_process_id == NULL ||
+                    payload == NULL ||
+                    (workspace_id_ptr != NULL &&
+                     strcmp(event_workspace_id, workspace_id_ptr) != 0) ||
+                    (process_id_ptr != NULL &&
+                     strcmp(event_process_id, process_id_ptr) != 0)) {
+                    continue;
+                }
+
+                char item[2048];
+                if (event_info_json(global_sequence, event_workspace_id,
+                                    event_process_id, payload, item,
+                                    sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    return manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "events response too large",
+                                             false, 0);
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+
+        written = snprintf(result + used, sizeof(result) - used,
+                           "],\"count\":%zu,\"has_more\":false}", count);
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_RESOURCE_LIMIT,
+                                     "events response too large", false, 0);
         }
         return manager_api_success(client_fd, request_id, result);
     }

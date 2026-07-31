@@ -198,6 +198,13 @@ grep -q "^$workspace_id	$process_id	daemon-1	seq=2 type=output stream=stdout" "$
 grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"
 grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
 
+events_list_response=$(send_manager_rpc events.list "{\"workspace_id\":\"$workspace_id\",\"process_id\":\"$process_id\",\"after_sequence\":0,\"limit\":10}")
+printf "%s" "$events_list_response" | grep -q '"ok": true'
+printf "%s" "$events_list_response" | grep -q '"count": 3'
+printf "%s" "$events_list_response" | grep -q '"type": "process_started"'
+printf "%s" "$events_list_response" | grep -q '"type": "output_available"'
+printf "%s" "$events_list_response" | grep -q '"type": "process_exited"'
+
 unknown_response=$(send_manager_command unknown)
 if ! printf "%s" "$unknown_response" | grep -q '"code": "unsupported"'; then
     echo "unexpected unknown-command response: $unknown_response" >&2

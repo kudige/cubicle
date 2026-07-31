@@ -1,4 +1,5 @@
 #include "cubicle/client.h"
+#include "cubicle/events.h"
 #include "cubicle/manager.h"
 #include "cubicle/process.h"
 #include "cubicle/rpc.h"
@@ -55,6 +56,9 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"process.list\"") != NULL) {
         assert(cubicle_rpc_success(response, sizeof(response), "c7",
                                    "{\"processes\":[{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}],\"count\":1,\"has_more\":false}") == 0);
+    } else if (strstr(request_json, "\"events.list\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c8",
+                                   "{\"events\":[{\"global_sequence\":1,\"workspace_sequence\":1,\"timestamp_ms\":0,\"type\":\"process_started\",\"workspace_id\":\"workspace-1\",\"process_id\":\"process-1\",\"payload\":\"seq=1 type=process_started\"}],\"count\":1,\"has_more\":false}") == 0);
     } else {
         assert(cubicle_rpc_error(response, sizeof(response), "cX",
                                  CUBICLE_ERR_UNSUPPORTED,
@@ -158,6 +162,16 @@ int main(void)
     assert(process_count == 1);
     assert(strcmp(processes[0].friendly_name, "build") == 0);
     cubicle_process_list_free(processes);
+
+    cubicle_event_t *events = NULL;
+    size_t event_count = 0;
+    assert(cubicle_events_list(client, NULL, &events, &event_count) ==
+           CUBICLE_OK);
+    assert(event_count == 1);
+    assert(events[0].type == CUBICLE_EVENT_PROCESS_STARTED);
+    assert(events[0].global_sequence == 1);
+    assert(strcmp(events[0].process_id, "process-1") == 0);
+    cubicle_events_free(events);
 
     cubicle_client_disconnect(client);
     return 0;
