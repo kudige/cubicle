@@ -109,7 +109,7 @@ def connect_attach(socket_path, command):
         client.sendall(command.encode("utf-8") + b"\n")
 
         response = b""
-        while not response.endswith(b"\n"):
+        while b"\n" not in response:
             chunk = client.recv(4096)
             if not chunk:
                 break

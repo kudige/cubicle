@@ -57,7 +57,7 @@ def main():
         controller_stderr = os.path.join(tmpdir, "controller-stderr")
 
         command = (
-            'printf "ready\\n"; '
+            'printf "ready"; '
             'IFS= read -r line; '
             'printf "size:%s\\n" "$(stty size)"; '
             'printf "typed:%s\\n" "$line"'
