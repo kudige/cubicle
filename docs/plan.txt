@@ -93,6 +93,7 @@
   - manager registers controller ID and direct control socket
   - process resolve returns direct controller details by process ID
   - process resolve supports workspace-local friendly names
+  - process I/O remains direct through the controller socket
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -106,34 +107,31 @@
 1. Finish stream protocol semantics.
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
-2. Add manager/controller routing.
-   - Keep terminal/output bytes out of the manager.
-
-3. Add workspace event aggregation.
+2. Add workspace event aggregation.
    - Consume controller primitive events.
    - Maintain per-controller cursors.
    - Produce ordered workspace events.
    - Support event listing and follow behavior.
 
-4. Implement TTY mode.
+3. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-5. Implement TTY with captured stderr.
+4. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.
 
-6. Add provisional user-facing CLI commands.
+5. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-7. Expand tests.
+6. Expand tests.
     - Controller signal/termination tests.
     - Large output tests.
     - Interleaved stdout/stderr event tests.
