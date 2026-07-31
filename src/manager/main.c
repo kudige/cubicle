@@ -2,6 +2,7 @@
 
 #include "cubicle/log.h"
 #include "cubicle/process.h"
+#include "cubicle/util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -15,7 +16,7 @@
 #include <unistd.h>
 
 #ifndef PATH_MAX
-#define PATH_MAX 4096
+#define PATH_MAX CUBICLE_PATH_MAX
 #endif
 
 #define MANAGER_ID_LENGTH 32
@@ -59,109 +60,6 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program);
-}
-
-static int write_all(int fd, const char *buffer, size_t length)
-{
-    size_t written = 0;
-
-    while (written < length) {
-        ssize_t result = write(fd, buffer + written, length - written);
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-
-            return -1;
-        }
-
-        written += (size_t)result;
-    }
-
-    return 0;
-}
-
-static int mkdir_if_needed(const char *path)
-{
-    if (mkdir(path, 0700) == 0) {
-        return 0;
-    }
-
-    if (errno == EEXIST) {
-        struct stat st;
-        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static int mkdir_p(const char *path)
-{
-    char current[PATH_MAX];
-    size_t length = strlen(path);
-
-    if (length == 0 || length >= sizeof(current)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    memcpy(current, path, length + 1);
-
-    for (char *p = current + 1; *p != '\0'; ++p) {
-        if (*p != '/') {
-            continue;
-        }
-
-        *p = '\0';
-        if (mkdir_if_needed(current) < 0) {
-            return -1;
-        }
-        *p = '/';
-    }
-
-    return mkdir_if_needed(current);
-}
-
-static int generate_id(char id[MANAGER_ID_LENGTH + 1])
-{
-    unsigned char bytes[16];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) {
-        return -1;
-    }
-
-    size_t offset = 0;
-    while (offset < sizeof(bytes)) {
-        ssize_t result = read(fd, bytes + offset, sizeof(bytes) - offset);
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-
-            close(fd);
-            return -1;
-        }
-
-        if (result == 0) {
-            close(fd);
-            errno = EIO;
-            return -1;
-        }
-
-        offset += (size_t)result;
-    }
-
-    close(fd);
-
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < sizeof(bytes); ++i) {
-        id[i * 2] = hex[bytes[i] >> 4];
-        id[i * 2 + 1] = hex[bytes[i] & 0x0f];
-    }
-    id[MANAGER_ID_LENGTH] = '\0';
-    return 0;
 }
 
 static int validate_field(const char *value, const char *name)
@@ -233,7 +131,7 @@ static int append_line(const manager_state_t *state, const char *file_name,
     }
 
     size_t length = strlen(line);
-    int result = write_all(fd, line, length);
+    int result = cubicle_write_all(fd, line, length);
     close(fd);
     return result;
 }
@@ -347,7 +245,7 @@ static int command_workspace_create(const manager_state_t *state, const char *na
     }
 
     char id[MANAGER_ID_LENGTH + 1];
-    if (generate_id(id) < 0) {
+    if (cubicle_generate_hex_id(id, sizeof(id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
@@ -570,7 +468,7 @@ static int command_process_register(const manager_state_t *state, int argc,
             return 2;
         }
         snprintf(process_id, sizeof(process_id), "%s", requested_process_id);
-    } else if (generate_id(process_id) < 0) {
+    } else if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
@@ -811,7 +709,7 @@ static int command_process_start(const manager_state_t *state, int argc,
     }
 
     char process_id[MANAGER_ID_LENGTH + 1];
-    if (generate_id(process_id) < 0) {
+    if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
@@ -1281,7 +1179,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (mkdir_p(state.dir) < 0) {
+    if (cubicle_mkdir_p(state.dir) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }

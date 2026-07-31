@@ -2,6 +2,7 @@
 
 #include "cubicle/log.h"
 #include "cubicle/process.h"
+#include "cubicle/util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -18,7 +19,7 @@
 #include <unistd.h>
 
 #ifndef PATH_MAX
-#define PATH_MAX 4096
+#define PATH_MAX CUBICLE_PATH_MAX
 #endif
 
 #define CUBICLE_MAX_SIGNAL_NUMBER 128
@@ -152,72 +153,12 @@ static int parse_mode(const char *name, cubicle_process_mode_t *mode)
     return -1;
 }
 
-static int generate_controller_id(char controller_id[33])
-{
-    unsigned char bytes[16];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) {
-        return -1;
-    }
-
-    size_t offset = 0;
-    while (offset < sizeof(bytes)) {
-        ssize_t result = read(fd, bytes + offset, sizeof(bytes) - offset);
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-
-            close(fd);
-            return -1;
-        }
-
-        if (result == 0) {
-            close(fd);
-            errno = EIO;
-            return -1;
-        }
-
-        offset += (size_t)result;
-    }
-
-    close(fd);
-
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < sizeof(bytes); ++i) {
-        controller_id[i * 2] = hex[bytes[i] >> 4];
-        controller_id[i * 2 + 1] = hex[bytes[i] & 0x0f];
-    }
-    controller_id[32] = '\0';
-    return 0;
-}
-
 static void close_if_open(int *fd)
 {
     if (*fd >= 0) {
         close(*fd);
         *fd = -1;
     }
-}
-
-static int write_all(int fd, const char *buffer, size_t length)
-{
-    size_t written = 0;
-
-    while (written < length) {
-        ssize_t result = write(fd, buffer + written, length - written);
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-
-            return -1;
-        }
-
-        written += (size_t)result;
-    }
-
-    return 0;
 }
 
 static int set_nonblocking(int fd)
@@ -253,49 +194,6 @@ static int write_best_effort(int fd, const char *buffer, size_t length)
     }
 
     return 0;
-}
-
-static int mkdir_if_needed(const char *path)
-{
-    if (mkdir(path, 0700) == 0) {
-        return 0;
-    }
-
-    if (errno == EEXIST) {
-        struct stat st;
-        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static int mkdir_p(const char *path)
-{
-    char current[PATH_MAX];
-    size_t length = strlen(path);
-
-    if (length == 0 || length >= sizeof(current)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    memcpy(current, path, length + 1);
-
-    for (char *p = current + 1; *p != '\0'; ++p) {
-        if (*p != '/') {
-            continue;
-        }
-
-        *p = '\0';
-        if (mkdir_if_needed(current) < 0) {
-            return -1;
-        }
-        *p = '/';
-    }
-
-    return mkdir_if_needed(current);
 }
 
 static int open_state_file(const char *dir, const char *name, int flags)
@@ -370,7 +268,7 @@ static int initialize_controller_state(controller_state_t *state,
     state->stderr_fd = -1;
     state->next_sequence = 1;
 
-    if (generate_controller_id(state->controller_id) < 0) {
+    if (cubicle_generate_hex_id(state->controller_id, sizeof(state->controller_id)) < 0) {
         return -1;
     }
 
@@ -389,7 +287,7 @@ static int initialize_controller_state(controller_state_t *state,
         }
     }
 
-    if (mkdir_p(state->dir) < 0) {
+    if (cubicle_mkdir_p(state->dir) < 0) {
         return -1;
     }
 
@@ -418,7 +316,7 @@ static int initialize_controller_state(controller_state_t *state,
                                    stdin_policy == STDIN_POLICY_EOF ? "eof" : "open",
                                    command_line);
     if (metadata_length < 0 || (size_t)metadata_length >= sizeof(metadata) ||
-        write_all(metadata_fd, metadata, (size_t)metadata_length) < 0) {
+        cubicle_write_all(metadata_fd, metadata, (size_t)metadata_length) < 0) {
         close(metadata_fd);
         return -1;
     }
@@ -515,7 +413,7 @@ static int write_error_response(int fd, const char *message)
         return -1;
     }
 
-    return write_all(fd, response, (size_t)length);
+    return cubicle_write_all(fd, response, (size_t)length);
 }
 
 static void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS])
@@ -616,7 +514,7 @@ static int read_stream_range(int client_fd, const controller_state_t *state,
     char header[64];
     int header_length = snprintf(header, sizeof(header), "ok length=%lld\n", length);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        write_all(client_fd, header, (size_t)header_length) < 0) {
+        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
         close(fd);
         return -1;
     }
@@ -646,7 +544,7 @@ static int read_stream_range(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
@@ -702,7 +600,7 @@ static int write_stream_bytes(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
@@ -737,7 +635,7 @@ static int write_file_response(int client_fd, const controller_state_t *state,
     int header_length = snprintf(header, sizeof(header), "ok length=%lld\n",
                                  (long long)st.st_size);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        write_all(client_fd, header, (size_t)header_length) < 0) {
+        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
         close(fd);
         return -1;
     }
@@ -758,7 +656,7 @@ static int write_file_response(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
@@ -815,11 +713,11 @@ static int write_events_after_response(int client_fd,
     int header_length = snprintf(header, sizeof(header),
                                  "ok count=%lld length=%zu\n", count, used);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        write_all(client_fd, header, (size_t)header_length) < 0) {
+        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
         return -1;
     }
 
-    return write_all(client_fd, payload, used);
+    return cubicle_write_all(client_fd, payload, used);
 }
 
 static int send_attach_catchup(int client_fd, const controller_state_t *state,
@@ -840,7 +738,7 @@ static int send_attach_catchup(int client_fd, const controller_state_t *state,
                                  "ok attached stream=%s start=%lld length=%lld\n",
                                  stream, start, length);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        write_all(client_fd, header, (size_t)header_length) < 0) {
+        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
         return -1;
     }
 
@@ -863,7 +761,7 @@ static int dispatch_control_request(control_client_t *client,
         if (length < 0 || (size_t)length >= sizeof(response)) {
             result = -1;
         } else {
-            result = write_all(client->fd, response, (size_t)length);
+            result = cubicle_write_all(client->fd, response, (size_t)length);
         }
     } else if (strcmp(request, "metadata") == 0) {
         result = write_file_response(client->fd, state, "metadata");
@@ -890,7 +788,7 @@ static int dispatch_control_request(control_client_t *client,
         if (child_stdin_fd < 0) {
             result = write_error_response(client->fd, "stdin_closed");
         } else {
-            result = write_all(client->fd, "ok attached stream=stdin\n", 25);
+            result = cubicle_write_all(client->fd, "ok attached stream=stdin\n", 25);
             if (result == 0) {
                 client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
                 append_event(state, "type=client_attached stream=stdin");
@@ -923,7 +821,7 @@ static int dispatch_control_request(control_client_t *client,
     } else if (strcmp(request, "terminate") == 0) {
         if (kill(-child_pid, SIGTERM) == 0) {
             append_event(state, "type=signal_delivered signal=15");
-            result = write_all(client->fd, "ok\n", 3);
+            result = cubicle_write_all(client->fd, "ok\n", 3);
         } else {
             result = write_error_response(client->fd, "signal_failed");
         }
@@ -940,7 +838,7 @@ static int dispatch_control_request(control_client_t *client,
             if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
                 append_event(state, event);
             }
-            result = write_all(client->fd, "ok\n", 3);
+            result = cubicle_write_all(client->fd, "ok\n", 3);
         } else {
             result = write_error_response(client->fd, "signal_failed");
         }
@@ -1253,7 +1151,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 continue;
             }
 
-            if (write_all(pipes[i].output_fd, buffer, (size_t)read_result) < 0) {
+            if (cubicle_write_all(pipes[i].output_fd, buffer, (size_t)read_result) < 0) {
                 char message[256];
                 snprintf(message, sizeof(message), "failed writing %s: %s",
                          pipes[i].name, strerror(errno));
@@ -1262,7 +1160,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             long long start = *pipes[i].offset;
-            if (write_all(pipes[i].log_fd, buffer, (size_t)read_result) < 0) {
+            if (cubicle_write_all(pipes[i].log_fd, buffer, (size_t)read_result) < 0) {
                 char message[256];
                 snprintf(message, sizeof(message), "failed persisting %s: %s",
                          pipes[i].name, strerror(errno));

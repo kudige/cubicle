@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(cubicle_common
     src/common/log.c
     src/common/process.c
+    src/common/util.c
 )
 
 target_include_directories(cubicle_common PUBLIC include)
@@ -57,6 +58,20 @@ target_compile_options(cubicle-process-test PRIVATE
 )
 
 add_test(NAME cubicle-process-test COMMAND cubicle-process-test)
+
+add_executable(cubicle-util-test
+    tests/util_test.c
+)
+
+target_link_libraries(cubicle-util-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-util-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-util-test COMMAND cubicle-util-test)
 
 add_test(
     NAME cubicle-manager-registry-test
