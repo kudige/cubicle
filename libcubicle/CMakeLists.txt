@@ -36,4 +36,14 @@ if(BUILD_TESTING)
     )
     add_test(NAME libcubicle-unix-transport-test
              COMMAND libcubicle-unix-transport-test)
+
+    add_executable(libcubicle-public-headers-test
+        ../tests/public_headers_test.c
+    )
+    target_link_libraries(libcubicle-public-headers-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-public-headers-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-public-headers-test
+             COMMAND libcubicle-public-headers-test)
 endif()
