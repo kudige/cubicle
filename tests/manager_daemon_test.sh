@@ -30,12 +30,22 @@ workspace_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create 
 workspace_id=${workspace_output#workspace id=}
 workspace_id=${workspace_id%% name=*}
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+register_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
     --workspace "$workspace_id" \
     --friendly-name daemon-1 \
     --mode stream \
     --controller-id controller-1 \
-    --control-socket "$tmpdir/controller.sock" >/dev/null
+    --control-socket "$tmpdir/controller.sock")
+
+process_id=${register_output#process id=}
+process_id=${process_id%% workspace_id=*}
+
+mkdir -p "$state_dir/controllers/$process_id"
+cat >"$state_dir/controllers/$process_id/events.log" <<EOF
+seq=1 type=process_started controller_id=controller-1 pid=1 pgid=1 mode=stream
+seq=2 type=output stream=stdout start=0 length=6
+seq=3 type=process_exited status=exited exit_code=0
+EOF
 
 python3 - "$socket_path" <<'PY'
 import socket
@@ -46,7 +56,7 @@ server.bind(sys.argv[1])
 server.close()
 PY
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --control-socket "$socket_path" &
+"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -103,6 +113,19 @@ case "$status_response" in
         exit 1
         ;;
 esac
+
+for _ in $(seq 1 100); do
+    if [ -f "$state_dir/workspace-events.log" ] &&
+        grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"; then
+        break
+    fi
+    sleep 0.05
+done
+
+grep -q "^$workspace_id	$process_id	daemon-1	seq=1 type=process_started" "$state_dir/workspace-events.log"
+grep -q "^$workspace_id	$process_id	daemon-1	seq=2 type=output stream=stdout" "$state_dir/workspace-events.log"
+grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"
+grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
 
 unknown_response=$(send_manager_command unknown)
 if [ "$unknown_response" != "error unsupported" ]; then

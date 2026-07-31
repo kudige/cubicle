@@ -195,9 +195,11 @@ scripts. New records are flushed after each poll iteration.
 
 ```console
 cubicle-manager --state-dir DIR daemon
-cubicle-manager --state-dir DIR daemon --control-socket /path/to/manager.sock
+cubicle-manager --state-dir DIR daemon --control-socket /path/to/manager.sock --event-interval-ms 250
 ```
 
 Runs the initial persistent manager daemon in the foreground. The lifecycle
 socket currently supports `ping`, `status`, and `shutdown` as a narrow bootstrap
-surface for the transport-neutral API implementation.
+surface for the transport-neutral API implementation. While running, the daemon
+also owns workspace event aggregation and updates `workspace-events.log` and
+`cursors.tsv` periodically.

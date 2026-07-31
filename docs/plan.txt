@@ -178,12 +178,17 @@
   - Unix socket lifecycle supports ping, status, and shutdown
   - manager ID is persisted in manager state
   - stale manager socket paths are replaced safely
+- Hardened the persistent manager daemon:
+  - daemon uses a single-instance advisory lock
+  - daemon socket accept loop is nonblocking
+  - daemon owns periodic workspace event aggregation
+  - daemon advances workspace event cursors without requiring foreground poll
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
 1. Complete persistent manager daemon ownership.
-   - Own manager state mutation and event aggregation in the daemon.
+   - Move manager state mutation commands behind daemon request handling.
    - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
    - Move toward transactional storage behind the daemon authority.
 

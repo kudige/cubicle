@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] daemon [--control-socket PATH]\n"
+            "       %s [--state-dir dir] daemon [--control-socket PATH] [--event-interval-ms N]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
@@ -119,10 +120,20 @@ static int append_line(const manager_state_t *state, const char *file_name,
     return result;
 }
 
-static int lock_state(const manager_state_t *state)
+static int set_fd_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int lock_state_file(const manager_state_t *state, const char *file_name)
 {
     char path[PATH_MAX];
-    if (state_path(path, state, "manager.lock") < 0) {
+    if (state_path(path, state, file_name) < 0) {
         return -1;
     }
 
@@ -132,6 +143,31 @@ static int lock_state(const manager_state_t *state)
     }
 
     if (flock(fd, LOCK_EX) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static int lock_state(const manager_state_t *state)
+{
+    return lock_state_file(state, "manager.lock");
+}
+
+static int lock_daemon(const manager_state_t *state)
+{
+    char path[PATH_MAX];
+    if (state_path(path, state, "manager.daemon.lock") < 0) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
         close(fd);
         return -1;
     }
@@ -1110,18 +1146,10 @@ static int command_process_resolve(const manager_state_t *state, int argc,
     return 0;
 }
 
-static int command_events_poll(const manager_state_t *state, int argc, char **argv)
+static int poll_workspace_events(const manager_state_t *state,
+                                 const char *workspace,
+                                 FILE *output)
 {
-    const char *workspace = NULL;
-    for (int i = 0; i < argc; ++i) {
-        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
-            workspace = argv[++i];
-        } else {
-            fprintf(stderr, "Unknown events poll option: %s\n", argv[i]);
-            return 2;
-        }
-    }
-
     cubicle_workspace_record_t workspace_record;
     if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
@@ -1197,7 +1225,9 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
                 return 1;
             }
 
-            printf("%s", workspace_event);
+            if (output != NULL) {
+                fprintf(output, "%s", workspace_event);
+            }
             if (sequence > max_sequence) {
                 max_sequence = sequence;
             }
@@ -1225,6 +1255,21 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
 
     unlock_state(lock_fd);
     return 0;
+}
+
+static int command_events_poll(const manager_state_t *state, int argc, char **argv)
+{
+    const char *workspace = NULL;
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown events poll option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    return poll_workspace_events(state, workspace, stdout);
 }
 
 static int command_events_list(const manager_state_t *state, int argc, char **argv)
@@ -1394,33 +1439,64 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 static int command_daemon(const manager_state_t *state, int argc, char **argv)
 {
     const char *requested_socket = NULL;
+    int poll_interval_ms = 250;
 
     for (int i = 0; i < argc; ++i) {
         if (strcmp(argv[i], "--control-socket") == 0 && i + 1 < argc) {
             requested_socket = argv[++i];
+        } else if (strcmp(argv[i], "--event-interval-ms") == 0 && i + 1 < argc) {
+            poll_interval_ms = atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown daemon option: %s\n", argv[i]);
             return 2;
         }
     }
 
+    if (poll_interval_ms < 0) {
+        fprintf(stderr, "daemon requires nonnegative --event-interval-ms\n");
+        return 2;
+    }
+
+    int daemon_lock_fd = lock_daemon(state);
+    if (daemon_lock_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
     char socket_path[PATH_MAX];
     if (manager_socket_path(socket_path, state, requested_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(daemon_lock_fd);
         return 1;
     }
 
     int listen_fd = open_manager_socket(socket_path);
     if (listen_fd < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(daemon_lock_fd);
+        return 1;
+    }
+
+    if (set_fd_nonblocking(listen_fd) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        close(listen_fd);
+        unlink(socket_path);
+        unlock_state(daemon_lock_fd);
         return 1;
     }
 
     int result = 0;
     int shutdown_requested = 0;
     while (!shutdown_requested) {
-        int client_fd = accept(listen_fd, NULL, NULL);
-        if (client_fd < 0) {
+        if (poll_workspace_events(state, NULL, NULL) != 0) {
+            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            result = 1;
+            break;
+        }
+
+        struct pollfd daemon_fd = {.fd = listen_fd, .events = POLLIN};
+        int ready = poll(&daemon_fd, 1, poll_interval_ms);
+        if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -1429,15 +1505,35 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             break;
         }
 
-        if (handle_manager_client(state, client_fd, &shutdown_requested) < 0) {
-            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
-            result = 1;
+        if (ready == 0 || (daemon_fd.revents & POLLIN) == 0) {
+            continue;
         }
-        close(client_fd);
+
+        for (;;) {
+            int client_fd = accept(listen_fd, NULL, NULL);
+            if (client_fd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                result = 1;
+                break;
+            }
+
+            if (handle_manager_client(state, client_fd, &shutdown_requested) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                result = 1;
+            }
+            close(client_fd);
+        }
     }
 
     close(listen_fd);
     unlink(socket_path);
+    unlock_state(daemon_lock_fd);
     return result;
 }
 
