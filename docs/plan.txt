@@ -49,6 +49,12 @@
   - nonblocking attachment writes fail closed
   - slow output clients are detached instead of silently losing bytes
   - stdin clients are detached if their bytes cannot be forwarded
+- Documented the current local controller protocol:
+  - command syntax
+  - response schemas
+  - stream read and attach framing
+  - current error codes
+  - primitive event shapes
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -63,8 +69,6 @@
 ## Next
 
 1. Finish stream protocol semantics.
-   - Decide the final framing format for binary stream reads and attach catch-up.
-   - Define stable response schemas and error codes.
    - Decide stdin EOF policy for stream processes with no stdin attachment.
 
 2. Harden controller state.

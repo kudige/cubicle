@@ -84,4 +84,7 @@ Attached clients are fail-closed on backpressure: if a nonblocking attachment
 cannot accept or forward bytes, the controller detaches that client instead of
 silently dropping data.
 
+See `docs/protocol.txt` for the current command, response, stream framing, and
+event formats.
+
 TTY modes and manager/controller routing are not implemented yet.
