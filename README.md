@@ -36,6 +36,45 @@ The CLI names are exploratory. The architecture and protocol are the first imple
 ```console
 cmake -S . -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-This initial repository contains buildable manager and controller placeholders plus the first architecture notes.
+The manager is still a placeholder. The controller can launch stream-mode
+processes, mirror stdout/stderr, persist channel logs and primitive events,
+serve a local control socket, and return the child exit status:
+
+```console
+./build/cubicle-controller \
+  --state-dir /tmp/cubicle-run \
+  --control-socket /tmp/cubicle-run.sock \
+  --mode stream -- make
+```
+
+Pass `--daemon` to detach the controller before it launches the managed
+process. In daemon mode, controller stdin/stdout/stderr are redirected to
+`/dev/null`; use the control socket and persisted logs to interact with it:
+
+```console
+./build/cubicle-controller \
+  --daemon \
+  --state-dir /tmp/cubicle-run \
+  --control-socket /tmp/cubicle-run.sock \
+  --mode stream -- make
+```
+
+The initial control socket protocol accepts one command per connection:
+
+```text
+status
+read stdout 0 4096
+read stderr 0 4096
+attach stdout 0
+attach stderr 0
+terminate
+signal 15
+```
+
+`attach` sends a header with the persisted catch-up length, then streams raw
+future bytes until the process exits or the client disconnects.
+
+TTY modes, stdin attachments, and manager/controller routing are not implemented yet.

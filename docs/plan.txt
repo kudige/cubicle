@@ -1,0 +1,110 @@
+# Cubicle implementation plan
+
+## Completed
+
+- Documented the initial architecture in docs/architecture.md.
+- Added buildable manager and controller binaries.
+- Added shared process mode and state types.
+- Implemented process mode/state name helpers.
+- Added CTest-based test wiring.
+- Added a process helper unit test.
+- Implemented controller stream mode:
+  - fork/exec command launch
+  - independent child process group
+  - stdin/stdout/stderr pipe wiring
+  - EOF stdin until attachments exist
+  - stdout/stderr mirroring to the invoking terminal
+  - child exit status propagation
+- Added initial durable controller state for stream mode:
+  - metadata
+  - stdout.log
+  - stderr.log
+  - sequence-numbered events.log
+- Added a controller stream integration test covering output capture, event
+  recording, metadata, and child exit status.
+- Added a controller-local control socket for stream mode:
+  - status queries
+  - stdout/stderr range reads from persisted logs
+  - terminate requests
+  - signal requests
+  - signal-delivered primitive events
+- Hardened the controller-local control socket:
+  - nonblocking listener
+  - nonblocking request reads
+  - incomplete client requests do not block the controller
+  - client write failures do not bring down the controller
+  - SIGPIPE is ignored so socket disconnects are ordinary write failures
+- Added basic stream attachment semantics:
+  - attach stdout/stderr from a persisted offset
+  - catch up from persisted logs
+  - live follow newly captured output
+  - close attachments when the process exits
+  - client attached/detached primitive events
+- Added controller daemon mode:
+  - --daemon option
+  - detach before launching the managed process
+  - redirect controller stdin/stdout/stderr to /dev/null
+  - keep interaction available through the control socket and persisted logs
+- Added a controller control-socket integration test.
+- Added a controller attachment integration test.
+- Added a controller daemon integration test.
+- Updated README.md with current build, test, and controller usage notes.
+
+## Next
+
+1. Finish stream attachment semantics.
+   - Add stdin attachment now that the controller has an event loop.
+   - Decide how attached-client backpressure should be handled.
+   - Decide the final framing format for binary stream reads and attach catch-up.
+   - Define stable response schemas and error codes.
+
+2. Harden controller state.
+   - Choose stable controller IDs instead of pid-derived default paths.
+   - Use append-safe event writes.
+   - Add restart/recovery read paths for metadata and event cursors.
+   - Define event and metadata formats more explicitly.
+
+3. Implement the first manager registry slice.
+   - Workspace records.
+   - Stable process IDs.
+   - Workspace-local friendly names.
+   - Controller launch and discovery.
+   - Mapping from process IDs to controller socket locations.
+
+4. Add manager/controller routing.
+   - Start stream processes through the manager.
+   - Resolve friendly names and process IDs.
+   - Return direct controller attachment details.
+   - Keep terminal/output bytes out of the manager.
+
+5. Add workspace event aggregation.
+   - Consume controller primitive events.
+   - Maintain per-controller cursors.
+   - Produce ordered workspace events.
+   - Support event listing and follow behavior.
+
+6. Implement TTY mode.
+   - Allocate PTY.
+   - Wire stdin/stdout/stderr through PTY.
+   - Handle terminal resize.
+   - Support observer-mode output attachments.
+
+7. Implement TTY with captured stderr.
+   - Wire stdin/stdout through PTY.
+   - Capture stderr through a separate pipe.
+   - Persist and expose stderr independently.
+
+8. Add provisional user-facing CLI commands.
+   - work
+   - dev
+   - tty
+   - attach
+   - stop
+
+9. Expand tests.
+    - Controller signal/termination tests.
+    - Large output tests.
+    - Interleaved stdout/stderr event tests.
+    - Manager registry tests.
+    - Restart/recovery tests.
+    - PTY behavior tests when PTY support lands.
