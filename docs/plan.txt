@@ -78,10 +78,18 @@
   - detach before launching the managed process
   - redirect controller stdin/stdout/stderr to /dev/null
   - keep interaction available through the control socket and persisted logs
+- Added the first manager registry slice:
+  - workspace records
+  - generated stable workspace IDs
+  - generated stable process IDs
+  - workspace-local friendly names in process records
+  - process/controller mapping records
+  - process list filtering by workspace name or ID
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
 - Added a controller daemon integration test.
+- Added a manager registry integration test.
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
@@ -89,44 +97,38 @@
 1. Finish stream protocol semantics.
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
-2. Implement the first manager registry slice.
-   - Workspace records.
-   - Stable process IDs.
-   - Workspace-local friendly names.
+2. Add manager/controller routing.
    - Controller launch and discovery.
-   - Mapping from process IDs to controller socket locations.
-
-3. Add manager/controller routing.
    - Start stream processes through the manager.
    - Resolve friendly names and process IDs.
    - Return direct controller attachment details.
    - Keep terminal/output bytes out of the manager.
 
-4. Add workspace event aggregation.
+3. Add workspace event aggregation.
    - Consume controller primitive events.
    - Maintain per-controller cursors.
    - Produce ordered workspace events.
    - Support event listing and follow behavior.
 
-5. Implement TTY mode.
+4. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-6. Implement TTY with captured stderr.
+5. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.
 
-7. Add provisional user-facing CLI commands.
+6. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-8. Expand tests.
+7. Expand tests.
     - Controller signal/termination tests.
     - Large output tests.
     - Interleaved stdout/stderr event tests.

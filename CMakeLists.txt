@@ -59,6 +59,13 @@ target_compile_options(cubicle-process-test PRIVATE
 add_test(NAME cubicle-process-test COMMAND cubicle-process-test)
 
 add_test(
+    NAME cubicle-manager-registry-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_registry_test.sh
+)
+
+add_test(
     NAME cubicle-controller-stream-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

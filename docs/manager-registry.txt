@@ -1,0 +1,82 @@
+# Cubicle manager registry
+
+The current manager implementation is a foreground CLI for persistent registry
+operations. It does not launch controllers yet and does not run an event loop.
+
+## State directory
+
+The default state directory is:
+
+```text
+.cubicle/manager
+```
+
+Use `--state-dir DIR` to override it.
+
+## Files
+
+### workspaces.tsv
+
+```text
+workspace_id<TAB>workspace_name
+```
+
+### processes.tsv
+
+```text
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+```
+
+The current process state written by `process register` is `running`.
+
+## Commands
+
+### workspace create
+
+```console
+cubicle-manager --state-dir DIR workspace create "Project A"
+```
+
+Creates a workspace record with a generated stable workspace ID.
+
+### workspace list
+
+```console
+cubicle-manager --state-dir DIR workspace list
+```
+
+Prints:
+
+```text
+workspace_id<TAB>workspace_name
+```
+
+### process register
+
+```console
+cubicle-manager --state-dir DIR process register \
+  --workspace "Project A" \
+  --friendly-name make-1 \
+  --mode stream \
+  --controller-id CONTROLLER_ID \
+  --control-socket /path/to/control.sock
+```
+
+Registers a process/controller mapping. `--workspace` may be either a workspace
+name or workspace ID. `--process-id ID` may be supplied; otherwise the manager
+generates a stable process ID.
+
+Only `stream` mode can be registered currently.
+
+### process list
+
+```console
+cubicle-manager --state-dir DIR process list
+cubicle-manager --state-dir DIR process list --workspace "Project A"
+```
+
+Prints:
+
+```text
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+```

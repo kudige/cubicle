@@ -39,9 +39,24 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The manager is still a placeholder. The controller can launch stream-mode
-processes, mirror stdout/stderr, persist channel logs and primitive events,
-serve a local control socket, and return the child exit status:
+The manager currently provides a persistent registry CLI for workspaces and
+process/controller records:
+
+```console
+./build/cubicle-manager --state-dir /tmp/cubicle-manager workspace create "Project A"
+./build/cubicle-manager --state-dir /tmp/cubicle-manager workspace list
+./build/cubicle-manager --state-dir /tmp/cubicle-manager process register \
+  --workspace "Project A" \
+  --friendly-name make-1 \
+  --mode stream \
+  --controller-id controller-1 \
+  --control-socket /tmp/cubicle-run.sock
+./build/cubicle-manager --state-dir /tmp/cubicle-manager process list --workspace "Project A"
+```
+
+The controller can launch stream-mode processes, mirror stdout/stderr, persist
+channel logs and primitive events, serve a local control socket, and return the
+child exit status:
 
 ```console
 ./build/cubicle-controller \
