@@ -65,6 +65,26 @@ def get_controller_mode(socket_path):
     return mode
 
 
+def parse_key_value_response(response):
+    fields = {}
+    for field in response.decode("utf-8", errors="replace").split():
+        key, separator, value = field.partition("=")
+        if separator == "=":
+            fields[key] = value
+    return fields
+
+
+def get_stdout_offset(socket_path):
+    response = send_request(socket_path, "status")
+    if not response.startswith(b"ok "):
+        raise RuntimeError(response.decode("utf-8", errors="replace").strip())
+    fields = parse_key_value_response(response)
+    offset = fields.get("stdout_offset")
+    if offset is None:
+        raise RuntimeError("status did not include stdout_offset")
+    return int(offset)
+
+
 def get_terminal_size():
     if not sys.stdout.isatty():
         return None
@@ -207,6 +227,9 @@ def attach_tty(socket_path, start):
     if mode != "tty":
         raise RuntimeError(f"attach tty requires mode=tty, got mode={mode}")
 
+    if start is None:
+        start = get_stdout_offset(socket_path)
+
     sync_terminal_size(socket_path)
     last_size_sync = time.monotonic()
 
@@ -330,7 +353,7 @@ def main():
     elif args.command == "attach":
         if args.stream == "tty":
             try:
-                attach_tty(args.socket_path, args.start or 0)
+                attach_tty(args.socket_path, args.start)
             except RuntimeError as error:
                 parser.error(str(error))
             return

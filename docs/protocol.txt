@@ -175,8 +175,12 @@ attach tty [START]
 
 This is a client-side composition for TTY controllers. It verifies `mode=tty`
 from metadata, sends the current terminal size with `resize`, attaches `out`
-from `START` or `0`, attaches `stdin`, puts the local terminal in raw mode, and
-forwards bytes bidirectionally until the output attachment closes.
+from `START` or the current output offset, attaches `stdin`, puts the local
+terminal in raw mode, and forwards bytes bidirectionally until the output
+attachment closes.
+
+Explicit catch-up attachment requests fail with `error read_too_large` when the
+requested retained output is larger than the current single-response limit.
 
 ### resize
 

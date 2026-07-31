@@ -467,14 +467,24 @@ static int send_attach_catchup(control_client_t *client,
 {
     long long available = stream_available_offset(state, stream);
     if (available < 0) {
-        return enqueue_error_response(client, "unknown_stream");
+        return enqueue_error_response(client, "unknown_stream") < 0
+                   ? -1
+                   : 1;
     }
 
     if (start < 0 || start > available) {
-        return enqueue_error_response(client, "invalid_attach_start");
+        return enqueue_error_response(client, "invalid_attach_start") < 0
+                   ? -1
+                   : 1;
     }
 
     long long length = available - start;
+    if (length > 65536) {
+        return enqueue_error_response(client, "read_too_large") < 0
+                   ? -1
+                   : 1;
+    }
+
     char header[96];
     int header_length = snprintf(header, sizeof(header),
                                  "ok attached stream=%s start=%lld length=%lld\n",
@@ -597,6 +607,8 @@ static int dispatch_control_request(control_client_t *client,
                         append_event(state, "type=client_attached stream=stderr");
                     }
                     return 0;
+                } else if (result > 0) {
+                    result = 0;
                 }
             }
         } else {

@@ -3,6 +3,7 @@ import fcntl
 import os
 import pty
 import select
+import socket
 import struct
 import subprocess
 import sys
@@ -46,6 +47,44 @@ def wait_for_socket_and_output(socket_path, stdout_log):
     raise AssertionError("controller did not become ready")
 
 
+def wait_for_log_size(socket_path, stdout_log, size):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if os.path.exists(socket_path) and os.path.exists(stdout_log):
+            if os.path.getsize(stdout_log) >= size:
+                return
+        time.sleep(0.05)
+    raise AssertionError("controller did not produce the expected output size")
+
+
+def wait_for_event(events_log, needle):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if os.path.exists(events_log):
+            with open(events_log, "rb") as log_file:
+                if needle.encode() in log_file.read():
+                    return
+        time.sleep(0.05)
+    raise AssertionError(f"missing event: {needle}")
+
+
+def send_socket_command(socket_path, command):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(socket_path)
+        client.sendall(command.encode() + b"\n")
+        client.shutdown(socket.SHUT_WR)
+        response = bytearray()
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+        return bytes(response)
+    finally:
+        client.close()
+
+
 def run_controller(controller, state_dir, socket_path, command, controller_stderr):
     with open(os.devnull, "wb") as devnull, open(controller_stderr, "wb") as stderr_file:
         return subprocess.Popen(
@@ -79,6 +118,7 @@ def main():
         state_dir = os.path.join(tmpdir, "state")
         socket_path = os.path.join(tmpdir, "control.sock")
         stdout_log = os.path.join(state_dir, "stdout.log")
+        events_log = os.path.join(state_dir, "events.log")
         controller_stderr = os.path.join(tmpdir, "controller-stderr")
 
         command = """
@@ -110,6 +150,7 @@ print(f"typed:{line}", flush=True)
                     socket_path,
                     "attach",
                     "tty",
+                    "0",
                 ],
                 stdin=slave_fd,
                 stdout=slave_fd,
@@ -180,6 +221,79 @@ print(f"typed:{line}", flush=True)
         state_dir = os.path.join(tmpdir, "state")
         socket_path = os.path.join(tmpdir, "control.sock")
         stdout_log = os.path.join(state_dir, "stdout.log")
+        events_log = os.path.join(state_dir, "events.log")
+        controller_stderr = os.path.join(tmpdir, "controller-stderr")
+
+        command = """
+import sys
+
+sys.stdout.buffer.write(b"x" * 70000)
+sys.stdout.flush()
+line = sys.stdin.buffer.readline().decode().rstrip("\\n")
+print(f"typed:{line}", flush=True)
+"""
+        controller_process = run_controller(
+            controller, state_dir, socket_path, command, controller_stderr
+        )
+
+        master_fd, slave_fd = pty.openpty()
+        set_window_size(master_fd, 44, 132)
+
+        try:
+            wait_for_log_size(socket_path, stdout_log, 70000)
+
+            response = send_socket_command(socket_path, "attach out 0")
+            if response != b"error read_too_large\n":
+                raise AssertionError(f"unexpected oversized attach response: {response!r}")
+
+            client_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    control_client,
+                    socket_path,
+                    "attach",
+                    "tty",
+                ],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+            )
+            os.close(slave_fd)
+            slave_fd = -1
+
+            wait_for_event(events_log, "type=client_attached stream=stdin")
+            os.write(master_fd, b"live default attach\n")
+            output = read_until(master_fd, "typed:live default attach",
+                                time.monotonic() + 5)
+            if "typed:live default attach" not in output:
+                raise AssertionError(f"missing live default attach output: {output!r}")
+
+            controller_status = controller_process.wait(timeout=5)
+            if controller_status != 0:
+                with open(controller_stderr, "rb") as stderr_file:
+                    stderr = stderr_file.read().decode(errors="replace")
+                raise AssertionError(f"controller exited {controller_status}: {stderr}")
+
+            client_status = client_process.wait(timeout=5)
+            if client_status != 0:
+                stderr = client_process.stderr.read().decode(errors="replace")
+                raise AssertionError(f"client exited {client_status}: {stderr}")
+        finally:
+            if slave_fd >= 0:
+                os.close(slave_fd)
+            os.close(master_fd)
+            if controller_process.poll() is None:
+                controller_process.terminate()
+                controller_process.wait(timeout=5)
+            if "client_process" in locals() and client_process.poll() is None:
+                client_process.terminate()
+                client_process.wait(timeout=5)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_dir = os.path.join(tmpdir, "state")
+        socket_path = os.path.join(tmpdir, "control.sock")
+        stdout_log = os.path.join(state_dir, "stdout.log")
         controller_stderr = os.path.join(tmpdir, "controller-stderr")
 
         command = """
@@ -210,6 +324,7 @@ print("bytes:" + data.hex(), flush=True)
                     socket_path,
                     "attach",
                     "tty",
+                    "0",
                 ],
                 stdin=slave_fd,
                 stdout=slave_fd,
