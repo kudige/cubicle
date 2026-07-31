@@ -156,43 +156,43 @@
   - queue bounded per-client control responses
   - flush queued responses from the stream poll loop with POLLOUT
   - cover slow large-read clients while other control requests continue
+- Added opt-in controller completed-state retention:
+  - --completed-retention-ms N keeps the control socket available after exit
+  - completed status includes the child result and final stream offsets
+  - read-only status, metadata, events, and stream reads remain available
+  - interactive commands fail with process_completed
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
-1. Add completed-state retention.
-   - Keep a controller available briefly after child exit and output drain.
-   - Allow read-only status, metadata, events, and stream read commands.
-   - Reject stdin, signal, terminate, and new interactive actions after completion.
-
-2. Improve manager event loop.
+1. Improve manager event loop.
    - Replace bounded follow polling with a long-running manager event loop.
 
-3. Harden manager persistence.
+2. Harden manager persistence.
    - Replace direct TSV mutation with a concurrency-safe manager authority.
    - Prefer a persistent manager daemon with transactional storage.
    - Enforce uniqueness for workspace names, process IDs, and workspace-local
      friendly names.
 
-4. Implement TTY mode.
+3. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-5. Implement TTY with captured stderr.
+4. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.
 
-6. Add provisional user-facing CLI commands.
+5. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-7. Expand tests.
+6. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.

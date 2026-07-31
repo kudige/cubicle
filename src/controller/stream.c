@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int create_pipe(int pipe_fds[2], const char *name)
@@ -221,7 +222,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
-                                            child_stdin_fd) < 0) {
+                                            child_stdin_fd, 0,
+                                            *child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading control request");
                 return -1;
@@ -312,6 +314,147 @@ static int stream_event_loop(stream_pipe_t pipes[2],
     return 0;
 }
 
+static long long monotonic_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+        return -1;
+    }
+
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static int completed_retention_loop(controller_state_t *state,
+                                    int control_fd,
+                                    pid_t child_pid,
+                                    int child_result,
+                                    int retention_ms)
+{
+    if (retention_ms <= 0) {
+        return 0;
+    }
+
+    long long start_ms = monotonic_milliseconds();
+    if (start_ms < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        return -1;
+    }
+
+    control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS];
+    initialize_control_clients(clients);
+
+    for (;;) {
+        long long now_ms = monotonic_milliseconds();
+        if (now_ms < 0) {
+            cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+            close_all_control_clients(clients, state);
+            return -1;
+        }
+
+        long long remaining_ms = retention_ms - (now_ms - start_ms);
+        if (remaining_ms <= 0) {
+            break;
+        }
+
+        struct pollfd poll_fds[1 + CUBICLE_MAX_CONTROL_CLIENTS];
+        nfds_t poll_count = 0;
+        nfds_t control_index = (nfds_t)-1;
+        nfds_t client_indexes[CUBICLE_MAX_CONTROL_CLIENTS];
+
+        for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
+            client_indexes[i] = (nfds_t)-1;
+        }
+
+        control_index = poll_count;
+        poll_fds[poll_count].fd = control_fd;
+        poll_fds[poll_count].events = POLLIN;
+        poll_fds[poll_count].revents = 0;
+        ++poll_count;
+
+        for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
+            if (clients[i].kind == CONTROL_CLIENT_EMPTY) {
+                continue;
+            }
+
+            client_indexes[i] = poll_count;
+            poll_fds[poll_count].fd = clients[i].fd;
+            poll_fds[poll_count].events = POLLHUP | POLLERR;
+            if (clients[i].response_offset < clients[i].response_length) {
+                poll_fds[poll_count].events |= POLLOUT;
+            }
+            if (clients[i].kind == CONTROL_CLIENT_READING &&
+                clients[i].response_offset == clients[i].response_length) {
+                poll_fds[poll_count].events |= POLLIN;
+            }
+            poll_fds[poll_count].revents = 0;
+            ++poll_count;
+        }
+
+        int timeout = remaining_ms > 100 ? 100 : (int)remaining_ms;
+        int poll_result = poll(poll_fds, poll_count, timeout);
+        if (poll_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+            close_all_control_clients(clients, state);
+            return -1;
+        }
+
+        if (poll_result == 0) {
+            continue;
+        }
+
+        if ((poll_fds[control_index].revents & POLLIN) != 0 &&
+            accept_control_clients(control_fd, clients, state) < 0) {
+            cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                        "failed accepting completed control client");
+            close_all_control_clients(clients, state);
+            return -1;
+        }
+
+        for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
+            if (clients[i].kind == CONTROL_CLIENT_EMPTY ||
+                client_indexes[i] == (nfds_t)-1) {
+                continue;
+            }
+
+            short revents = poll_fds[client_indexes[i]].revents;
+            if ((revents & POLLOUT) != 0 &&
+                flush_control_client_response(&clients[i], state) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed flushing completed control response");
+                close_all_control_clients(clients, state);
+                return -1;
+            }
+
+            if (clients[i].kind == CONTROL_CLIENT_EMPTY) {
+                continue;
+            }
+
+            if (clients[i].kind == CONTROL_CLIENT_READING &&
+                (revents & POLLIN) != 0 &&
+                read_control_client_request(&clients[i], state, child_pid, -1,
+                                            1, child_result) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed reading completed control request");
+                close_all_control_clients(clients, state);
+                return -1;
+            }
+
+            if (clients[i].kind != CONTROL_CLIENT_EMPTY &&
+                (revents & (POLLHUP | POLLERR)) != 0 &&
+                clients[i].response_offset == clients[i].response_length) {
+                close_control_client(&clients[i], state);
+            }
+        }
+    }
+
+    close_all_control_clients(clients, state);
+    return 0;
+}
+
 static int wait_for_child(pid_t child_pid, controller_state_t *state,
                           int *child_reaped, int *child_result)
 {
@@ -340,8 +483,9 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state,
 }
 
 int run_stream(char **command, const char *state_dir,
-                      const char *control_socket,
-                      stdin_policy_t stdin_policy)
+               const char *control_socket,
+               stdin_policy_t stdin_policy,
+               int completed_retention_ms)
 {
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
@@ -464,13 +608,19 @@ int run_stream(char **command, const char *state_dir,
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
     close_if_open(&stdin_pipe[1]);
-    close_if_open(&control_fd);
-    unlink(control_socket_path);
 
     child_result = wait_for_child(child_pid, &state, &child_reaped,
                                   &child_result);
+    int retention_result = 0;
+    if (output_result == 0) {
+        retention_result = completed_retention_loop(&state, control_fd,
+                                                    child_pid, child_result,
+                                                    completed_retention_ms);
+    }
+    close_if_open(&control_fd);
+    unlink(control_socket_path);
     close_controller_state(&state);
-    if (output_result < 0 && child_result == 0) {
+    if ((output_result < 0 || retention_result < 0) && child_result == 0) {
         return 1;
     }
 

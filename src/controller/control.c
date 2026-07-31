@@ -489,16 +489,26 @@ static int send_attach_catchup(control_client_t *client,
 static int dispatch_control_request(control_client_t *client,
                                     controller_state_t *state,
                                     pid_t child_pid,
-                                    int child_stdin_fd)
+                                    int child_stdin_fd,
+                                    int process_completed,
+                                    int child_result)
 {
     char *request = client->request;
     int result = 0;
     if (strcmp(request, "status") == 0) {
         char response[256];
-        int length = snprintf(response, sizeof(response),
+        int length;
+        if (process_completed) {
+            length = snprintf(response, sizeof(response),
+                              "ok state=completed pid=%ld pgid=%ld result=%d stdout_offset=%lld stderr_offset=%lld\n",
+                              (long)child_pid, (long)child_pid, child_result,
+                              state->stdout_offset, state->stderr_offset);
+        } else {
+            length = snprintf(response, sizeof(response),
                               "ok state=running pid=%ld pgid=%ld stdout_offset=%lld stderr_offset=%lld\n",
                               (long)child_pid, (long)child_pid,
                               state->stdout_offset, state->stderr_offset);
+        }
         if (length < 0 || (size_t)length >= sizeof(response)) {
             result = -1;
         } else {
@@ -527,7 +537,9 @@ static int dispatch_control_request(control_client_t *client,
         }
     } else if (strcmp(request, "attach stdin") == 0 ||
                strcmp(request, "attach in") == 0) {
-        if (child_stdin_fd < 0) {
+        if (process_completed) {
+            result = enqueue_error_response(client, "process_completed");
+        } else if (child_stdin_fd < 0) {
             result = enqueue_error_response(client, "stdin_closed");
         } else {
             client->kind = CONTROL_CLIENT_ATTACHING_STDIN;
@@ -536,7 +548,9 @@ static int dispatch_control_request(control_client_t *client,
     } else if (strncmp(request, "attach ", 7) == 0) {
         char stream[16];
         long long start = 0;
-        if (sscanf(request + 7, "%15s %lld", stream, &start) == 2) {
+        if (process_completed) {
+            result = enqueue_error_response(client, "process_completed");
+        } else if (sscanf(request + 7, "%15s %lld", stream, &start) == 2) {
             const char *file_name = stream_file_name(stream);
             if (file_name == NULL) {
                 result = enqueue_error_response(client, "unknown_stream");
@@ -557,7 +571,9 @@ static int dispatch_control_request(control_client_t *client,
             result = enqueue_error_response(client, "bad_attach_command");
         }
     } else if (strcmp(request, "terminate") == 0) {
-        if (kill(-child_pid, SIGTERM) == 0) {
+        if (process_completed) {
+            result = enqueue_error_response(client, "process_completed");
+        } else if (kill(-child_pid, SIGTERM) == 0) {
             append_event(state, "type=signal_delivered signal=15");
             client->kind = CONTROL_CLIENT_RESPONDING;
             result = enqueue_response(client, "ok\n", 3);
@@ -566,7 +582,9 @@ static int dispatch_control_request(control_client_t *client,
         }
     } else if (strncmp(request, "signal ", 7) == 0) {
         int signal_number = 0;
-        if (sscanf(request + 7, "%d", &signal_number) != 1 ||
+        if (process_completed) {
+            result = enqueue_error_response(client, "process_completed");
+        } else if (sscanf(request + 7, "%d", &signal_number) != 1 ||
             signal_number <= 0 || signal_number >= CUBICLE_MAX_SIGNAL_NUMBER) {
             result = enqueue_error_response(client, "bad_signal");
         } else if (kill(-child_pid, signal_number) == 0) {
@@ -596,7 +614,9 @@ static int dispatch_control_request(control_client_t *client,
 static int finish_control_request(control_client_t *client,
                                   controller_state_t *state,
                                   pid_t child_pid,
-                                  int child_stdin_fd)
+                                  int child_stdin_fd,
+                                  int process_completed,
+                                  int child_result)
 {
     if (client->request_length > 0 &&
         client->request[client->request_length - 1] == '\r') {
@@ -604,7 +624,8 @@ static int finish_control_request(control_client_t *client,
     }
 
     client->request[client->request_length] = '\0';
-    dispatch_control_request(client, state, child_pid, child_stdin_fd);
+    dispatch_control_request(client, state, child_pid, child_stdin_fd,
+                             process_completed, child_result);
     return 0;
 }
 
@@ -695,7 +716,9 @@ int accept_control_clients(int listen_fd,
 int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
-                                int child_stdin_fd)
+                                int child_stdin_fd,
+                                int process_completed,
+                                int child_result)
 {
     for (;;) {
         char buffer[128];
@@ -721,13 +744,15 @@ int read_control_client_request(control_client_t *client,
 
             client->request[client->request_length] = '\0';
             return finish_control_request(client, state, child_pid,
-                                          child_stdin_fd);
+                                          child_stdin_fd, process_completed,
+                                          child_result);
         }
 
         for (ssize_t i = 0; i < result; ++i) {
             if (buffer[i] == '\n') {
                 return finish_control_request(client, state, child_pid,
-                                              child_stdin_fd);
+                                              child_stdin_fd, process_completed,
+                                              child_result);
             }
 
             if (buffer[i] == '\0') {

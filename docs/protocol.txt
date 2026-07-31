@@ -48,7 +48,11 @@ Response:
 
 ```text
 ok state=running pid=PID pgid=PGID stdout_offset=N stderr_offset=N
+ok state=completed pid=PID pgid=PGID result=N stdout_offset=N stderr_offset=N
 ```
+
+The completed form is available only while the controller is in its configured
+completed retention window.
 
 ### read
 
@@ -206,6 +210,7 @@ Current error codes:
 - `invalid_range`
 - `open_failed`
 - `range_past_end`
+- `process_completed`
 - `read_too_large`
 - `request_too_long`
 - `signal_failed`

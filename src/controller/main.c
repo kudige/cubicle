@@ -8,13 +8,14 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|tty-captured-stderr -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|tty-captured-stderr -- command [args...]\n",
             program);
 }
 
@@ -98,6 +99,20 @@ static int parse_mode(const char *name, cubicle_process_mode_t *mode)
     return -1;
 }
 
+static int parse_nonnegative_int(const char *value, int *number)
+{
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed < 0 || parsed > 2147483647L) {
+        return -1;
+    }
+
+    *number = (int)parsed;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -107,6 +122,7 @@ int main(int argc, char **argv)
     const char *control_socket = NULL;
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
+    int completed_retention_ms = 0;
     int command_index = -1;
 
     for (int i = 1; i < argc; ++i) {
@@ -117,6 +133,14 @@ int main(int argc, char **argv)
 
         if (strcmp(argv[i], "--daemon") == 0) {
             daemon = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--completed-retention-ms") == 0 && i + 1 < argc) {
+            if (parse_nonnegative_int(argv[++i], &completed_retention_ms) < 0) {
+                fprintf(stderr, "Invalid completed retention: %s\n", argv[i]);
+                return 2;
+            }
             continue;
         }
 
@@ -172,5 +196,5 @@ int main(int argc, char **argv)
     }
 
     return run_stream(&argv[command_index], state_dir, control_socket,
-                      stdin_policy);
+                      stdin_policy, completed_retention_ms);
 }

@@ -90,7 +90,9 @@ int accept_control_clients(int listen_fd,
 int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
-                                int child_stdin_fd);
+                                int child_stdin_fd,
+                                int process_completed,
+                                int child_result);
 int flush_control_client_response(control_client_t *client,
                                   controller_state_t *state);
 void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
@@ -104,6 +106,7 @@ int forward_attached_stdin(control_client_t *client,
 
 int run_stream(char **command, const char *state_dir,
                const char *control_socket,
-               stdin_policy_t stdin_policy);
+               stdin_policy_t stdin_policy,
+               int completed_retention_ms);
 
 #endif
