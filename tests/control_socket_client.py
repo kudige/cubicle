@@ -78,6 +78,12 @@ def resize_controller(socket_path, rows, columns):
         raise RuntimeError(response.decode("utf-8", errors="replace").strip())
 
 
+def sync_terminal_size(socket_path):
+    terminal_size = get_terminal_size()
+    if terminal_size is not None:
+        resize_controller(socket_path, terminal_size[0], terminal_size[1])
+
+
 @contextlib.contextmanager
 def maybe_raw_terminal(enabled):
     if not enabled or not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -189,9 +195,7 @@ def attach_tty(socket_path, start):
     if mode != "tty":
         raise RuntimeError(f"attach tty requires mode=tty, got mode={mode}")
 
-    terminal_size = get_terminal_size()
-    if terminal_size is not None:
-        resize_controller(socket_path, terminal_size[0], terminal_size[1])
+    sync_terminal_size(socket_path)
 
     output_client = None
     input_client = None
@@ -219,10 +223,7 @@ def attach_tty(socket_path, start):
             while True:
                 if resize_pending:
                     resize_pending = False
-                    terminal_size = get_terminal_size()
-                    if terminal_size is not None:
-                        resize_controller(socket_path, terminal_size[0],
-                                          terminal_size[1])
+                    sync_terminal_size(socket_path)
 
                 read_fds = [output_client]
                 if stdin_open:
@@ -240,6 +241,7 @@ def attach_tty(socket_path, start):
                         with contextlib.suppress(OSError):
                             input_client.shutdown(socket.SHUT_WR)
                     else:
+                        sync_terminal_size(socket_path)
                         input_client.sendall(chunk)
     finally:
         if previous_winch is not None:

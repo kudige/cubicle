@@ -111,6 +111,16 @@ def main():
             if "ready" not in output:
                 raise AssertionError(f"missing attach catch-up output: {output!r}")
 
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    control_client,
+                    socket_path,
+                    "resize",
+                    "20",
+                    "60",
+                ]
+            )
             os.write(master_fd, b"hello from attach tty\n")
             output += read_until(master_fd, "typed:hello from attach tty",
                                  time.monotonic() + 5)
@@ -134,6 +144,8 @@ def main():
                 events = events_file.read().decode(errors="replace")
             if "type=terminal_resized rows=44 columns=132" not in events:
                 raise AssertionError(f"missing resize event: {events!r}")
+            if "type=terminal_resized rows=20 columns=60" not in events:
+                raise AssertionError(f"missing intervening resize event: {events!r}")
             if "type=client_attached stream=stdout" not in events:
                 raise AssertionError(f"missing stdout attach event: {events!r}")
             if "type=client_attached stream=stdin" not in events:
