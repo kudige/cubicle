@@ -72,6 +72,7 @@
   - metadata command returns raw metadata through the control socket
   - events after SEQUENCE LIMIT returns primitive events after a cursor
   - Python control socket client supports metadata and events-after
+- Defined current event and metadata formats in docs/protocol.txt.
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -88,47 +89,44 @@
 1. Finish stream protocol semantics.
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
-2. Harden controller state.
-   - Define event and metadata formats more explicitly.
-
-3. Implement the first manager registry slice.
+2. Implement the first manager registry slice.
    - Workspace records.
    - Stable process IDs.
    - Workspace-local friendly names.
    - Controller launch and discovery.
    - Mapping from process IDs to controller socket locations.
 
-4. Add manager/controller routing.
+3. Add manager/controller routing.
    - Start stream processes through the manager.
    - Resolve friendly names and process IDs.
    - Return direct controller attachment details.
    - Keep terminal/output bytes out of the manager.
 
-5. Add workspace event aggregation.
+4. Add workspace event aggregation.
    - Consume controller primitive events.
    - Maintain per-controller cursors.
    - Produce ordered workspace events.
    - Support event listing and follow behavior.
 
-6. Implement TTY mode.
+5. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-7. Implement TTY with captured stderr.
+6. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.
 
-8. Add provisional user-facing CLI commands.
+7. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-9. Expand tests.
+8. Expand tests.
     - Controller signal/termination tests.
     - Large output tests.
     - Interleaved stdout/stderr event tests.
