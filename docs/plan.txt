@@ -115,6 +115,14 @@
   - events can be filtered by workspace name or ID
   - events list reads persisted workspace events
   - events follow performs bounded repeated polling
+- Improved the manager event loop:
+  - events follow runs until interrupted when --iterations is omitted
+  - bounded --iterations mode remains available for tests and scripts
+  - follow flushes emitted workspace events after each poll iteration
+- Hardened manager persistence in the current CLI architecture:
+  - mutating manager commands take an exclusive advisory state lock
+  - process IDs are enforced as globally unique
+  - process friendly names are enforced as workspace-local unique
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -152,49 +160,42 @@
   - do not unlink non-socket filesystem entries
   - replace stale socket paths only
   - set control socket permissions explicitly
+- Finished the current stream control response semantics:
+  - queue bounded per-client control responses
+  - flush queued responses from the stream poll loop with POLLOUT
+  - cover slow large-read clients while other control requests continue
+- Added opt-in controller completed-state retention:
+  - --completed-retention-ms N keeps the control socket available after exit
+  - completed status includes the child result and final stream offsets
+  - read-only status, metadata, events, and stream reads remain available
+  - interactive commands fail with process_completed
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
-1. Finish stream protocol semantics.
-   - Replace synchronous control responses with poll-driven outbound queues.
-   - Cover read, metadata, events, and attach catch-up responses.
-   - Keep slow clients from blocking or destabilizing the controller.
-
-2. Add completed-state retention.
-   - Keep a controller available briefly after child exit and output drain.
-   - Allow read-only status, metadata, events, and stream read commands.
-   - Reject stdin, signal, terminate, and new interactive actions after completion.
-
-3. Improve manager event loop.
-   - Replace bounded follow polling with a long-running manager event loop.
-
-4. Harden manager persistence.
-   - Replace direct TSV mutation with a concurrency-safe manager authority.
+1. Harden manager persistence.
    - Prefer a persistent manager daemon with transactional storage.
-   - Enforce uniqueness for workspace names, process IDs, and workspace-local
-     friendly names.
 
-5. Implement TTY mode.
+2. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-6. Implement TTY with captured stderr.
-   - Wire stdin/stdout through PTY.
-   - Capture stderr through a separate pipe.
-   - Persist and expose stderr independently.
-
-7. Add provisional user-facing CLI commands.
+3. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-8. Expand tests.
+4. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
    - PTY behavior tests when PTY support lands.
+
+5. Implement TTY with captured stderr.
+   - Wire stdin/stdout through PTY.
+   - Capture stderr through a separate pipe.
+   - Persist and expose stderr independently.

@@ -23,17 +23,26 @@ state_dir="$tmpdir/stale-state"
     >/dev/null 2>/dev/null &
 controller_pid=$!
 
+stale_status=""
 for _ in $(seq 1 100); do
     if [ -S "$stale_socket" ]; then
-        break
+        stale_status=$(python3 "$CUBICLE_CONTROL_CLIENT" "$stale_socket" status 2>/dev/null || true)
     fi
+    case "$stale_status" in
+        ok\ state=running\ pid=*\ pgid=*\ stdout_offset=0\ stderr_offset=0)
+        break
+        ;;
+    esac
     sleep 0.05
 done
 
-if [ ! -S "$stale_socket" ]; then
-    echo "controller did not replace stale socket" >&2
+case "$stale_status" in
+    ok\ state=running\ pid=*\ pgid=*\ stdout_offset=0\ stderr_offset=0) ;;
+    *)
+    echo "controller did not replace stale socket: $stale_status" >&2
     exit 1
-fi
+    ;;
+esac
 
 terminate_response=$(python3 "$CUBICLE_CONTROL_CLIENT" "$stale_socket" terminate)
 if [ "$terminate_response" != "ok" ]; then

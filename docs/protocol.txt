@@ -30,6 +30,10 @@ error CODE
 For responses that include stream bytes, the header line ends with `\n` and the
 advertised number of raw bytes follows immediately.
 
+Control responses are buffered per client and flushed from the controller poll
+loop. A client that cannot accept its bounded response queue is closed without
+failing the controller.
+
 ## Commands
 
 ### status
@@ -44,7 +48,11 @@ Response:
 
 ```text
 ok state=running pid=PID pgid=PGID stdout_offset=N stderr_offset=N
+ok state=completed pid=PID pgid=PGID result=N stdout_offset=N stderr_offset=N
 ```
+
+The completed form is available only while the controller is in its configured
+completed retention window.
 
 ### read
 
@@ -202,6 +210,7 @@ Current error codes:
 - `invalid_range`
 - `open_failed`
 - `range_past_end`
+- `process_completed`
 - `read_too_large`
 - `request_too_long`
 - `signal_failed`
