@@ -134,8 +134,26 @@ def write_all(fd, data):
 
 
 def send_command(socket_path, command):
+    if (command.startswith("attach stdout ") or
+        command.startswith("attach stderr ") or
+        command.startswith("attach out ") or
+        command.startswith("attach err ")):
+        client, header, payload = connect_attach(socket_path, command)
+        try:
+            write_all(sys.stdout.fileno(), header + b"\n")
+            if payload:
+                write_all(sys.stdout.fileno(), payload)
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                write_all(sys.stdout.fileno(), chunk)
+        finally:
+            client.close()
+        return
+
     response = send_request(socket_path, command,
-                            shutdown_write=not command.startswith("attach "))
+                            shutdown_write=True)
     sys.stdout.buffer.write(response)
     sys.stdout.buffer.flush()
 

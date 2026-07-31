@@ -1,7 +1,7 @@
 set -eu
 
 tmpdir=$(mktemp -d)
-trap 'if [ -n "${controller_pid:-}" ]; then kill "$controller_pid" 2>/dev/null || true; wait "$controller_pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
+trap 'if [ -n "${controller_pid:-}" ]; then kill "$controller_pid" 2>/dev/null || true; wait "$controller_pid" 2>/dev/null || true; fi; if [ -n "${client_attach_pid:-}" ]; then kill "$client_attach_pid" 2>/dev/null || true; wait "$client_attach_pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
 
 state_dir="$tmpdir/state"
 socket_path="$tmpdir/control.sock"
@@ -23,6 +23,27 @@ if ! grep -q 'first' "$state_dir/stdout.log"; then
     echo "controller did not capture initial stdout" >&2
     exit 1
 fi
+
+python3 "$CUBICLE_CONTROL_CLIENT" "$socket_path" attach stdout 0 >"$tmpdir/client-attach" &
+client_attach_pid=$!
+
+for _ in $(seq 1 100); do
+    if grep -q '^ok attached stream=stdout start=0 length=' "$tmpdir/client-attach" 2>/dev/null &&
+       grep -q 'first' "$tmpdir/client-attach" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+
+if ! grep -q '^ok attached stream=stdout start=0 length=' "$tmpdir/client-attach" 2>/dev/null ||
+   ! grep -q 'first' "$tmpdir/client-attach" 2>/dev/null; then
+    echo "control socket client did not stream attach catch-up promptly" >&2
+    exit 1
+fi
+
+kill "$client_attach_pid" 2>/dev/null || true
+wait "$client_attach_pid" 2>/dev/null || true
+client_attach_pid=
 
 python3 - "$socket_path" "$attach_file" <<'PY' &
 import socket
