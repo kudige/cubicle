@@ -565,6 +565,7 @@ static int dispatch_control_request(control_client_t *client,
             if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
                 result = enqueue_error_response(client, "resize_failed");
             } else {
+                kill(-child_pid, SIGWINCH);
                 char event[128];
                 int event_length = snprintf(event, sizeof(event),
                                             "type=terminal_resized rows=%u columns=%u",

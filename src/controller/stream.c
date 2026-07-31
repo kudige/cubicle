@@ -85,6 +85,13 @@ static int apply_terminal_window_size(int pty_fd)
     return ioctl(pty_fd, TIOCSWINSZ, &size);
 }
 
+static void notify_terminal_window_size_changed(pid_t child_pid)
+{
+    if (child_pid > 0) {
+        kill(-child_pid, SIGWINCH);
+    }
+}
+
 static int create_pipe(int pipe_fds[2], const char *name)
 {
     if (pipe(pipe_fds) == 0) {
@@ -207,6 +214,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
                 return -1;
             }
+            notify_terminal_window_size_changed(child_pid);
         }
 
         struct pollfd poll_fds[4 + CUBICLE_MAX_CONTROL_CLIENTS];

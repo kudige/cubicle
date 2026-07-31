@@ -16,7 +16,7 @@ def set_window_size(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def read_available(fd, deadline):
+def read_until(fd, needle, deadline):
     output = bytearray()
     while time.monotonic() < deadline:
         ready, _, _ = select.select([fd], [], [], 0.05)
@@ -30,7 +30,7 @@ def read_available(fd, deadline):
             break
         output.extend(chunk)
         text = output.decode(errors="replace").replace("\r", "")
-        if "typed:hello from local tty" in text:
+        if needle in text:
             return text
     return output.decode(errors="replace").replace("\r", "")
 
@@ -43,13 +43,26 @@ def main():
         master_fd, slave_fd = pty.openpty()
         set_window_size(master_fd, 33, 101)
 
-        command = (
-            'printf "first:%s\\n" "$(stty size)"; '
-            'sleep 0.4; '
-            'printf "second:%s\\n" "$(stty size)"; '
-            'IFS= read -r line; '
-            'printf "typed:%s\\n" "$line"'
-        )
+        command = """
+import os
+import signal
+import sys
+
+
+def terminal_size():
+    size = os.get_terminal_size(sys.stdout.fileno())
+    return f"{size.lines} {size.columns}"
+
+
+def handle_winch(_signal_number, _frame):
+    print(f"winch:{terminal_size()}", flush=True)
+
+
+signal.signal(signal.SIGWINCH, handle_winch)
+print(f"first:{terminal_size()}", flush=True)
+line = sys.stdin.buffer.readline().decode().rstrip("\\n")
+print(f"typed:{line}", flush=True)
+"""
         process = subprocess.Popen(
             [
                 controller,
@@ -60,7 +73,7 @@ def main():
                 "--stdin-policy",
                 "open",
                 "--",
-                "sh",
+                sys.executable,
                 "-c",
                 command,
             ],
@@ -75,7 +88,8 @@ def main():
             deadline = time.monotonic() + 5
             output = ""
             while time.monotonic() < deadline:
-                output += read_available(master_fd, time.monotonic() + 0.1)
+                output += read_until(master_fd, "first:33 101",
+                                     time.monotonic() + 0.1)
                 if "first:33 101" in output:
                     break
             if "first:33 101" not in output:
@@ -83,12 +97,14 @@ def main():
 
             set_window_size(master_fd, 40, 120)
             os.kill(process.pid, signal.SIGWINCH)
-            time.sleep(0.1)
+            output += read_until(master_fd, "winch:40 120", time.monotonic() + 5)
+            if "winch:40 120" not in output:
+                raise AssertionError(f"missing resize notification before input in: {output!r}")
+
             os.write(master_fd, b"hello from local tty\n")
 
-            output += read_available(master_fd, time.monotonic() + 5)
-            if "second:40 120" not in output:
-                raise AssertionError(f"missing resized terminal size in: {output!r}")
+            output += read_until(master_fd, "typed:hello from local tty",
+                                 time.monotonic() + 5)
             if "typed:hello from local tty" not in output:
                 raise AssertionError(f"missing forwarded local input in: {output!r}")
 

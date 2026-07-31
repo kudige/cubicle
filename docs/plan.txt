@@ -33,6 +33,7 @@
   - expose combined terminal output through the existing stdout stream
   - forward foreground terminal stdin to the PTY in raw mode
   - propagate initial and changed terminal window size
+  - notify the managed process group after TTY window-size changes
   - preserve socket stdin attachment semantics for interactive TTY input
   - support TTY resize over the control socket
   - keep tty-captured-stderr reserved for the later phase
