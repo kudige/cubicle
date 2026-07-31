@@ -1,16 +1,11 @@
-#ifndef CUBICLE_API_H
-#define CUBICLE_API_H
+#ifndef CUBICLE_CLIENT_ERROR_H
+#define CUBICLE_CLIENT_ERROR_H
 
-#include <stddef.h>
+#include "cubicle/types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define CUBICLE_PROTOCOL_MAJOR 0
-#define CUBICLE_PROTOCOL_MINOR 1
-#define CUBICLE_ENDPOINT_URI_MAX 256
-#define CUBICLE_SERVER_ID_MAX 128
 
 typedef enum cubicle_error_code {
     CUBICLE_OK = 0,
@@ -33,26 +28,16 @@ typedef enum cubicle_error_code {
     CUBICLE_ERR_INTERNAL
 } cubicle_error_code_t;
 
+#define CUBICLE_ERR_AUTHENTICATION CUBICLE_ERR_AUTHENTICATION_FAILED
+
 typedef struct cubicle_error {
     cubicle_error_code_t code;
     int system_errno;
-    int retryable;
-    char message[256];
+    bool retryable;
+    char message[CUBICLE_ERROR_MESSAGE_MAX];
 } cubicle_error_t;
 
-typedef struct cubicle_endpoint {
-    char uri[CUBICLE_ENDPOINT_URI_MAX];
-    char server_identity[CUBICLE_SERVER_ID_MAX];
-} cubicle_endpoint_t;
-
 const char *cubicle_error_code_name(cubicle_error_code_t code);
-int cubicle_endpoint_parse(cubicle_endpoint_t *endpoint,
-                           const char *uri,
-                           const char *server_identity);
-int cubicle_endpoint_is_unix(const cubicle_endpoint_t *endpoint);
-int cubicle_endpoint_unix_path(const cubicle_endpoint_t *endpoint,
-                               char *path,
-                               size_t path_size);
 
 #ifdef __cplusplus
 }
