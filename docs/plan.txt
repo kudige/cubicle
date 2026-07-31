@@ -80,6 +80,7 @@
   - attach tty reasserts the active client terminal size without blocking each input chunk
   - oversized explicit output attach catch-up requests return read_too_large
   - terminal_event_recorder.py records TTY input and resize events for E2E tests
+  - terminal_resize_e2e_test.py covers foreground+socket and socket+socket resize flows
 - Defined initial stream backpressure behavior:
   - nonblocking attachment writes fail closed
   - slow output clients are detached instead of silently losing bytes

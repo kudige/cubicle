@@ -197,6 +197,15 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-terminal-resize-e2e-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            CUBICLE_TERMINAL_RECORDER=${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_event_recorder.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_resize_e2e_test.py
+)
+
+add_test(
     NAME cubicle-controller-default-state-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
