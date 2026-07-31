@@ -232,6 +232,89 @@ static const char *next_json_object(const char *cursor,
     return NULL;
 }
 
+static cubicle_process_mode_t process_mode_from_name(const char *name)
+{
+    if (strcmp(name, "stream") == 0) {
+        return CUBICLE_PROCESS_STREAM;
+    }
+    if (strcmp(name, "tty") == 0) {
+        return CUBICLE_PROCESS_TTY;
+    }
+    if (strcmp(name, "tty-captured-stderr") == 0) {
+        return CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+    }
+    return 0;
+}
+
+static cubicle_process_state_t process_state_from_name(const char *name)
+{
+    if (strcmp(name, "allocated") == 0) return CUBICLE_PROCESS_ALLOCATED;
+    if (strcmp(name, "starting") == 0) return CUBICLE_PROCESS_STARTING;
+    if (strcmp(name, "running") == 0) return CUBICLE_PROCESS_RUNNING;
+    if (strcmp(name, "stopping") == 0) return CUBICLE_PROCESS_STOPPING;
+    if (strcmp(name, "draining") == 0) return CUBICLE_PROCESS_DRAINING;
+    if (strcmp(name, "completed") == 0) return CUBICLE_PROCESS_COMPLETED;
+    if (strcmp(name, "failed") == 0) return CUBICLE_PROCESS_FAILED;
+    if (strcmp(name, "lost") == 0) return CUBICLE_PROCESS_LOST;
+    if (strcmp(name, "removed") == 0) return CUBICLE_PROCESS_REMOVED;
+    return CUBICLE_PROCESS_LOST;
+}
+
+static cubicle_error_code_t parse_process_info(
+    cubicle_client_t *client,
+    const char *json,
+    cubicle_process_info_t *process)
+{
+    char mode[64];
+    char state[64];
+    int has_exit_status = 0;
+    uint64_t exit_code = 0;
+    uint64_t termination_signal = 0;
+    uint64_t local_pid = 0;
+    uint64_t local_pgid = 0;
+    if (cubicle_rpc_get_string(json, "manager_id", process->manager_id,
+                               sizeof(process->manager_id)) < 0 ||
+        cubicle_rpc_get_string(json, "workspace_id", process->workspace_id,
+                               sizeof(process->workspace_id)) < 0 ||
+        cubicle_rpc_get_string(json, "id", process->id,
+                               sizeof(process->id)) < 0 ||
+        cubicle_rpc_get_string(json, "friendly_name",
+                               process->friendly_name,
+                               sizeof(process->friendly_name)) < 0 ||
+        cubicle_rpc_get_string(json, "mode", mode, sizeof(mode)) < 0 ||
+        cubicle_rpc_get_string(json, "state", state, sizeof(state)) < 0 ||
+        cubicle_rpc_get_uint64(json, "exit_code", &exit_code) < 0 ||
+        cubicle_rpc_get_uint64(json, "termination_signal",
+                               &termination_signal) < 0 ||
+        cubicle_rpc_get_bool(json, "has_exit_status",
+                             &has_exit_status) < 0 ||
+        cubicle_rpc_get_uint64(json, "stdout_offset",
+                               &process->stdout_offset) < 0 ||
+        cubicle_rpc_get_uint64(json, "stderr_offset",
+                               &process->stderr_offset) < 0 ||
+        cubicle_rpc_get_uint64(json, "tty_offset",
+                               &process->tty_offset) < 0 ||
+        cubicle_rpc_get_uint64(json, "created_at_ms",
+                               &process->created_at_ms) < 0 ||
+        cubicle_rpc_get_uint64(json, "started_at_ms",
+                               &process->started_at_ms) < 0 ||
+        cubicle_rpc_get_uint64(json, "exited_at_ms",
+                               &process->exited_at_ms) < 0 ||
+        cubicle_rpc_get_uint64(json, "local_pid", &local_pid) < 0 ||
+        cubicle_rpc_get_uint64(json, "local_pgid", &local_pgid) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid process response");
+    }
+    process->mode = process_mode_from_name(mode);
+    process->state = process_state_from_name(state);
+    process->exit_code = (int)exit_code;
+    process->termination_signal = (int)termination_signal;
+    process->has_exit_status = has_exit_status != 0;
+    process->local_pid = (int64_t)local_pid;
+    process->local_pgid = (int64_t)local_pgid;
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_client_connect(
     const cubicle_client_options_t *options,
     cubicle_client_t **client_out)
@@ -675,12 +758,37 @@ cubicle_error_code_t cubicle_process_get(
     const char *workspace_id,
     cubicle_process_info_t *process_out)
 {
-    (void)workspace_id;
     if (client == NULL || process_id_or_name == NULL ||
         process_id_or_name[0] == '\0' || process_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "process.get");
+
+    char escaped_ref[CUBICLE_NAME_MAX * 2];
+    char escaped_workspace[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_ref, sizeof(escaped_ref),
+                            process_id_or_name) < 0 ||
+        cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                            workspace_id == NULL ? "" : workspace_id) < 0) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, errno,
+                         "process request is too large");
+    }
+    char params[1024];
+    int length = snprintf(params, sizeof(params),
+                          "{\"process_id_or_name\":\"%s\",\"workspace_id\":\"%s\"}",
+                          escaped_ref, escaped_workspace);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
+                         "process request is too large");
+    }
+
+    char result[4096];
+    cubicle_error_code_t code = client_request(client, "process.get",
+                                               params, result,
+                                               sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    return parse_process_info(client, result, process_out);
 }
 
 cubicle_error_code_t cubicle_process_list(
@@ -690,12 +798,81 @@ cubicle_error_code_t cubicle_process_list(
     size_t *count_out,
     cubicle_page_info_t *page_out)
 {
-    (void)filter;
     (void)page_out;
     if (client == NULL || processes_out == NULL || count_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "process.list");
+
+    char params[1024] = "{}";
+    if (filter != NULL && filter->workspace_id != NULL &&
+        filter->workspace_id[0] != '\0') {
+        char escaped_workspace[CUBICLE_NAME_MAX * 2];
+        if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                                filter->workspace_id) < 0) {
+            return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, errno,
+                             "process filter is too large");
+        }
+        int length = snprintf(params, sizeof(params),
+                              "{\"workspace_id\":\"%s\"}",
+                              escaped_workspace);
+        if (length < 0 || (size_t)length >= sizeof(params)) {
+            return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
+                             "process filter is too large");
+        }
+    }
+
+    char result[8192];
+    cubicle_error_code_t code = client_request(client, "process.list",
+                                               params, result,
+                                               sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+
+    uint64_t count = 0;
+    int has_more = 0;
+    if (cubicle_rpc_get_uint64(result, "count", &count) < 0 ||
+        cubicle_rpc_get_bool(result, "has_more", &has_more) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid process list response");
+    }
+
+    cubicle_process_info_t *items = NULL;
+    if (count > 0) {
+        items = calloc((size_t)count, sizeof(*items));
+        if (items == NULL) {
+            return set_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
+                             "failed to allocate process list");
+        }
+
+        const char *cursor = strstr(result, "\"processes\"");
+        if (cursor == NULL) {
+            free(items);
+            return set_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                             "process list missing items");
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            char item_json[4096];
+            cursor = next_json_object(cursor, item_json, sizeof(item_json));
+            if (cursor == NULL ||
+                parse_process_info(client, item_json, &items[i]) !=
+                    CUBICLE_OK) {
+                free(items);
+                return client->last_error.code == CUBICLE_OK
+                           ? set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                                       "invalid process item")
+                           : client->last_error.code;
+            }
+        }
+    }
+
+    if (page_out != NULL) {
+        memset(page_out, 0, sizeof(*page_out));
+        page_out->has_more = has_more != 0;
+    }
+    *processes_out = items;
+    *count_out = (size_t)count;
+    return CUBICLE_OK;
 }
 
 cubicle_error_code_t cubicle_process_signal(cubicle_client_t *client,

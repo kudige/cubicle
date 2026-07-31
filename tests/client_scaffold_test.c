@@ -1,5 +1,6 @@
 #include "cubicle/client.h"
 #include "cubicle/manager.h"
+#include "cubicle/process.h"
 #include "cubicle/rpc.h"
 #include "cubicle/workspace.h"
 
@@ -48,6 +49,12 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"workspace.list\"") != NULL) {
         assert(cubicle_rpc_success(response, sizeof(response), "c5",
                                    "{\"workspaces\":[{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":2,\"running_process_count\":1},{\"manager_id\":\"manager-1\",\"id\":\"workspace-2\",\"name\":\"Project B\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":0,\"running_process_count\":0}],\"count\":2,\"has_more\":false}") == 0);
+    } else if (strstr(request_json, "\"process.get\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c6",
+                                   "{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}") == 0);
+    } else if (strstr(request_json, "\"process.list\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c7",
+                                   "{\"processes\":[{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}],\"count\":1,\"has_more\":false}") == 0);
     } else {
         assert(cubicle_rpc_error(response, sizeof(response), "cX",
                                  CUBICLE_ERR_UNSUPPORTED,
@@ -135,6 +142,22 @@ int main(void)
     assert(strcmp(workspaces[0].name, "Project A") == 0);
     assert(strcmp(workspaces[1].name, "Project B") == 0);
     cubicle_workspace_list_free(workspaces);
+
+    cubicle_process_info_t process;
+    memset(&process, 0, sizeof(process));
+    assert(cubicle_process_get(client, "build", "workspace-1", &process) ==
+           CUBICLE_OK);
+    assert(strcmp(process.id, "process-1") == 0);
+    assert(process.mode == CUBICLE_PROCESS_STREAM);
+    assert(process.state == CUBICLE_PROCESS_RUNNING);
+
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    assert(cubicle_process_list(client, NULL, &processes, &process_count,
+                                NULL) == CUBICLE_OK);
+    assert(process_count == 1);
+    assert(strcmp(processes[0].friendly_name, "build") == 0);
+    cubicle_process_list_free(processes);
 
     cubicle_client_disconnect(client);
     return 0;

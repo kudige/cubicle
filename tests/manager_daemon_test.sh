@@ -171,6 +171,20 @@ workspace_duplicate_response=$(send_manager_rpc workspace.create '{"name":"Proje
 printf "%s" "$workspace_duplicate_response" | grep -q '"ok": false'
 printf "%s" "$workspace_duplicate_response" | grep -q '"code": "already_exists"'
 
+process_get_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"$process_id\"}")
+printf "%s" "$process_get_response" | grep -q '"ok": true'
+printf "%s" "$process_get_response" | grep -q "\"id\": \"$process_id\""
+printf "%s" "$process_get_response" | grep -q '"friendly_name": "daemon-1"'
+printf "%s" "$process_get_response" | grep -q '"state": "running"'
+
+process_name_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"daemon-1\",\"workspace_id\":\"$workspace_id\"}")
+printf "%s" "$process_name_response" | grep -q '"ok": true'
+printf "%s" "$process_name_response" | grep -q "\"id\": \"$process_id\""
+
+process_list_response=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
+printf "%s" "$process_list_response" | grep -q '"count": 1'
+printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-1"'
+
 for _ in $(seq 1 100); do
     if [ -f "$state_dir/workspace-events.log" ] &&
         grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"; then
