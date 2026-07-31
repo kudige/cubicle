@@ -189,6 +189,14 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-control-socket-client-tty-attach-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client_tty_attach_test.py
+)
+
+add_test(
     NAME cubicle-controller-default-state-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

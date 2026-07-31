@@ -74,6 +74,7 @@
   - support stdin attachment in the Python control socket client
   - Python control socket client can detect controller mode from metadata
   - Python control socket client enables raw terminal input for TTY stdin attachment
+  - Python control socket client supports attach tty for bidirectional TTY attachment
 - Defined initial stream backpressure behavior:
   - nonblocking attachment writes fail closed
   - slow output clients are detached instead of silently losing bytes

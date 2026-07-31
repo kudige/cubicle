@@ -165,6 +165,19 @@ process stdin until the client disconnects or the controller detaches the client
 `error stdin_closed` is returned when the process was launched with
 `--stdin-policy eof`.
 
+### Python client TTY attach
+
+The test Python control socket client provides a higher-level helper:
+
+```text
+attach tty [START]
+```
+
+This is a client-side composition for TTY controllers. It verifies `mode=tty`
+from metadata, sends the current terminal size with `resize`, attaches `out`
+from `START` or `0`, attaches `stdin`, puts the local terminal in raw mode, and
+forwards bytes bidirectionally until the output attachment closes.
+
 ### resize
 
 Request:
