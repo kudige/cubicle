@@ -149,6 +149,46 @@ if [ "$nul_response" != "error bad_request" ]; then
     exit 1
 fi
 
+oversized_response=$(python3 - "$socket_path" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(path)
+client.sendall(b"x" * 300 + b"\n")
+client.shutdown(socket.SHUT_WR)
+try:
+    while True:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        sys.stdout.buffer.write(chunk)
+except ConnectionResetError:
+    pass
+client.close()
+PY
+)
+if [ "$oversized_response" != "error request_too_long" ]; then
+    echo "unexpected oversized request response: $oversized_response" >&2
+    exit 1
+fi
+
+bad_attach_response=$(send_command "attach stdout")
+if [ "$bad_attach_response" != "error bad_attach_command" ]; then
+    echo "unexpected bad attach response: $bad_attach_response" >&2
+    exit 1
+fi
+
+status_after_bad_clients=$(send_command status)
+case "$status_after_bad_clients" in
+    ok\ state=running\ pid=*\ pgid=*\ stdout_offset=*\ stderr_offset=*) ;;
+    *)
+        echo "unexpected status response after bad clients: $status_after_bad_clients" >&2
+        exit 1
+        ;;
+esac
+
 terminate_response=$(send_command terminate)
 if [ "$terminate_response" != "ok" ]; then
     echo "unexpected terminate response: $terminate_response" >&2

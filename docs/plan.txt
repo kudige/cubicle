@@ -139,6 +139,10 @@
   - initialize controller state before failure cleanup can use it
   - separate child exit status calculation from durable exit-event recording
   - avoid exit-event writes when the event journal was not opened
+- Added controller client-failure isolation regressions:
+  - oversized requests fail only that client
+  - malformed attach requests fail only that client
+  - later status and terminate requests continue to work
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
