@@ -387,6 +387,62 @@ static int workspace_name_exists(const manager_state_t *state, const char *name)
     return find_workspace(state, name, &record) == 0;
 }
 
+static int count_processes_for_workspace(const manager_state_t *state,
+                                         const char *workspace_id,
+                                         size_t *process_count,
+                                         size_t *running_count)
+{
+    *process_count = 0;
+    *running_count = 0;
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[PATH_MAX + 512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) == 0 &&
+            strcmp(record.workspace_id, workspace_id) == 0) {
+            ++(*process_count);
+            if (strcmp(record.state, "running") == 0) {
+                ++(*running_count);
+            }
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
+static int workspace_info_json(const manager_state_t *state,
+                               const char *manager_id_value,
+                               const cubicle_workspace_record_t *workspace,
+                               char *buffer,
+                               size_t buffer_size)
+{
+    size_t process_count = 0;
+    size_t running_count = 0;
+    char escaped_name[256];
+    if (count_processes_for_workspace(state, workspace->id, &process_count,
+                                      &running_count) < 0 ||
+        cubicle_json_escape(escaped_name, sizeof(escaped_name),
+                            workspace->name) < 0) {
+        return -1;
+    }
+
+    int length = snprintf(buffer, buffer_size,
+                          "{\"manager_id\":\"%s\",\"id\":\"%s\",\"name\":\"%s\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":%zu,\"running_process_count\":%zu}",
+                          manager_id_value, workspace->id, escaped_name,
+                          process_count, running_count);
+    if (length < 0 || (size_t)length >= buffer_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
 static int process_conflict_exists(const manager_state_t *state,
                                    const char *workspace_id,
                                    const char *process_id,
@@ -1551,6 +1607,146 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     if (strcmp(method, "manager.shutdown") == 0) {
         *shutdown_requested = 1;
         return manager_api_success(client_fd, request_id, "{}");
+    }
+
+    if (strcmp(method, "workspace.create") == 0) {
+        char params[1024];
+        char name[128];
+        if (cubicle_rpc_get_object(request, "params", params,
+                                   sizeof(params)) < 0 ||
+            cubicle_rpc_get_string(params, "name", name, sizeof(name)) < 0 ||
+            validate_field(name, "workspace name") < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INVALID_ARGUMENT,
+                                     "invalid workspace name", false, 0);
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_IO,
+                                     "failed to lock manager state", true,
+                                     errno);
+        }
+
+        if (workspace_name_exists(state, name)) {
+            unlock_state(lock_fd);
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_ALREADY_EXISTS,
+                                     "workspace already exists", false, 0);
+        }
+
+        cubicle_workspace_record_t workspace;
+        if (cubicle_generate_hex_id(workspace.id, sizeof(workspace.id)) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INTERNAL,
+                                     "failed to allocate workspace id",
+                                     false, saved_errno);
+        }
+        snprintf(workspace.name, sizeof(workspace.name), "%s", name);
+
+        char line[256];
+        int line_length = snprintf(line, sizeof(line), "%s\t%s\n",
+                                   workspace.id, workspace.name);
+        if (line_length < 0 || (size_t)line_length >= sizeof(line) ||
+            append_line(state, "workspaces.tsv", line) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_IO,
+                                     "failed to persist workspace", true,
+                                     saved_errno);
+        }
+        unlock_state(lock_fd);
+
+        char result[1024];
+        if (workspace_info_json(state, id, &workspace, result,
+                                sizeof(result)) < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INTERNAL,
+                                     "failed to encode workspace", false,
+                                     errno);
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "workspace.get") == 0) {
+        char params[1024];
+        char name_or_id[128];
+        cubicle_workspace_record_t workspace;
+        if (cubicle_rpc_get_object(request, "params", params,
+                                   sizeof(params)) < 0 ||
+            cubicle_rpc_get_string(params, "workspace_id_or_name",
+                                   name_or_id, sizeof(name_or_id)) < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INVALID_ARGUMENT,
+                                     "missing workspace reference", false, 0);
+        }
+        if (find_workspace(state, name_or_id, &workspace) < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_NOT_FOUND,
+                                     "workspace not found", false, 0);
+        }
+        char result[1024];
+        if (workspace_info_json(state, id, &workspace, result,
+                                sizeof(result)) < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INTERNAL,
+                                     "failed to encode workspace", false,
+                                     errno);
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "workspace.list") == 0) {
+        FILE *file = open_state_file_for_read(state, "workspaces.tsv");
+        char result[8192];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result),
+                               "{\"workspaces\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            return -1;
+        }
+        used = (size_t)written;
+
+        size_t count = 0;
+        if (file != NULL) {
+            char line[512];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                cubicle_workspace_record_t workspace;
+                char item[1024];
+                if (cubicle_parse_workspace_record(line, &workspace) != 0 ||
+                    workspace_info_json(state, id, &workspace, item,
+                                        sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    return manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "workspace list response too large",
+                                             false, 0);
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+
+        written = snprintf(result + used, sizeof(result) - used,
+                           "],\"count\":%zu,\"has_more\":false}", count);
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_RESOURCE_LIMIT,
+                                     "workspace list response too large",
+                                     false, 0);
+        }
+        return manager_api_success(client_fd, request_id, result);
     }
 
     return manager_api_error(client_fd, request_id, CUBICLE_ERR_UNSUPPORTED,

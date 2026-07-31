@@ -156,6 +156,82 @@ static cubicle_error_code_t parse_session(cubicle_client_t *client,
     return CUBICLE_OK;
 }
 
+static cubicle_error_code_t parse_workspace_info(
+    cubicle_client_t *client,
+    const char *json,
+    cubicle_workspace_info_t *workspace)
+{
+    uint64_t created_at = 0;
+    uint64_t updated_at = 0;
+    if (cubicle_rpc_get_string(json, "manager_id", workspace->manager_id,
+                               sizeof(workspace->manager_id)) < 0 ||
+        cubicle_rpc_get_string(json, "id", workspace->id,
+                               sizeof(workspace->id)) < 0 ||
+        cubicle_rpc_get_string(json, "name", workspace->name,
+                               sizeof(workspace->name)) < 0 ||
+        cubicle_rpc_get_uint64(json, "created_at_ms", &created_at) < 0 ||
+        cubicle_rpc_get_uint64(json, "updated_at_ms", &updated_at) < 0 ||
+        cubicle_rpc_get_uint64(json, "process_count",
+                               &workspace->process_count) < 0 ||
+        cubicle_rpc_get_uint64(json, "running_process_count",
+                               &workspace->running_process_count) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid workspace response");
+    }
+    workspace->created_at_ms = created_at;
+    workspace->updated_at_ms = updated_at;
+    return CUBICLE_OK;
+}
+
+static const char *next_json_object(const char *cursor,
+                                    char *object,
+                                    size_t object_size)
+{
+    cursor = strchr(cursor, '{');
+    if (cursor == NULL || object == NULL || object_size == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    int depth = 0;
+    int in_string = 0;
+    int escape = 0;
+    size_t used = 0;
+    for (; *cursor != '\0'; ++cursor) {
+        if (used + 1 >= object_size) {
+            errno = ENOSPC;
+            return NULL;
+        }
+        object[used++] = *cursor;
+        if (escape) {
+            escape = 0;
+            continue;
+        }
+        if (*cursor == '\\' && in_string) {
+            escape = 1;
+            continue;
+        }
+        if (*cursor == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (*cursor == '{') {
+            ++depth;
+        } else if (*cursor == '}') {
+            --depth;
+            if (depth == 0) {
+                object[used] = '\0';
+                return cursor + 1;
+            }
+        }
+    }
+    errno = EPROTO;
+    return NULL;
+}
+
 cubicle_error_code_t cubicle_client_connect(
     const cubicle_client_options_t *options,
     cubicle_client_t **client_out)
@@ -354,7 +430,28 @@ cubicle_error_code_t cubicle_workspace_create(
         options->name[0] == '\0' || workspace_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "workspace.create");
+    char escaped_name[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_name, sizeof(escaped_name),
+                            options->name) < 0) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, errno,
+                         "workspace name is too large");
+    }
+    char params[768];
+    int length = snprintf(params, sizeof(params), "{\"name\":\"%s\"}",
+                          escaped_name);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
+                         "workspace request is too large");
+    }
+
+    char result[2048];
+    cubicle_error_code_t code = client_request(client, "workspace.create",
+                                               params, result,
+                                               sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    return parse_workspace_info(client, result, workspace_out);
 }
 
 cubicle_error_code_t cubicle_workspace_get(
@@ -366,7 +463,29 @@ cubicle_error_code_t cubicle_workspace_get(
         workspace_id_or_name[0] == '\0' || workspace_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "workspace.get");
+    char escaped_reference[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_reference, sizeof(escaped_reference),
+                            workspace_id_or_name) < 0) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, errno,
+                         "workspace reference is too large");
+    }
+    char params[768];
+    int length = snprintf(params, sizeof(params),
+                          "{\"workspace_id_or_name\":\"%s\"}",
+                          escaped_reference);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
+                         "workspace request is too large");
+    }
+
+    char result[2048];
+    cubicle_error_code_t code = client_request(client, "workspace.get",
+                                               params, result,
+                                               sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    return parse_workspace_info(client, result, workspace_out);
 }
 
 cubicle_error_code_t cubicle_workspace_list(
@@ -376,12 +495,62 @@ cubicle_error_code_t cubicle_workspace_list(
     size_t *count_out,
     cubicle_page_info_t *page_out)
 {
-    (void)options;
-    (void)page_out;
     if (client == NULL || workspaces_out == NULL || count_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "workspace.list");
+    (void)options;
+
+    char result[8192];
+    cubicle_error_code_t code = client_request(client, "workspace.list", "{}",
+                                               result, sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+
+    uint64_t count = 0;
+    int has_more = 0;
+    if (cubicle_rpc_get_uint64(result, "count", &count) < 0 ||
+        cubicle_rpc_get_bool(result, "has_more", &has_more) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid workspace list response");
+    }
+
+    cubicle_workspace_info_t *items = NULL;
+    if (count > 0) {
+        items = calloc((size_t)count, sizeof(*items));
+        if (items == NULL) {
+            return set_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
+                             "failed to allocate workspace list");
+        }
+
+        const char *cursor = strstr(result, "\"workspaces\"");
+        if (cursor == NULL) {
+            free(items);
+            return set_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                             "workspace list missing items");
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            char item_json[2048];
+            cursor = next_json_object(cursor, item_json, sizeof(item_json));
+            if (cursor == NULL ||
+                parse_workspace_info(client, item_json, &items[i]) !=
+                    CUBICLE_OK) {
+                free(items);
+                return client->last_error.code == CUBICLE_OK
+                           ? set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                                       "invalid workspace item")
+                           : client->last_error.code;
+            }
+        }
+    }
+
+    if (page_out != NULL) {
+        memset(page_out, 0, sizeof(*page_out));
+        page_out->has_more = has_more != 0;
+    }
+    *workspaces_out = items;
+    *count_out = (size_t)count;
+    return CUBICLE_OK;
 }
 
 cubicle_error_code_t cubicle_workspace_rename(

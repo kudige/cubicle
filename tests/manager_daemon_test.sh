@@ -84,21 +84,16 @@ if [ ! -S "$socket_path" ]; then
     exit 1
 fi
 
-send_manager_command() {
-    python3 - "$socket_path" "$1" <<'PY'
+send_manager_rpc() {
+    params=${2-'{}'}
+    python3 - "$socket_path" "$1" "$params" <<'PY'
 import json
 import socket
 import struct
 import sys
 
 method = sys.argv[2]
-if method == "ping":
-    method = "manager.ping"
-elif method == "status":
-    method = "manager.status"
-elif method == "shutdown":
-    method = "manager.shutdown"
-
+params = json.loads(sys.argv[3])
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(sys.argv[1])
 request = {
@@ -107,7 +102,7 @@ request = {
     "request_id": "test",
     "session_id": "local-session",
     "method": method,
-    "params": {},
+    "params": params,
 }
 payload = json.dumps(request, separators=(",", ":")).encode()
 client.sendall(struct.pack("!I", len(payload)) + payload)
@@ -124,6 +119,15 @@ while len(response) < length:
 client.close()
 sys.stdout.write(json.dumps(json.loads(response), sort_keys=True))
 PY
+}
+
+send_manager_command() {
+    case "$1" in
+        ping) send_manager_rpc manager.ping ;;
+        status) send_manager_rpc manager.status ;;
+        shutdown) send_manager_rpc manager.shutdown ;;
+        *) send_manager_rpc "$1" ;;
+    esac
 }
 
 ping_response=$(send_manager_command ping)
@@ -143,6 +147,29 @@ printf "%s" "$status_response" | grep -q '"ok": true'
 printf "%s" "$status_response" | grep -q "\"manager_id\": \"$manager_id\""
 printf "%s" "$status_response" | grep -q '"workspace_count": 1'
 printf "%s" "$status_response" | grep -q '"process_count": 1'
+
+workspace_create_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
+printf "%s" "$workspace_create_response" | grep -q '"ok": true'
+printf "%s" "$workspace_create_response" | grep -q '"name": "Project B"'
+workspace_b_id=$(python3 - "$workspace_create_response" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["result"]["id"])
+PY
+)
+
+workspace_get_response=$(send_manager_rpc workspace.get '{"workspace_id_or_name":"Project B"}')
+printf "%s" "$workspace_get_response" | grep -q '"ok": true'
+printf "%s" "$workspace_get_response" | grep -q "\"id\": \"$workspace_b_id\""
+
+workspace_list_response=$(send_manager_rpc workspace.list)
+printf "%s" "$workspace_list_response" | grep -q '"count": 2'
+printf "%s" "$workspace_list_response" | grep -q '"name": "Project A"'
+printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
+
+workspace_duplicate_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
+printf "%s" "$workspace_duplicate_response" | grep -q '"ok": false'
+printf "%s" "$workspace_duplicate_response" | grep -q '"code": "already_exists"'
 
 for _ in $(seq 1 100); do
     if [ -f "$state_dir/workspace-events.log" ] &&

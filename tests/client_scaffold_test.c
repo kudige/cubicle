@@ -1,8 +1,10 @@
 #include "cubicle/client.h"
 #include "cubicle/manager.h"
 #include "cubicle/rpc.h"
+#include "cubicle/workspace.h"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,6 +39,15 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"manager.ping\"") != NULL) {
         assert(cubicle_rpc_success(response, sizeof(response), "c2",
                                    "{\"manager_id\":\"manager-1\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":20,\"uptime_ms\":10}") == 0);
+    } else if (strstr(request_json, "\"workspace.create\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c3",
+                                   "{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":0,\"running_process_count\":0}") == 0);
+    } else if (strstr(request_json, "\"workspace.get\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c4",
+                                   "{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":2,\"running_process_count\":1}") == 0);
+    } else if (strstr(request_json, "\"workspace.list\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c5",
+                                   "{\"workspaces\":[{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":2,\"running_process_count\":1},{\"manager_id\":\"manager-1\",\"id\":\"workspace-2\",\"name\":\"Project B\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":0,\"running_process_count\":0}],\"count\":2,\"has_more\":false}") == 0);
     } else {
         assert(cubicle_rpc_error(response, sizeof(response), "cX",
                                  CUBICLE_ERR_UNSUPPORTED,
@@ -96,6 +107,34 @@ int main(void)
     assert(ping_result.protocol_minor == 1);
     assert(ping_result.server_time_ms == 20);
     assert(ping_result.uptime_ms == 10);
+
+    cubicle_workspace_create_options_t create_options = {
+        .name = "Project A",
+    };
+    cubicle_workspace_info_t workspace;
+    memset(&workspace, 0, sizeof(workspace));
+    assert(cubicle_workspace_create(client, &create_options, &workspace) ==
+           CUBICLE_OK);
+    assert(strcmp(workspace.id, "workspace-1") == 0);
+    assert(strcmp(workspace.name, "Project A") == 0);
+
+    memset(&workspace, 0, sizeof(workspace));
+    assert(cubicle_workspace_get(client, "Project A", &workspace) ==
+           CUBICLE_OK);
+    assert(workspace.process_count == 2);
+    assert(workspace.running_process_count == 1);
+
+    cubicle_workspace_info_t *workspaces = NULL;
+    size_t workspace_count = 0;
+    cubicle_page_info_t page;
+    memset(&page, 0, sizeof(page));
+    assert(cubicle_workspace_list(client, NULL, &workspaces,
+                                  &workspace_count, &page) == CUBICLE_OK);
+    assert(workspace_count == 2);
+    assert(page.has_more == false);
+    assert(strcmp(workspaces[0].name, "Project A") == 0);
+    assert(strcmp(workspaces[1].name, "Project B") == 0);
+    cubicle_workspace_list_free(workspaces);
 
     cubicle_client_disconnect(client);
     return 0;
