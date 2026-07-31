@@ -8,6 +8,15 @@
 - Implemented process mode/state name helpers.
 - Added CTest-based test wiring.
 - Added a process helper unit test.
+- Added common utility unit tests:
+  - generated hex ID shape and buffer validation
+  - recursive directory creation and idempotence
+  - full-buffer writes through a pipe
+- Added manager registry parser unit tests:
+  - workspace record parsing
+  - process record parsing
+  - cursor record parsing
+  - primitive event sequence parsing
 - Implemented controller stream mode:
   - fork/exec command launch
   - independent child process group

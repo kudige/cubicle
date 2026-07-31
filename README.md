@@ -39,6 +39,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The test suite includes focused C unit tests for shared process helpers, common
+utility helpers, and manager registry parsing, plus shell integration tests for
+controller and manager workflows.
+
 The manager currently provides a persistent registry CLI for workspaces and
 process/controller records:
 
