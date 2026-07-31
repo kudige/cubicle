@@ -1,4 +1,5 @@
 build/
+build-coverage/
 cmake-build-*/
 *.o
 *.a

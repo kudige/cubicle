@@ -43,6 +43,19 @@ The test suite includes focused C unit tests for shared process helpers, common
 utility helpers, and manager registry parsing, plus shell integration tests for
 controller and manager workflows.
 
+## Coverage
+
+Coverage is opt-in and uses GCC/Clang gcov data plus lcov:
+
+```console
+cmake -S . -B build-coverage -DCUBICLE_ENABLE_COVERAGE=ON
+cmake --build build-coverage --target coverage-summary
+```
+
+The `coverage-summary` target builds the instrumented binaries, runs CTest,
+filters out test sources, and prints production-source coverage from
+`build-coverage/coverage.filtered.info`.
+
 The manager currently provides a persistent registry CLI for workspaces and
 process/controller records:
 

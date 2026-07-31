@@ -5,6 +5,17 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+option(CUBICLE_ENABLE_COVERAGE "Build with gcov/lcov coverage instrumentation" OFF)
+
+if(CUBICLE_ENABLE_COVERAGE)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "CUBICLE_ENABLE_COVERAGE requires GCC or Clang")
+    endif()
+
+    add_compile_options(-O0 -g --coverage)
+    add_link_options(--coverage)
+endif()
+
 add_library(cubicle_common
     src/common/log.c
     src/common/process.c
@@ -171,3 +182,34 @@ add_test(
             CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_daemon_test.sh
 )
+
+if(CUBICLE_ENABLE_COVERAGE)
+    find_program(LCOV_EXECUTABLE lcov REQUIRED)
+
+    add_custom_target(coverage-summary
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        COMMAND ${LCOV_EXECUTABLE}
+                --capture
+                --directory ${CMAKE_BINARY_DIR}
+                --output-file ${CMAKE_BINARY_DIR}/coverage.info
+                --ignore-errors mismatch
+        COMMAND ${LCOV_EXECUTABLE}
+                --remove ${CMAKE_BINARY_DIR}/coverage.info
+                '/usr/*'
+                '${CMAKE_SOURCE_DIR}/tests/*'
+                '${CMAKE_BINARY_DIR}/*'
+                --output-file ${CMAKE_BINARY_DIR}/coverage.filtered.info
+                --ignore-errors unused
+        COMMAND ${LCOV_EXECUTABLE}
+                --summary ${CMAKE_BINARY_DIR}/coverage.filtered.info
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        USES_TERMINAL
+        COMMENT "Running tests and generating lcov coverage summary"
+        DEPENDS
+            cubicle-manager
+            cubicle-controller
+            cubicle-process-test
+            cubicle-util-test
+            cubicle-manager-registry-unit-test
+    )
+endif()

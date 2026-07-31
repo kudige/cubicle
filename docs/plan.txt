@@ -17,6 +17,10 @@
   - process record parsing
   - cursor record parsing
   - primitive event sequence parsing
+- Added opt-in gcov/lcov coverage reporting:
+  - CUBICLE_ENABLE_COVERAGE CMake option
+  - coverage-summary build target
+  - test sources filtered from production coverage summary
 - Implemented controller stream mode:
   - fork/exec command launch
   - independent child process group
