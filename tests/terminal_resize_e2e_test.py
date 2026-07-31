@@ -188,6 +188,12 @@ def controller_and_socket_resize(controller, control_client, recorder):
             if "size=20x60" not in border:
                 raise AssertionError(f"socket did not render 20x60 border: {border!r}")
 
+            os.write(controller_master, b"a")
+            cursor = wait_for_event(output_path, event_is("input"),
+                                    "foreground controller input", cursor)
+            cursor = wait_for_event(output_path, event_is("resize", 34, 100),
+                                    "foreground controller active resize reassert", cursor)
+
             os.write(socket_master, b"\x03")
             cursor = wait_for_event(output_path, event_is("control_c"),
                                     "socket control-c", cursor)

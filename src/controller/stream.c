@@ -92,6 +92,20 @@ static void notify_terminal_window_size_changed(pid_t child_pid)
     }
 }
 
+static int sync_local_terminal_window_size(int resize_fd, pid_t child_pid)
+{
+    if (resize_fd < 0) {
+        return 0;
+    }
+
+    if (apply_terminal_window_size(resize_fd) < 0) {
+        return -1;
+    }
+
+    notify_terminal_window_size_changed(child_pid);
+    return 0;
+}
+
 static int create_pipe(int pipe_fds[2], const char *name)
 {
     if (pipe(pipe_fds) == 0) {
@@ -210,11 +224,10 @@ static int stream_event_loop(stream_pipe_t pipes[2],
 
         if (resize_fd >= 0 && terminal_resize_pending) {
             terminal_resize_pending = 0;
-            if (apply_terminal_window_size(resize_fd) < 0) {
+            if (sync_local_terminal_window_size(resize_fd, child_pid) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
                 return -1;
             }
-            notify_terminal_window_size_changed(child_pid);
         }
 
         struct pollfd poll_fds[4 + CUBICLE_MAX_CONTROL_CLIENTS];
@@ -316,6 +329,11 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 } else if (write_best_effort(child_stdin_fd, buffer,
                                              (size_t)read_result) < 0 &&
                            errno != EAGAIN) {
+                    cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                                strerror(errno));
+                    return -1;
+                } else if (sync_local_terminal_window_size(resize_fd,
+                                                           child_pid) < 0) {
                     cubicle_log(CUBICLE_LOG_ERROR, "controller",
                                 strerror(errno));
                     return -1;
