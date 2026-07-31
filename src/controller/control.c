@@ -116,7 +116,20 @@ int open_control_socket(const char *path)
     return fd;
 }
 
-static int write_error_response(int fd, const char *message)
+static int enqueue_response(control_client_t *client, const char *buffer,
+                            size_t length)
+{
+    if (client->response_length + length > sizeof(client->response)) {
+        errno = ENOBUFS;
+        return -1;
+    }
+
+    memcpy(client->response + client->response_length, buffer, length);
+    client->response_length += length;
+    return 0;
+}
+
+static int enqueue_error_response(control_client_t *client, const char *message)
 {
     char response[256];
     int length = snprintf(response, sizeof(response), "error %s\n", message);
@@ -125,7 +138,8 @@ static int write_error_response(int fd, const char *message)
         return -1;
     }
 
-    return cubicle_write_all(fd, response, (size_t)length);
+    client->kind = CONTROL_CLIENT_RESPONDING;
+    return enqueue_response(client, response, (size_t)length);
 }
 
 void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS])
@@ -134,6 +148,8 @@ void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLI
         clients[i].fd = -1;
         clients[i].kind = CONTROL_CLIENT_EMPTY;
         clients[i].request_length = 0;
+        clients[i].response_length = 0;
+        clients[i].response_offset = 0;
     }
 }
 
@@ -153,10 +169,12 @@ void close_control_client(control_client_t *client, controller_state_t *state)
     client->fd = -1;
     client->kind = CONTROL_CLIENT_EMPTY;
     client->request_length = 0;
+    client->response_length = 0;
+    client->response_offset = 0;
 }
 
 void close_all_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
-                                      controller_state_t *state)
+                               controller_state_t *state)
 {
     for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
         close_control_client(&clients[i], state);
@@ -190,22 +208,23 @@ static long long stream_available_offset(const controller_state_t *state,
     return -1;
 }
 
-static int read_stream_range(int client_fd, const controller_state_t *state,
+static int read_stream_range(control_client_t *client,
+                             const controller_state_t *state,
                              const char *stream, long long start,
                              long long requested_length)
 {
     if (start < 0 || requested_length < 0 || requested_length > 65536) {
-        return write_error_response(client_fd, "invalid_range");
+        return enqueue_error_response(client, "invalid_range");
     }
 
     const char *file_name = stream_file_name(stream);
     long long available = stream_available_offset(state, stream);
     if (file_name == NULL || available < 0) {
-        return write_error_response(client_fd, "unknown_stream");
+        return enqueue_error_response(client, "unknown_stream");
     }
 
     if (start > available) {
-        return write_error_response(client_fd, "range_past_end");
+        return enqueue_error_response(client, "range_past_end");
     }
 
     long long length = requested_length;
@@ -215,18 +234,18 @@ static int read_stream_range(int client_fd, const controller_state_t *state,
 
     char path[PATH_MAX];
     if (make_state_file_path(path, state->dir, file_name) < 0) {
-        return write_error_response(client_fd, "state_path_too_long");
+        return enqueue_error_response(client, "state_path_too_long");
     }
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        return write_error_response(client_fd, "open_failed");
+        return enqueue_error_response(client, "open_failed");
     }
 
     char header[64];
     int header_length = snprintf(header, sizeof(header), "ok length=%lld\n", length);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
+        enqueue_response(client, header, (size_t)header_length) < 0) {
         close(fd);
         return -1;
     }
@@ -256,7 +275,7 @@ static int read_stream_range(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (enqueue_response(client, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
@@ -265,12 +284,14 @@ static int read_stream_range(int client_fd, const controller_state_t *state,
     }
 
     close(fd);
+    client->kind = CONTROL_CLIENT_RESPONDING;
     return 0;
 }
 
-static int write_stream_bytes(int client_fd, const controller_state_t *state,
-                              const char *stream, long long start,
-                              long long length)
+static int enqueue_stream_bytes(control_client_t *client,
+                                const controller_state_t *state,
+                                const char *stream, long long start,
+                                long long length)
 {
     const char *file_name = stream_file_name(stream);
     if (file_name == NULL) {
@@ -312,7 +333,7 @@ static int write_stream_bytes(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (enqueue_response(client, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
@@ -324,30 +345,31 @@ static int write_stream_bytes(int client_fd, const controller_state_t *state,
     return 0;
 }
 
-static int write_file_response(int client_fd, const controller_state_t *state,
+static int write_file_response(control_client_t *client,
+                               const controller_state_t *state,
                                const char *file_name)
 {
     char path[PATH_MAX];
     if (make_state_file_path(path, state->dir, file_name) < 0) {
-        return write_error_response(client_fd, "state_path_too_long");
+        return enqueue_error_response(client, "state_path_too_long");
     }
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        return write_error_response(client_fd, "open_failed");
+        return enqueue_error_response(client, "open_failed");
     }
 
     struct stat st;
     if (fstat(fd, &st) < 0 || st.st_size < 0 || st.st_size > 65536) {
         close(fd);
-        return write_error_response(client_fd, "read_too_large");
+        return enqueue_error_response(client, "read_too_large");
     }
 
     char header[64];
     int header_length = snprintf(header, sizeof(header), "ok length=%lld\n",
                                  (long long)st.st_size);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
+        enqueue_response(client, header, (size_t)header_length) < 0) {
         close(fd);
         return -1;
     }
@@ -368,33 +390,34 @@ static int write_file_response(int client_fd, const controller_state_t *state,
             break;
         }
 
-        if (cubicle_write_all(client_fd, buffer, (size_t)read_result) < 0) {
+        if (enqueue_response(client, buffer, (size_t)read_result) < 0) {
             close(fd);
             return -1;
         }
     }
 
     close(fd);
+    client->kind = CONTROL_CLIENT_RESPONDING;
     return 0;
 }
 
-static int write_events_after_response(int client_fd,
+static int write_events_after_response(control_client_t *client,
                                        const controller_state_t *state,
                                        long long after_sequence,
                                        long long limit)
 {
     if (after_sequence < 0 || limit < 0 || limit > 1024) {
-        return write_error_response(client_fd, "invalid_event_range");
+        return enqueue_error_response(client, "invalid_event_range");
     }
 
     char path[PATH_MAX];
     if (make_state_file_path(path, state->dir, "events.log") < 0) {
-        return write_error_response(client_fd, "state_path_too_long");
+        return enqueue_error_response(client, "state_path_too_long");
     }
 
     FILE *file = fopen(path, "r");
     if (file == NULL) {
-        return write_error_response(client_fd, "open_failed");
+        return enqueue_error_response(client, "open_failed");
     }
 
     char payload[65536];
@@ -425,23 +448,29 @@ static int write_events_after_response(int client_fd,
     int header_length = snprintf(header, sizeof(header),
                                  "ok count=%lld length=%zu\n", count, used);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
+        enqueue_response(client, header, (size_t)header_length) < 0) {
         return -1;
     }
 
-    return cubicle_write_all(client_fd, payload, used);
+    if (enqueue_response(client, payload, used) < 0) {
+        return -1;
+    }
+
+    client->kind = CONTROL_CLIENT_RESPONDING;
+    return 0;
 }
 
-static int send_attach_catchup(int client_fd, const controller_state_t *state,
+static int send_attach_catchup(control_client_t *client,
+                               const controller_state_t *state,
                                const char *stream, long long start)
 {
     long long available = stream_available_offset(state, stream);
     if (available < 0) {
-        return write_error_response(client_fd, "unknown_stream");
+        return enqueue_error_response(client, "unknown_stream");
     }
 
     if (start < 0 || start > available) {
-        return write_error_response(client_fd, "invalid_attach_start");
+        return enqueue_error_response(client, "invalid_attach_start");
     }
 
     long long length = available - start;
@@ -450,11 +479,11 @@ static int send_attach_catchup(int client_fd, const controller_state_t *state,
                                  "ok attached stream=%s start=%lld length=%lld\n",
                                  stream, start, length);
     if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
-        cubicle_write_all(client_fd, header, (size_t)header_length) < 0) {
+        enqueue_response(client, header, (size_t)header_length) < 0) {
         return -1;
     }
 
-    return write_stream_bytes(client_fd, state, stream, start, length);
+    return enqueue_stream_bytes(client, state, stream, start, length);
 }
 
 static int dispatch_control_request(control_client_t *client,
@@ -473,39 +502,36 @@ static int dispatch_control_request(control_client_t *client,
         if (length < 0 || (size_t)length >= sizeof(response)) {
             result = -1;
         } else {
-            result = cubicle_write_all(client->fd, response, (size_t)length);
+            client->kind = CONTROL_CLIENT_RESPONDING;
+            result = enqueue_response(client, response, (size_t)length);
         }
     } else if (strcmp(request, "metadata") == 0) {
-        result = write_file_response(client->fd, state, "metadata");
+        result = write_file_response(client, state, "metadata");
     } else if (strncmp(request, "events after ", 13) == 0) {
         long long after_sequence = 0;
         long long limit = 0;
         if (sscanf(request + 13, "%lld %lld", &after_sequence, &limit) == 2) {
-            result = write_events_after_response(client->fd, state,
+            result = write_events_after_response(client, state,
                                                  after_sequence, limit);
         } else {
-            result = write_error_response(client->fd, "bad_events_command");
+            result = enqueue_error_response(client, "bad_events_command");
         }
     } else if (strncmp(request, "read ", 5) == 0) {
         char stream[16];
         long long start = 0;
         long long length = 0;
         if (sscanf(request + 5, "%15s %lld %lld", stream, &start, &length) == 3) {
-            result = read_stream_range(client->fd, state, stream, start, length);
+            result = read_stream_range(client, state, stream, start, length);
         } else {
-            result = write_error_response(client->fd, "bad_read_command");
+            result = enqueue_error_response(client, "bad_read_command");
         }
     } else if (strcmp(request, "attach stdin") == 0 ||
                strcmp(request, "attach in") == 0) {
         if (child_stdin_fd < 0) {
-            result = write_error_response(client->fd, "stdin_closed");
+            result = enqueue_error_response(client, "stdin_closed");
         } else {
-            result = cubicle_write_all(client->fd, "ok attached stream=stdin\n", 25);
-            if (result == 0) {
-                client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
-                append_event(state, "type=client_attached stream=stdin");
-                return 0;
-            }
+            client->kind = CONTROL_CLIENT_ATTACHING_STDIN;
+            result = enqueue_response(client, "ok attached stream=stdin\n", 25);
         }
     } else if (strncmp(request, "attach ", 7) == 0) {
         char stream[16];
@@ -513,9 +539,9 @@ static int dispatch_control_request(control_client_t *client,
         if (sscanf(request + 7, "%15s %lld", stream, &start) == 2) {
             const char *file_name = stream_file_name(stream);
             if (file_name == NULL) {
-                result = write_error_response(client->fd, "unknown_stream");
+                result = enqueue_error_response(client, "unknown_stream");
             } else {
-                result = send_attach_catchup(client->fd, state, stream, start);
+                result = send_attach_catchup(client, state, stream, start);
                 if (result == 0) {
                     if (strcmp(file_name, "stdout.log") == 0) {
                         client->kind = CONTROL_CLIENT_ATTACHED_STDOUT;
@@ -528,20 +554,21 @@ static int dispatch_control_request(control_client_t *client,
                 }
             }
         } else {
-            result = write_error_response(client->fd, "bad_attach_command");
+            result = enqueue_error_response(client, "bad_attach_command");
         }
     } else if (strcmp(request, "terminate") == 0) {
         if (kill(-child_pid, SIGTERM) == 0) {
             append_event(state, "type=signal_delivered signal=15");
-            result = cubicle_write_all(client->fd, "ok\n", 3);
+            client->kind = CONTROL_CLIENT_RESPONDING;
+            result = enqueue_response(client, "ok\n", 3);
         } else {
-            result = write_error_response(client->fd, "signal_failed");
+            result = enqueue_error_response(client, "signal_failed");
         }
     } else if (strncmp(request, "signal ", 7) == 0) {
         int signal_number = 0;
         if (sscanf(request + 7, "%d", &signal_number) != 1 ||
             signal_number <= 0 || signal_number >= CUBICLE_MAX_SIGNAL_NUMBER) {
-            result = write_error_response(client->fd, "bad_signal");
+            result = enqueue_error_response(client, "bad_signal");
         } else if (kill(-child_pid, signal_number) == 0) {
             char event[128];
             int event_length = snprintf(event, sizeof(event),
@@ -550,16 +577,20 @@ static int dispatch_control_request(control_client_t *client,
             if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
                 append_event(state, event);
             }
-            result = cubicle_write_all(client->fd, "ok\n", 3);
+            client->kind = CONTROL_CLIENT_RESPONDING;
+            result = enqueue_response(client, "ok\n", 3);
         } else {
-            result = write_error_response(client->fd, "signal_failed");
+            result = enqueue_error_response(client, "signal_failed");
         }
     } else {
-        result = write_error_response(client->fd, "unknown_command");
+        result = enqueue_error_response(client, "unknown_command");
     }
 
-    close_control_client(client, state);
-    return result < 0 ? 0 : result;
+    if (result < 0) {
+        close_control_client(client, state);
+    }
+
+    return 0;
 }
 
 static int finish_control_request(control_client_t *client,
@@ -577,9 +608,45 @@ static int finish_control_request(control_client_t *client,
     return 0;
 }
 
-int accept_control_clients(int listen_fd,
-                                  control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
+int flush_control_client_response(control_client_t *client,
                                   controller_state_t *state)
+{
+    while (client->response_offset < client->response_length) {
+        ssize_t result = write(client->fd,
+                               client->response + client->response_offset,
+                               client->response_length - client->response_offset);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+
+            close_control_client(client, state);
+            return 0;
+        }
+
+        client->response_offset += (size_t)result;
+    }
+
+    client->response_length = 0;
+    client->response_offset = 0;
+
+    if (client->kind == CONTROL_CLIENT_RESPONDING) {
+        close_control_client(client, state);
+    } else if (client->kind == CONTROL_CLIENT_ATTACHING_STDIN) {
+        client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
+        append_event(state, "type=client_attached stream=stdin");
+    }
+
+    return 0;
+}
+
+int accept_control_clients(int listen_fd,
+                           control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
+                           controller_state_t *state)
 {
     for (;;) {
         int client_fd = accept(listen_fd, NULL, NULL);
@@ -604,7 +671,8 @@ int accept_control_clients(int listen_fd,
         }
 
         if (slot == CUBICLE_MAX_CONTROL_CLIENTS) {
-            write_error_response(client_fd, "too_many_clients");
+            const char response[] = "error too_many_clients\n";
+            cubicle_write_all(client_fd, response, sizeof(response) - 1);
             close(client_fd);
             continue;
         }
@@ -617,15 +685,17 @@ int accept_control_clients(int listen_fd,
         clients[slot].fd = client_fd;
         clients[slot].kind = CONTROL_CLIENT_READING;
         clients[slot].request_length = 0;
+        clients[slot].response_length = 0;
+        clients[slot].response_offset = 0;
         clients[slot].request[0] = '\0';
         (void)state;
     }
 }
 
 int read_control_client_request(control_client_t *client,
-                                       controller_state_t *state,
-                                       pid_t child_pid,
-                                       int child_stdin_fd)
+                                controller_state_t *state,
+                                pid_t child_pid,
+                                int child_stdin_fd)
 {
     for (;;) {
         char buffer[128];
@@ -661,14 +731,16 @@ int read_control_client_request(control_client_t *client,
             }
 
             if (buffer[i] == '\0') {
-                write_error_response(client->fd, "bad_request");
-                close_control_client(client, state);
+                if (enqueue_error_response(client, "bad_request") < 0) {
+                    close_control_client(client, state);
+                }
                 return 0;
             }
 
             if (client->request_length + 1 >= sizeof(client->request)) {
-                write_error_response(client->fd, "request_too_long");
-                close_control_client(client, state);
+                if (enqueue_error_response(client, "request_too_long") < 0) {
+                    close_control_client(client, state);
+                }
                 return 0;
             }
 
@@ -678,10 +750,10 @@ int read_control_client_request(control_client_t *client,
 }
 
 void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
-                                      controller_state_t *state,
-                                      const char *stream,
-                                      const char *buffer,
-                                      size_t length)
+                               controller_state_t *state,
+                               const char *stream,
+                               const char *buffer,
+                               size_t length)
 {
     control_client_kind_t kind = strcmp(stream, "stdout") == 0
                                      ? CONTROL_CLIENT_ATTACHED_STDOUT
@@ -692,7 +764,7 @@ void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTROL_CLIE
             continue;
         }
 
-        if (write_best_effort(clients[i].fd, buffer, length) < 0) {
+        if (enqueue_response(&clients[i], buffer, length) < 0) {
             close_control_client(&clients[i], state);
         }
     }

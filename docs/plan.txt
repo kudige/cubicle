@@ -152,48 +152,47 @@
   - do not unlink non-socket filesystem entries
   - replace stale socket paths only
   - set control socket permissions explicitly
+- Finished the current stream control response semantics:
+  - queue bounded per-client control responses
+  - flush queued responses from the stream poll loop with POLLOUT
+  - cover slow large-read clients while other control requests continue
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
-1. Finish stream protocol semantics.
-   - Replace synchronous control responses with poll-driven outbound queues.
-   - Cover read, metadata, events, and attach catch-up responses.
-   - Keep slow clients from blocking or destabilizing the controller.
-
-2. Add completed-state retention.
+1. Add completed-state retention.
    - Keep a controller available briefly after child exit and output drain.
    - Allow read-only status, metadata, events, and stream read commands.
    - Reject stdin, signal, terminate, and new interactive actions after completion.
 
-3. Improve manager event loop.
+2. Improve manager event loop.
    - Replace bounded follow polling with a long-running manager event loop.
 
-4. Harden manager persistence.
+3. Harden manager persistence.
    - Replace direct TSV mutation with a concurrency-safe manager authority.
    - Prefer a persistent manager daemon with transactional storage.
    - Enforce uniqueness for workspace names, process IDs, and workspace-local
      friendly names.
 
-5. Implement TTY mode.
+4. Implement TTY mode.
    - Allocate PTY.
    - Wire stdin/stdout/stderr through PTY.
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-6. Implement TTY with captured stderr.
+5. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.
 
-7. Add provisional user-facing CLI commands.
+6. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-8. Expand tests.
+7. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.

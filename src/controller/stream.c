@@ -165,8 +165,12 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             client_indexes[i] = poll_count;
             poll_fds[poll_count].fd = clients[i].fd;
             poll_fds[poll_count].events = POLLHUP | POLLERR;
-            if (clients[i].kind == CONTROL_CLIENT_READING ||
-                clients[i].kind == CONTROL_CLIENT_ATTACHED_STDIN) {
+            if (clients[i].response_offset < clients[i].response_length) {
+                poll_fds[poll_count].events |= POLLOUT;
+            }
+            if ((clients[i].kind == CONTROL_CLIENT_READING ||
+                 clients[i].kind == CONTROL_CLIENT_ATTACHED_STDIN) &&
+                clients[i].response_offset == clients[i].response_length) {
                 poll_fds[poll_count].events |= POLLIN;
             }
             poll_fds[poll_count].revents = 0;
@@ -203,6 +207,17 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             short revents = poll_fds[client_indexes[i]].revents;
+            if ((revents & POLLOUT) != 0 &&
+                flush_control_client_response(&clients[i], state) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed flushing control response");
+                return -1;
+            }
+
+            if (clients[i].kind == CONTROL_CLIENT_EMPTY) {
+                continue;
+            }
+
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
@@ -221,7 +236,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if (clients[i].kind != CONTROL_CLIENT_EMPTY &&
-                (revents & (POLLHUP | POLLERR)) != 0) {
+                (revents & (POLLHUP | POLLERR)) != 0 &&
+                clients[i].response_offset == clients[i].response_length) {
                 close_control_client(&clients[i], state);
                 continue;
             }

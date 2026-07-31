@@ -15,13 +15,16 @@
 #define CUBICLE_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_MAX_CONTROL_CLIENTS 32
 #define CUBICLE_REQUEST_MAX 256
+#define CUBICLE_RESPONSE_MAX 65792
 
 typedef enum control_client_kind {
     CONTROL_CLIENT_EMPTY = 0,
     CONTROL_CLIENT_READING = 1,
-    CONTROL_CLIENT_ATTACHED_STDOUT = 2,
-    CONTROL_CLIENT_ATTACHED_STDERR = 3,
-    CONTROL_CLIENT_ATTACHED_STDIN = 4
+    CONTROL_CLIENT_RESPONDING = 2,
+    CONTROL_CLIENT_ATTACHED_STDOUT = 3,
+    CONTROL_CLIENT_ATTACHED_STDERR = 4,
+    CONTROL_CLIENT_ATTACHING_STDIN = 5,
+    CONTROL_CLIENT_ATTACHED_STDIN = 6
 } control_client_kind_t;
 
 typedef enum stdin_policy {
@@ -54,6 +57,9 @@ typedef struct control_client {
     control_client_kind_t kind;
     char request[CUBICLE_REQUEST_MAX];
     size_t request_length;
+    char response[CUBICLE_RESPONSE_MAX];
+    size_t response_length;
+    size_t response_offset;
 } control_client_t;
 
 void close_if_open(int *fd);
@@ -85,6 +91,8 @@ int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
                                 int child_stdin_fd);
+int flush_control_client_response(control_client_t *client,
+                                  controller_state_t *state);
 void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
                                controller_state_t *state,
                                const char *stream,

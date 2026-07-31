@@ -30,6 +30,10 @@ error CODE
 For responses that include stream bytes, the header line ends with `\n` and the
 advertised number of raw bytes follows immediately.
 
+Control responses are buffered per client and flushed from the controller poll
+loop. A client that cannot accept its bounded response queue is closed without
+failing the controller.
+
 ## Commands
 
 ### status
