@@ -78,3 +78,27 @@ if [ -S "$control_socket" ]; then
     echo "manager-started controller did not stop" >&2
     exit 1
 fi
+
+fast_output=$("$CUBICLE_MANAGER" \
+    --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    process start \
+    --workspace "Project A" \
+    --friendly-name fast-1 \
+    --mode stream \
+    --stdin-policy eof \
+    -- sh -c 'printf "fast\n"')
+
+fast_process_id=${fast_output#process id=}
+fast_process_id=${fast_process_id%% workspace_id=*}
+fast_socket=${fast_output##* control_socket=}
+
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$fast_process_id" >"$tmpdir/resolve-fast"
+grep -q "^$fast_process_id	$workspace_id	fast-1	stream	exited	.*	$fast_socket$" "$tmpdir/resolve-fast"
+
+if [ -S "$fast_socket" ]; then
+    echo "fast process should not leave a live control socket" >&2
+    exit 1
+fi
+
+printf "fast\n" | cmp - "$state_dir/controllers/$fast_process_id/stdout.log"

@@ -124,9 +124,9 @@ DIR/controllers/PROCESS_ID
 The returned `control_socket` is the direct controller socket clients should use
 for high-volume process I/O.
 
-Current limitation: `process start` waits for a live controller socket and
-metadata. A command that exits before the manager observes that socket can fail
-startup discovery even though the controller briefly ran.
+If a process exits before the manager observes a live control socket, the
+manager still registers it as `exited` when controller metadata and a
+`process_exited` event are available.
 
 ### events poll
 

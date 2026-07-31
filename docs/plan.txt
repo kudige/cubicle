@@ -94,6 +94,7 @@
   - process resolve returns direct controller details by process ID
   - process resolve supports workspace-local friendly names
   - process I/O remains direct through the controller socket
+  - short-lived processes that exit before socket discovery are registered as exited
 - Added initial workspace event aggregation:
   - events poll consumes manager-started controller primitive journals
   - manager maintains per-process cursors
@@ -115,7 +116,6 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Add workspace event aggregation.
-   - Harden process start for commands that exit before socket discovery.
    - Replace bounded follow polling with a long-running manager event loop.
 
 3. Implement TTY mode.

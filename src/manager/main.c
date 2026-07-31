@@ -388,13 +388,14 @@ static int append_process_record(const manager_state_t *state,
                                  const char *workspace_id,
                                  const char *friendly_name,
                                  const char *mode,
+                                 const char *process_state,
                                  const char *controller_id,
                                  const char *control_socket)
 {
     char line[PATH_MAX + 512];
-    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\trunning\t%s\t%s\n",
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
                           process_id, workspace_id, friendly_name, mode,
-                          controller_id, control_socket);
+                          process_state, controller_id, control_socket);
     if (length < 0 || (size_t)length >= sizeof(line)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -575,7 +576,7 @@ static int command_process_register(const manager_state_t *state, int argc,
     }
 
     if (append_process_record(state, process_id, workspace_record.id,
-                              friendly_name, mode, controller_id,
+                              friendly_name, mode, "running", controller_id,
                               control_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
@@ -587,8 +588,43 @@ static int command_process_register(const manager_state_t *state, int argc,
     return 0;
 }
 
+static int event_log_has_exit(const char *metadata_path)
+{
+    char events_path[PATH_MAX];
+    int result = snprintf(events_path, sizeof(events_path), "%s", metadata_path);
+    if (result < 0 || (size_t)result >= sizeof(events_path)) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+
+    char *last_slash = strrchr(events_path, '/');
+    if (last_slash == NULL) {
+        return 0;
+    }
+    snprintf(last_slash + 1, (size_t)(events_path + sizeof(events_path) - last_slash - 1),
+             "events.log");
+
+    FILE *file = fopen(events_path, "r");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strstr(line, "type=process_exited") != NULL) {
+            fclose(file);
+            return 1;
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
 static int wait_for_controller_ready(const char *control_socket,
-                                     const char *metadata_path)
+                                     const char *metadata_path,
+                                     char *process_state,
+                                     size_t process_state_size)
 {
     for (int i = 0; i < 100; ++i) {
         struct stat socket_stat;
@@ -597,6 +633,14 @@ static int wait_for_controller_ready(const char *control_socket,
             S_ISSOCK(socket_stat.st_mode) &&
             stat(metadata_path, &metadata_stat) == 0 &&
             metadata_stat.st_size > 0) {
+            snprintf(process_state, process_state_size, "running");
+            return 0;
+        }
+
+        if (stat(metadata_path, &metadata_stat) == 0 &&
+            metadata_stat.st_size > 0 &&
+            event_log_has_exit(metadata_path)) {
+            snprintf(process_state, process_state_size, "exited");
             return 0;
         }
 
@@ -788,9 +832,11 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 1;
     }
 
+    char process_state[32];
     if (launch_controller(state, controller_state, control_socket, mode,
                           stdin_policy, &argv[command_index]) < 0 ||
-        wait_for_controller_ready(control_socket, metadata_path) < 0) {
+        wait_for_controller_ready(control_socket, metadata_path, process_state,
+                                  sizeof(process_state)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
@@ -803,7 +849,7 @@ static int command_process_start(const manager_state_t *state, int argc,
     }
 
     if (append_process_record(state, process_id, workspace_record.id,
-                              friendly_name, mode, controller_id,
+                              friendly_name, mode, process_state, controller_id,
                               control_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
