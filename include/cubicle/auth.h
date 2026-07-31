@@ -30,6 +30,7 @@ typedef struct cubicle_auth_options {
     const unsigned char *public_key;
     size_t public_key_length;
     const char *expected_server_identity;
+    cubicle_protocol_capability_mask_t required_capabilities;
 } cubicle_auth_options_t;
 
 typedef struct cubicle_session_info {
@@ -38,25 +39,14 @@ typedef struct cubicle_session_info {
     cubicle_key_id_t client_key_id;
     uint32_t protocol_major;
     uint32_t protocol_minor;
+    cubicle_protocol_capability_mask_t negotiated_capabilities;
     uint64_t authenticated_at_ms;
     uint64_t expires_at_ms;
 } cubicle_session_info_t;
 
-cubicle_error_code_t cubicle_signer_create(
-    const cubicle_signer_callbacks_t *callbacks,
-    void *context,
-    cubicle_signer_t **signer_out);
-
-cubicle_error_code_t cubicle_signer_from_private_key_file(
-    const char *path,
-    cubicle_signer_t **signer_out,
-    cubicle_error_t *error);
-
-cubicle_error_code_t cubicle_signer_from_ssh_agent(
-    const char *public_key_fingerprint,
-    cubicle_signer_t **signer_out,
-    cubicle_error_t *error);
-
+cubicle_error_code_t cubicle_signer_create(const cubicle_signer_callbacks_t *callbacks, void *context, cubicle_signer_t **signer_out);
+cubicle_error_code_t cubicle_signer_from_private_key_file(const char *path, cubicle_signer_t **signer_out, cubicle_error_t *error);
+cubicle_error_code_t cubicle_signer_from_ssh_agent(const char *public_key_fingerprint, cubicle_signer_t **signer_out, cubicle_error_t *error);
 void cubicle_signer_destroy(cubicle_signer_t *signer);
 
 #ifdef __cplusplus
