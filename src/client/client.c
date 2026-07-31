@@ -1,4 +1,7 @@
 #include "cubicle/client.h"
+#include "cubicle/manager.h"
+#include "cubicle/process.h"
+#include "cubicle/workspace.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -21,6 +24,7 @@ static cubicle_error_code_t set_error(cubicle_client_t *client,
     if (client != NULL) {
         client->last_error.code = code;
         client->last_error.system_errno = system_errno;
+        client->last_error.retryable = false;
         if (message == NULL) {
             client->last_error.message[0] = '\0';
         } else {
@@ -94,6 +98,16 @@ static cubicle_error_code_t rpc_not_implemented(cubicle_client_t *client,
     return set_error(client, CUBICLE_ERR_UNSUPPORTED, 0, message);
 }
 
+cubicle_error_code_t cubicle_client_session_info(
+    const cubicle_client_t *client,
+    cubicle_session_info_t *session_out)
+{
+    if (client == NULL || session_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    return CUBICLE_ERR_UNSUPPORTED;
+}
+
 cubicle_error_code_t cubicle_manager_ping(cubicle_client_t *client)
 {
     if (client == NULL) {
@@ -103,11 +117,12 @@ cubicle_error_code_t cubicle_manager_ping(cubicle_client_t *client)
 }
 
 cubicle_error_code_t cubicle_workspace_create(
-    cubicle_client_t *client, const char *name,
+    cubicle_client_t *client,
+    const cubicle_workspace_create_options_t *options,
     cubicle_workspace_info_t *workspace_out)
 {
-    if (client == NULL || name == NULL || name[0] == '\0' ||
-        workspace_out == NULL) {
+    if (client == NULL || options == NULL || options->name == NULL ||
+        options->name[0] == '\0' || workspace_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
     return rpc_not_implemented(client, "workspace.create");
