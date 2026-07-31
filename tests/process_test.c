@@ -36,12 +36,27 @@ int main(void)
     failures += expect_string("running state",
                               cubicle_process_state_name(CUBICLE_PROCESS_RUNNING),
                               "running");
-    failures += expect_string("exited state",
-                              cubicle_process_state_name(CUBICLE_PROCESS_EXITED),
-                              "exited");
+    failures += expect_string("allocated state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_ALLOCATED),
+                              "allocated");
+    failures += expect_string("stopping state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_STOPPING),
+                              "stopping");
+    failures += expect_string("draining state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_DRAINING),
+                              "draining");
+    failures += expect_string("completed state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_COMPLETED),
+                              "completed");
     failures += expect_string("failed state",
                               cubicle_process_state_name(CUBICLE_PROCESS_FAILED),
                               "failed");
+    failures += expect_string("lost state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_LOST),
+                              "lost");
+    failures += expect_string("removed state",
+                              cubicle_process_state_name(CUBICLE_PROCESS_REMOVED),
+                              "removed");
     failures += expect_string("unknown state",
                               cubicle_process_state_name((cubicle_process_state_t)99),
                               "unknown");
