@@ -44,7 +44,11 @@ target_compile_options(cubicle-manager PRIVATE
 )
 
 add_executable(cubicle-controller
+    src/controller/control.c
+    src/controller/io.c
     src/controller/main.c
+    src/controller/state.c
+    src/controller/stream.c
 )
 
 target_link_libraries(cubicle-controller PRIVATE cubicle_common)

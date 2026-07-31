@@ -121,6 +121,12 @@
 - Added a controller daemon integration test.
 - Added a manager registry integration test.
 - Added a manager process-start integration test.
+- Split the controller implementation into focused internal modules:
+  - CLI entrypoint
+  - stream process lifecycle
+  - durable state and event journaling
+  - control socket protocol and attachments
+  - shared controller I/O helpers
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
