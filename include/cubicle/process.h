@@ -11,9 +11,9 @@ extern "C" {
 typedef struct cubicle_client cubicle_client_t;
 
 typedef enum cubicle_process_mode {
-    CUBICLE_PROCESS_STREAM = 0,
-    CUBICLE_PROCESS_TTY = 1,
-    CUBICLE_PROCESS_TTY_CAPTURED_STDERR = 2
+    CUBICLE_PROCESS_STREAM = 1,
+    CUBICLE_PROCESS_TTY = 2,
+    CUBICLE_PROCESS_TTY_CAPTURED_STDERR = 3
 } cubicle_process_mode_t;
 
 typedef enum cubicle_process_state {
@@ -80,6 +80,7 @@ typedef struct cubicle_process_filter {
     const cubicle_process_state_t *states;
     size_t state_count;
     bool include_completed;
+    cubicle_page_options_t page;
 } cubicle_process_filter_t;
 
 typedef struct cubicle_process_terminate_options {
@@ -95,58 +96,18 @@ typedef struct cubicle_output_chunk {
     size_t length;
 } cubicle_output_chunk_t;
 
-cubicle_error_code_t cubicle_process_start(
-    cubicle_client_t *client,
-    const cubicle_process_start_options_t *options,
-    cubicle_process_info_t *process_out);
-
-cubicle_error_code_t cubicle_process_get(
-    cubicle_client_t *client,
-    const char *process_id_or_name,
-    const char *workspace_id,
-    cubicle_process_info_t *process_out);
-
-cubicle_error_code_t cubicle_process_list(
-    cubicle_client_t *client,
-    const cubicle_process_filter_t *filter,
-    cubicle_process_info_t **processes_out,
-    size_t *count_out);
-
-cubicle_error_code_t cubicle_process_signal(
-    cubicle_client_t *client,
-    const char *process_id,
-    int signal_number);
-
-cubicle_error_code_t cubicle_process_terminate(
-    cubicle_client_t *client,
-    const char *process_id,
-    const cubicle_process_terminate_options_t *options);
-
-cubicle_error_code_t cubicle_process_kill(
-    cubicle_client_t *client,
-    const char *process_id);
-
-cubicle_error_code_t cubicle_process_wait(
-    cubicle_client_t *client,
-    const char *process_id,
-    int timeout_ms,
-    cubicle_process_info_t *process_out);
-
-cubicle_error_code_t cubicle_process_remove(
-    cubicle_client_t *client,
-    const char *process_id);
-
-cubicle_error_code_t cubicle_process_read_output(
-    cubicle_client_t *client,
-    const char *process_id,
-    cubicle_stream_kind_t stream,
-    uint64_t offset,
-    size_t maximum_length,
-    cubicle_output_chunk_t *chunk_out);
+cubicle_error_code_t cubicle_process_start(cubicle_client_t *client, const cubicle_process_start_options_t *options, cubicle_process_info_t *process_out);
+cubicle_error_code_t cubicle_process_get(cubicle_client_t *client, const char *process_id_or_name, const char *workspace_id, cubicle_process_info_t *process_out);
+cubicle_error_code_t cubicle_process_list(cubicle_client_t *client, const cubicle_process_filter_t *filter, cubicle_process_info_t **processes_out, size_t *count_out, cubicle_page_info_t *page_out);
+cubicle_error_code_t cubicle_process_signal(cubicle_client_t *client, const char *process_id, int signal_number);
+cubicle_error_code_t cubicle_process_terminate(cubicle_client_t *client, const char *process_id, const cubicle_process_terminate_options_t *options);
+cubicle_error_code_t cubicle_process_kill(cubicle_client_t *client, const char *process_id);
+cubicle_error_code_t cubicle_process_wait(cubicle_client_t *client, const char *process_id, int timeout_ms, cubicle_process_info_t *process_out);
+cubicle_error_code_t cubicle_process_remove(cubicle_client_t *client, const char *process_id);
+cubicle_error_code_t cubicle_process_read_output(cubicle_client_t *client, const char *process_id, cubicle_stream_kind_t stream, uint64_t offset, size_t maximum_length, cubicle_output_chunk_t *chunk_out);
 
 void cubicle_process_list_free(cubicle_process_info_t *processes);
 void cubicle_output_chunk_free(cubicle_output_chunk_t *chunk);
-
 const char *cubicle_process_mode_name(cubicle_process_mode_t mode);
 const char *cubicle_process_state_name(cubicle_process_state_t state);
 
