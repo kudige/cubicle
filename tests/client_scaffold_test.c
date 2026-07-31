@@ -59,6 +59,9 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"events.list\"") != NULL) {
         assert(cubicle_rpc_success(response, sizeof(response), "c8",
                                    "{\"events\":[{\"global_sequence\":1,\"workspace_sequence\":1,\"timestamp_ms\":0,\"type\":\"process_started\",\"workspace_id\":\"workspace-1\",\"process_id\":\"process-1\",\"payload\":\"seq=1 type=process_started\"}],\"count\":1,\"has_more\":false}") == 0);
+    } else if (strstr(request_json, "\"process.read_output\"") != NULL) {
+        assert(cubicle_rpc_success(response, sizeof(response), "c9",
+                                   "{\"start_offset\":0,\"next_offset\":6,\"end_of_stream\":true,\"data\":\"hello\\n\",\"length\":6}") == 0);
     } else {
         assert(cubicle_rpc_error(response, sizeof(response), "cX",
                                  CUBICLE_ERR_UNSUPPORTED,
@@ -172,6 +175,18 @@ int main(void)
     assert(events[0].global_sequence == 1);
     assert(strcmp(events[0].process_id, "process-1") == 0);
     cubicle_events_free(events);
+
+    cubicle_output_chunk_t chunk;
+    memset(&chunk, 0, sizeof(chunk));
+    assert(cubicle_process_read_output(client, "process-1",
+                                       CUBICLE_STREAM_STDOUT, 0, 16,
+                                       &chunk) == CUBICLE_OK);
+    assert(chunk.start_offset == 0);
+    assert(chunk.next_offset == 6);
+    assert(chunk.end_of_stream == true);
+    assert(chunk.length == 6);
+    assert(memcmp(chunk.data, "hello\n", 6) == 0);
+    cubicle_output_chunk_free(&chunk);
 
     cubicle_client_disconnect(client);
     return 0;

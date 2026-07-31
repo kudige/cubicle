@@ -529,6 +529,20 @@ static int event_info_json(uint64_t global_sequence,
     return 0;
 }
 
+static const char *api_stream_file_name(const char *stream)
+{
+    if (strcmp(stream, "stdout") == 0) {
+        return "stdout.log";
+    }
+    if (strcmp(stream, "stderr") == 0) {
+        return "stderr.log";
+    }
+    if (strcmp(stream, "tty") == 0) {
+        return "stdout.log";
+    }
+    return NULL;
+}
+
 static int find_process_record(const manager_state_t *state,
                                const char *process_id_or_name,
                                const char *workspace_id,
@@ -2096,6 +2110,132 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             return manager_api_error(client_fd, request_id,
                                      CUBICLE_ERR_RESOURCE_LIMIT,
                                      "events response too large", false, 0);
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "process.read_output") == 0) {
+        char params[1024];
+        char process_id[128];
+        char stream[32];
+        uint64_t offset = 0;
+        uint64_t maximum_length = 0;
+        if (cubicle_rpc_get_object(request, "params", params,
+                                   sizeof(params)) < 0 ||
+            cubicle_rpc_get_string(params, "process_id", process_id,
+                                   sizeof(process_id)) < 0 ||
+            cubicle_rpc_get_string(params, "stream", stream,
+                                   sizeof(stream)) < 0 ||
+            cubicle_rpc_get_uint64(params, "offset", &offset) < 0 ||
+            cubicle_rpc_get_uint64(params, "maximum_length",
+                                   &maximum_length) < 0 ||
+            maximum_length > 8192) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INVALID_ARGUMENT,
+                                     "invalid read_output request", false, 0);
+        }
+
+        const char *file_name = api_stream_file_name(stream);
+        if (file_name == NULL) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INVALID_ARGUMENT,
+                                     "unknown output stream", false, 0);
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_NOT_FOUND,
+                                     "process not found", false, 0);
+        }
+
+        char path[PATH_MAX];
+        int path_length = snprintf(path, sizeof(path),
+                                   "%s/controllers/%s/%s", state->dir,
+                                   process.process_id, file_name);
+        if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_RESOURCE_LIMIT,
+                                     "output path too long", false, 0);
+        }
+
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_IO,
+                                     "failed to open output", true, errno);
+        }
+
+        struct stat status;
+        if (fstat(fd, &status) < 0) {
+            int saved_errno = errno;
+            close(fd);
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_IO,
+                                     "failed to stat output", true,
+                                     saved_errno);
+        }
+        if (offset > (uint64_t)status.st_size) {
+            close(fd);
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INVALID_ARGUMENT,
+                                     "offset is past end of output", false,
+                                     0);
+        }
+
+        size_t available = (size_t)((uint64_t)status.st_size - offset);
+        size_t read_length = available < maximum_length ? available
+                                                        : (size_t)maximum_length;
+        char data[8193];
+        size_t total = 0;
+        while (total < read_length) {
+            ssize_t nread = pread(fd, data + total, read_length - total,
+                                  (off_t)(offset + total));
+            if (nread < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                int saved_errno = errno;
+                close(fd);
+                return manager_api_error(client_fd, request_id,
+                                         CUBICLE_ERR_IO,
+                                         "failed to read output", true,
+                                         saved_errno);
+            }
+            if (nread == 0) {
+                break;
+            }
+            total += (size_t)nread;
+        }
+        close(fd);
+        data[total] = '\0';
+
+        char escaped_data[65536];
+        if (cubicle_json_escape(escaped_data, sizeof(escaped_data),
+                                data) < 0) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_RESOURCE_LIMIT,
+                                     "output chunk is too large", false, 0);
+        }
+
+        char result[131072];
+        int result_length = snprintf(result, sizeof(result),
+                                     "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":\"%s\",\"length\":%zu}",
+                                     (unsigned long long)offset,
+                                     (unsigned long long)(offset + total),
+                                     offset + total >=
+                                             (uint64_t)status.st_size
+                                         ? "true"
+                                         : "false",
+                                     escaped_data, total);
+        if (result_length < 0 || (size_t)result_length >= sizeof(result)) {
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_RESOURCE_LIMIT,
+                                     "read_output response too large",
+                                     false, 0);
         }
         return manager_api_success(client_fd, request_id, result);
     }

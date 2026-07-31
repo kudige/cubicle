@@ -980,13 +980,67 @@ cubicle_error_code_t cubicle_process_read_output(
     size_t maximum_length,
     cubicle_output_chunk_t *chunk_out)
 {
-    (void)stream;
-    (void)offset;
-    (void)maximum_length;
     if (client == NULL || process_id == NULL || chunk_out == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "process.read_output");
+    const char *stream_name = "stdout";
+    if (stream == CUBICLE_STREAM_STDERR) {
+        stream_name = "stderr";
+    } else if (stream == CUBICLE_STREAM_TTY) {
+        stream_name = "tty";
+    }
+
+    char escaped_process[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_process, sizeof(escaped_process),
+                            process_id) < 0) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, errno,
+                         "read_output request is too large");
+    }
+
+    char params[1024];
+    int length = snprintf(params, sizeof(params),
+                          "{\"process_id\":\"%s\",\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":%zu}",
+                          escaped_process, stream_name,
+                          (unsigned long long)offset, maximum_length);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
+                         "read_output request is too large");
+    }
+
+    char result[16384];
+    cubicle_error_code_t code = client_request(client, "process.read_output",
+                                               params, result,
+                                               sizeof(result));
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+
+    char data[8193];
+    int end_of_stream = 0;
+    uint64_t payload_length = 0;
+    memset(chunk_out, 0, sizeof(*chunk_out));
+    if (cubicle_rpc_get_uint64(result, "start_offset",
+                               &chunk_out->start_offset) < 0 ||
+        cubicle_rpc_get_uint64(result, "next_offset",
+                               &chunk_out->next_offset) < 0 ||
+        cubicle_rpc_get_bool(result, "end_of_stream",
+                             &end_of_stream) < 0 ||
+        cubicle_rpc_get_string(result, "data", data, sizeof(data)) < 0 ||
+        cubicle_rpc_get_uint64(result, "length", &payload_length) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid read_output response");
+    }
+
+    chunk_out->data = malloc((size_t)payload_length + 1);
+    if (chunk_out->data == NULL) {
+        return set_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
+                         "failed to allocate output chunk");
+    }
+    memcpy(chunk_out->data, data, (size_t)payload_length);
+    ((char *)chunk_out->data)[payload_length] = '\0';
+    chunk_out->length = (size_t)payload_length;
+    chunk_out->end_of_stream = end_of_stream != 0;
+    return CUBICLE_OK;
 }
 
 void cubicle_process_list_free(cubicle_process_info_t *processes)

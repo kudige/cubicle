@@ -54,6 +54,8 @@ process_id=${register_output#process id=}
 process_id=${process_id%% workspace_id=*}
 
 mkdir -p "$state_dir/controllers/$process_id"
+printf "hello\n" >"$state_dir/controllers/$process_id/stdout.log"
+printf "error\n" >"$state_dir/controllers/$process_id/stderr.log"
 cat >"$state_dir/controllers/$process_id/events.log" <<EOF
 seq=1 type=process_started controller_id=controller-1 pid=1 pgid=1 mode=stream
 seq=2 type=output stream=stdout start=0 length=6
@@ -184,6 +186,13 @@ printf "%s" "$process_name_response" | grep -q "\"id\": \"$process_id\""
 process_list_response=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
 printf "%s" "$process_list_response" | grep -q '"count": 1'
 printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-1"'
+
+read_output_response=$(send_manager_rpc process.read_output "{\"process_id\":\"$process_id\",\"stream\":\"stdout\",\"offset\":0,\"maximum_length\":16}")
+printf "%s" "$read_output_response" | grep -q '"ok": true'
+printf "%s" "$read_output_response" | grep -q '"start_offset": 0'
+printf "%s" "$read_output_response" | grep -q '"next_offset": 6'
+printf "%s" "$read_output_response" | grep -q '"end_of_stream": true'
+printf "%s" "$read_output_response" | grep -q '"data": "hello\\n"'
 
 for _ in $(seq 1 100); do
     if [ -f "$state_dir/workspace-events.log" ] &&
