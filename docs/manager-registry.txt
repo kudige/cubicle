@@ -123,3 +123,26 @@ DIR/controllers/PROCESS_ID
 
 The returned `control_socket` is the direct controller socket clients should use
 for high-volume process I/O.
+
+Current limitation: `process start` waits for a live controller socket and
+metadata. A command that exits before the manager observes that socket can fail
+startup discovery even though the controller briefly ran.
+
+### events poll
+
+```console
+cubicle-manager --state-dir DIR events poll
+cubicle-manager --state-dir DIR events poll --workspace "Project A"
+```
+
+Consumes primitive controller events from manager-started process state
+directories, appends workspace-scoped records to `workspace-events.log`, prints
+new records, and updates per-process cursors in `cursors.tsv`.
+
+Printed and persisted workspace event shape:
+
+```text
+workspace_id<TAB>process_id<TAB>friendly_name<TAB>primitive_event_line
+```
+
+Only events after the last consumed cursor are emitted on subsequent polls.

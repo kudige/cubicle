@@ -40,6 +40,11 @@ typedef struct process_record {
     char control_socket[PATH_MAX];
 } process_record_t;
 
+typedef struct cursor_record {
+    char process_id[MANAGER_ID_LENGTH + 1];
+    long long sequence;
+} cursor_record_t;
+
 static void print_usage(const char *program)
 {
     fprintf(stderr,
@@ -48,8 +53,9 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] process register --workspace NAME_OR_ID --friendly-name NAME --mode MODE --controller-id ID --control-socket PATH [--process-id ID]\n"
             "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
             "       %s [--state-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
+            "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
-            program, program, program, program, program, program);
+            program, program, program, program, program, program, program);
 }
 
 static int write_all(int fd, const char *buffer, size_t length)
@@ -267,6 +273,19 @@ static int parse_process_line(char *line, process_record_t *record)
     return 0;
 }
 
+static int parse_cursor_line(char *line, cursor_record_t *record)
+{
+    char *process_id = strtok(line, "\t\n");
+    char *sequence = strtok(NULL, "\t\n");
+    if (process_id == NULL || sequence == NULL) {
+        return -1;
+    }
+
+    snprintf(record->process_id, sizeof(record->process_id), "%s", process_id);
+    record->sequence = atoll(sequence);
+    return 0;
+}
+
 static FILE *open_state_file_for_read(const manager_state_t *state,
                                       const char *file_name)
 {
@@ -379,6 +398,117 @@ static int append_process_record(const manager_state_t *state,
     }
 
     return append_line(state, "processes.tsv", line);
+}
+
+static int process_events_path(char path[PATH_MAX], const manager_state_t *state,
+                               const char *process_id)
+{
+    int result = snprintf(path, PATH_MAX, "%s/controllers/%s/events.log",
+                          state->dir, process_id);
+    if (result < 0 || result >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static long long cursor_for_process(cursor_record_t *cursors, size_t cursor_count,
+                                    const char *process_id)
+{
+    for (size_t i = 0; i < cursor_count; ++i) {
+        if (strcmp(cursors[i].process_id, process_id) == 0) {
+            return cursors[i].sequence;
+        }
+    }
+
+    return 0;
+}
+
+static int update_cursor(cursor_record_t *cursors, size_t *cursor_count,
+                         const char *process_id, long long sequence)
+{
+    for (size_t i = 0; i < *cursor_count; ++i) {
+        if (strcmp(cursors[i].process_id, process_id) == 0) {
+            if (sequence > cursors[i].sequence) {
+                cursors[i].sequence = sequence;
+            }
+            return 0;
+        }
+    }
+
+    if (*cursor_count >= 256) {
+        errno = ENOSPC;
+        return -1;
+    }
+
+    snprintf(cursors[*cursor_count].process_id,
+             sizeof(cursors[*cursor_count].process_id), "%s", process_id);
+    cursors[*cursor_count].sequence = sequence;
+    ++(*cursor_count);
+    return 0;
+}
+
+static int load_cursors(const manager_state_t *state,
+                        cursor_record_t *cursors,
+                        size_t *cursor_count)
+{
+    *cursor_count = 0;
+
+    FILE *file = open_state_file_for_read(state, "cursors.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file) != NULL && *cursor_count < 256) {
+        cursor_record_t record;
+        if (parse_cursor_line(line, &record) == 0) {
+            cursors[*cursor_count] = record;
+            ++(*cursor_count);
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
+static int save_cursors(const manager_state_t *state,
+                        cursor_record_t *cursors,
+                        size_t cursor_count)
+{
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "cursors.tsv") < 0) {
+        return -1;
+    }
+
+    int result = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (result < 0 || (size_t)result >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *file = fopen(temp_path, "w");
+    if (file == NULL) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < cursor_count; ++i) {
+        fprintf(file, "%s\t%lld\n", cursors[i].process_id,
+                cursors[i].sequence);
+    }
+
+    if (fclose(file) != 0) {
+        return -1;
+    }
+
+    return rename(temp_path, path);
+}
+
+static int parse_event_sequence(const char *line, long long *sequence)
+{
+    return sscanf(line, "seq=%lld", sequence) == 1 ? 0 : -1;
 }
 
 static int command_process_register(const manager_state_t *state, int argc,
@@ -812,6 +942,111 @@ static int command_process_resolve(const manager_state_t *state, int argc,
     return 0;
 }
 
+static int command_events_poll(const manager_state_t *state, int argc, char **argv)
+{
+    const char *workspace = NULL;
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown events poll option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    workspace_record_t workspace_record;
+    if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
+        fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        return 1;
+    }
+
+    cursor_record_t cursors[256];
+    size_t cursor_count = 0;
+    if (load_cursors(state, cursors, &cursor_count) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    FILE *processes = open_state_file_for_read(state, "processes.tsv");
+    if (processes == NULL) {
+        return 0;
+    }
+
+    char process_line[PATH_MAX + 512];
+    while (fgets(process_line, sizeof(process_line), processes) != NULL) {
+        process_record_t process;
+        if (parse_process_line(process_line, &process) != 0) {
+            continue;
+        }
+
+        if (workspace != NULL &&
+            strcmp(process.workspace_id, workspace_record.id) != 0) {
+            continue;
+        }
+
+        char events_path[PATH_MAX];
+        if (process_events_path(events_path, state, process.process_id) < 0) {
+            continue;
+        }
+
+        FILE *events = fopen(events_path, "r");
+        if (events == NULL) {
+            continue;
+        }
+
+        long long cursor = cursor_for_process(cursors, cursor_count,
+                                              process.process_id);
+        long long max_sequence = cursor;
+        char event_line[1024];
+        while (fgets(event_line, sizeof(event_line), events) != NULL) {
+            long long sequence = 0;
+            if (parse_event_sequence(event_line, &sequence) < 0 ||
+                sequence <= cursor) {
+                continue;
+            }
+
+            event_line[strcspn(event_line, "\n")] = '\0';
+
+            char workspace_event[PATH_MAX + 1400];
+            int length = snprintf(workspace_event, sizeof(workspace_event),
+                                  "%s\t%s\t%s\t%s\n",
+                                  process.workspace_id, process.process_id,
+                                  process.friendly_name, event_line);
+            if (length < 0 || (size_t)length >= sizeof(workspace_event) ||
+                append_line(state, "workspace-events.log", workspace_event) < 0) {
+                fclose(events);
+                fclose(processes);
+                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                return 1;
+            }
+
+            printf("%s", workspace_event);
+            if (sequence > max_sequence) {
+                max_sequence = sequence;
+            }
+        }
+
+        fclose(events);
+
+        if (max_sequence > cursor &&
+            update_cursor(cursors, &cursor_count, process.process_id,
+                          max_sequence) < 0) {
+            fclose(processes);
+            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            return 1;
+        }
+    }
+
+    fclose(processes);
+
+    if (save_cursors(state, cursors, cursor_count) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
+
 static int dispatch_command(const manager_state_t *state, int argc, char **argv)
 {
     if (argc < 2) {
@@ -846,6 +1081,11 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
     if (strcmp(argv[0], "process") == 0 &&
         strcmp(argv[1], "resolve") == 0) {
         return command_process_resolve(state, argc - 2, &argv[2]);
+    }
+
+    if (strcmp(argv[0], "events") == 0 &&
+        strcmp(argv[1], "poll") == 0) {
+        return command_events_poll(state, argc - 2, &argv[2]);
     }
 
     return 2;

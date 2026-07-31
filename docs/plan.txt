@@ -94,6 +94,11 @@
   - process resolve returns direct controller details by process ID
   - process resolve supports workspace-local friendly names
   - process I/O remains direct through the controller socket
+- Added initial workspace event aggregation:
+  - events poll consumes manager-started controller primitive journals
+  - manager maintains per-process cursors
+  - manager appends workspace-scoped events
+  - events can be filtered by workspace name or ID
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -108,10 +113,8 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Add workspace event aggregation.
-   - Consume controller primitive events.
-   - Maintain per-controller cursors.
-   - Produce ordered workspace events.
    - Support event listing and follow behavior.
+   - Harden process start for commands that exit before socket discovery.
 
 3. Implement TTY mode.
    - Allocate PTY.
