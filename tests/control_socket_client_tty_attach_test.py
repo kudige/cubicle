@@ -46,6 +46,31 @@ def wait_for_socket_and_output(socket_path, stdout_log):
     raise AssertionError("controller did not become ready")
 
 
+def run_controller(controller, state_dir, socket_path, command, controller_stderr):
+    with open(os.devnull, "wb") as devnull, open(controller_stderr, "wb") as stderr_file:
+        return subprocess.Popen(
+            [
+                controller,
+                "--state-dir",
+                state_dir,
+                "--control-socket",
+                socket_path,
+                "--mode",
+                "tty",
+                "--stdin-policy",
+                "open",
+                "--",
+                sys.executable,
+                "-c",
+                command,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=devnull,
+            stderr=stderr_file,
+            close_fds=True,
+        )
+
+
 def main():
     controller = os.environ["CUBICLE_CONTROLLER"]
     control_client = os.environ["CUBICLE_CONTROL_CLIENT"]
@@ -56,34 +81,21 @@ def main():
         stdout_log = os.path.join(state_dir, "stdout.log")
         controller_stderr = os.path.join(tmpdir, "controller-stderr")
 
-        command = (
-            'printf "ready"; '
-            'IFS= read -r line; '
-            'printf "size:%s\\n" "$(stty size)"; '
-            'printf "typed:%s\\n" "$line"'
+        command = """
+import os
+import sys
+import time
+
+print("ready", end="", flush=True)
+line = sys.stdin.buffer.readline().decode().rstrip("\\n")
+time.sleep(0.2)
+size = os.get_terminal_size(sys.stdout.fileno())
+print(f"size:{size.lines} {size.columns}", flush=True)
+print(f"typed:{line}", flush=True)
+"""
+        controller_process = run_controller(
+            controller, state_dir, socket_path, command, controller_stderr
         )
-        with open(os.devnull, "wb") as devnull, open(controller_stderr, "wb") as stderr_file:
-            controller_process = subprocess.Popen(
-                [
-                    controller,
-                    "--state-dir",
-                    state_dir,
-                    "--control-socket",
-                    socket_path,
-                    "--mode",
-                    "tty",
-                    "--stdin-policy",
-                    "open",
-                    "--",
-                    "sh",
-                    "-c",
-                    command,
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=devnull,
-                stderr=stderr_file,
-                close_fds=True,
-            )
 
         master_fd, slave_fd = pty.openpty()
         set_window_size(master_fd, 44, 132)
@@ -111,16 +123,19 @@ def main():
             if "ready" not in output:
                 raise AssertionError(f"missing attach catch-up output: {output!r}")
 
-            subprocess.check_call(
-                [
-                    sys.executable,
-                    control_client,
-                    socket_path,
-                    "resize",
-                    "20",
-                    "60",
-                ]
-            )
+            with open(os.devnull, "wb") as devnull:
+                subprocess.check_call(
+                    [
+                        sys.executable,
+                        control_client,
+                        socket_path,
+                        "resize",
+                        "20",
+                        "60",
+                    ],
+                    stdout=devnull,
+                )
+            time.sleep(1.1)
             os.write(master_fd, b"hello from attach tty\n")
             output += read_until(master_fd, "typed:hello from attach tty",
                                  time.monotonic() + 5)
@@ -150,6 +165,80 @@ def main():
                 raise AssertionError(f"missing stdout attach event: {events!r}")
             if "type=client_attached stream=stdin" not in events:
                 raise AssertionError(f"missing stdin attach event: {events!r}")
+        finally:
+            if slave_fd >= 0:
+                os.close(slave_fd)
+            os.close(master_fd)
+            if controller_process.poll() is None:
+                controller_process.terminate()
+                controller_process.wait(timeout=5)
+            if "client_process" in locals() and client_process.poll() is None:
+                client_process.terminate()
+                client_process.wait(timeout=5)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_dir = os.path.join(tmpdir, "state")
+        socket_path = os.path.join(tmpdir, "control.sock")
+        stdout_log = os.path.join(state_dir, "stdout.log")
+        controller_stderr = os.path.join(tmpdir, "controller-stderr")
+
+        command = """
+import os
+import sys
+import termios
+import tty
+
+tty.setraw(sys.stdin.fileno())
+print("ready", end="", flush=True)
+data = os.read(sys.stdin.fileno(), 9)
+print("bytes:" + data.hex(), flush=True)
+"""
+        controller_process = run_controller(
+            controller, state_dir, socket_path, command, controller_stderr
+        )
+
+        master_fd, slave_fd = pty.openpty()
+        set_window_size(master_fd, 44, 132)
+
+        try:
+            wait_for_socket_and_output(socket_path, stdout_log)
+
+            client_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    control_client,
+                    socket_path,
+                    "attach",
+                    "tty",
+                ],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+            )
+            os.close(slave_fd)
+            slave_fd = -1
+
+            output = read_until(master_fd, "ready", time.monotonic() + 5)
+            if "ready" not in output:
+                raise AssertionError(f"missing raw attach output: {output!r}")
+
+            os.write(master_fd, b"\x1b[A\x1b[B\x1b[C")
+            output += read_until(master_fd, "bytes:1b5b411b5b421b5b43",
+                                 time.monotonic() + 5)
+            if "bytes:1b5b411b5b421b5b43" not in output:
+                raise AssertionError(f"missing raw escape bytes: {output!r}")
+
+            controller_status = controller_process.wait(timeout=5)
+            if controller_status != 0:
+                with open(controller_stderr, "rb") as stderr_file:
+                    stderr = stderr_file.read().decode(errors="replace")
+                raise AssertionError(f"controller exited {controller_status}: {stderr}")
+
+            client_status = client_process.wait(timeout=5)
+            if client_status != 0:
+                stderr = client_process.stderr.read().decode(errors="replace")
+                raise AssertionError(f"client exited {client_status}: {stderr}")
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)

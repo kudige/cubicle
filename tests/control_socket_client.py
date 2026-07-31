@@ -9,6 +9,10 @@ import socket
 import struct
 import sys
 import termios
+import time
+
+
+SIZE_SYNC_INTERVAL_SECONDS = 1.0
 
 
 def read_socket_response(client):
@@ -82,6 +86,14 @@ def sync_terminal_size(socket_path):
     terminal_size = get_terminal_size()
     if terminal_size is not None:
         resize_controller(socket_path, terminal_size[0], terminal_size[1])
+
+
+def sync_terminal_size_if_due(socket_path, last_sync_time):
+    now = time.monotonic()
+    if now - last_sync_time < SIZE_SYNC_INTERVAL_SECONDS:
+        return last_sync_time
+    sync_terminal_size(socket_path)
+    return now
 
 
 @contextlib.contextmanager
@@ -196,6 +208,7 @@ def attach_tty(socket_path, start):
         raise RuntimeError(f"attach tty requires mode=tty, got mode={mode}")
 
     sync_terminal_size(socket_path)
+    last_size_sync = time.monotonic()
 
     output_client = None
     input_client = None
@@ -224,6 +237,7 @@ def attach_tty(socket_path, start):
                 if resize_pending:
                     resize_pending = False
                     sync_terminal_size(socket_path)
+                    last_size_sync = time.monotonic()
 
                 read_fds = [output_client]
                 if stdin_open:
@@ -241,8 +255,9 @@ def attach_tty(socket_path, start):
                         with contextlib.suppress(OSError):
                             input_client.shutdown(socket.SHUT_WR)
                     else:
-                        sync_terminal_size(socket_path)
                         input_client.sendall(chunk)
+                        last_size_sync = sync_terminal_size_if_due(socket_path,
+                                                                   last_size_sync)
     finally:
         if previous_winch is not None:
             signal.signal(signal.SIGWINCH, previous_winch)
