@@ -131,6 +131,10 @@
   - accept LF and CRLF request terminators
   - reject embedded NUL bytes as bad_request
   - document ASCII command tokens with raw byte response payloads
+- Hardened controller stream lifecycle:
+  - keep the control socket reachable after stdout/stderr EOF while the child is alive
+  - reap child exit from the stream loop without losing the recorded exit status
+  - regress output-EOF-before-child-exit control socket behavior
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next

@@ -26,11 +26,70 @@ static int create_pipe(int pipe_fds[2], const char *name)
     return -1;
 }
 
+static int child_result_from_status(int status, controller_state_t *state)
+{
+    char event[256];
+    if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        int event_length = snprintf(event, sizeof(event),
+                                    "type=process_exited status=exited exit_code=%d",
+                                    exit_code);
+        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
+            append_event(state, event);
+        }
+        return exit_code;
+    }
+
+    if (WIFSIGNALED(status)) {
+        int signal_number = WTERMSIG(status);
+        int event_length = snprintf(event, sizeof(event),
+                                    "type=process_exited status=signaled signal=%d",
+                                    signal_number);
+        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
+            append_event(state, event);
+        }
+        return 128 + signal_number;
+    }
+
+    return 1;
+}
+
+static int reap_child_nonblocking(pid_t child_pid, controller_state_t *state,
+                                  int *child_reaped, int *child_result)
+{
+    if (*child_reaped) {
+        return 0;
+    }
+
+    int status = 0;
+    for (;;) {
+        pid_t result = waitpid(child_pid, &status, WNOHANG);
+        if (result == 0) {
+            return 0;
+        }
+
+        if (result == child_pid) {
+            *child_reaped = 1;
+            *child_result = child_result_from_status(status, state);
+            return 0;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        return -1;
+    }
+}
+
 static int stream_event_loop(stream_pipe_t pipes[2],
                              controller_state_t *state,
                              int control_fd,
                              pid_t child_pid,
-                             int child_stdin_fd)
+                             int child_stdin_fd,
+                             int *child_reaped,
+                             int *child_result)
 {
     control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS];
     initialize_control_clients(clients);
@@ -43,7 +102,16 @@ static int stream_event_loop(stream_pipe_t pipes[2],
         }
     }
 
-    while (open_count > 0) {
+    while (open_count > 0 || !*child_reaped) {
+        if (reap_child_nonblocking(child_pid, state, child_reaped,
+                                   child_result) < 0) {
+            return -1;
+        }
+
+        if (open_count == 0 && *child_reaped) {
+            break;
+        }
+
         struct pollfd poll_fds[3 + CUBICLE_MAX_CONTROL_CLIENTS];
         nfds_t poll_count = 0;
         nfds_t control_index = (nfds_t)-1;
@@ -90,7 +158,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             ++poll_count;
         }
 
-        int poll_result = poll(poll_fds, poll_count, -1);
+        int poll_result = poll(poll_fds, poll_count, 100);
         if (poll_result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -98,6 +166,10 @@ static int stream_event_loop(stream_pipe_t pipes[2],
 
             cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
             return -1;
+        }
+
+        if (poll_result == 0) {
+            continue;
         }
 
         if (control_index != (nfds_t)-1 &&
@@ -209,10 +281,14 @@ static int stream_event_loop(stream_pipe_t pipes[2],
     return 0;
 }
 
-static int wait_for_child(pid_t child_pid, controller_state_t *state)
+static int wait_for_child(pid_t child_pid, controller_state_t *state,
+                          int *child_reaped, int *child_result)
 {
-    int status = 0;
+    if (*child_reaped) {
+        return *child_result;
+    }
 
+    int status = 0;
     for (;;) {
         if (waitpid(child_pid, &status, 0) >= 0) {
             break;
@@ -226,30 +302,9 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state)
         return 1;
     }
 
-    char event[256];
-    if (WIFEXITED(status)) {
-        int exit_code = WEXITSTATUS(status);
-        int event_length = snprintf(event, sizeof(event),
-                                    "type=process_exited status=exited exit_code=%d",
-                                    exit_code);
-        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
-            append_event(state, event);
-        }
-        return exit_code;
-    }
-
-    if (WIFSIGNALED(status)) {
-        int signal_number = WTERMSIG(status);
-        int event_length = snprintf(event, sizeof(event),
-                                    "type=process_exited status=signaled signal=%d",
-                                    signal_number);
-        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
-            append_event(state, event);
-        }
-        return 128 + signal_number;
-    }
-
-    return 1;
+    *child_reaped = 1;
+    *child_result = child_result_from_status(status, state);
+    return *child_result;
 }
 
 int run_stream(char **command, const char *state_dir,
@@ -322,13 +377,15 @@ int run_stream(char **command, const char *state_dir,
     cubicle_log(CUBICLE_LOG_INFO, "controller", message);
 
     controller_state_t state;
+    int child_reaped = 0;
+    int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,
                                     stdin_policy) < 0) {
         snprintf(message, sizeof(message), "failed to initialize state: %s",
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);
-        wait_for_child(child_pid, &state);
+        wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&stdin_pipe[1]);
         close_if_open(&stdout_pipe[0]);
         close_if_open(&stderr_pipe[0]);
@@ -346,7 +403,7 @@ int run_stream(char **command, const char *state_dir,
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);
-        wait_for_child(child_pid, &state);
+        wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&stdin_pipe[1]);
         close_controller_state(&state);
         return 1;
@@ -369,14 +426,16 @@ int run_stream(char **command, const char *state_dir,
     };
 
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
-                                          stdin_pipe[1]);
+                                          stdin_pipe[1], &child_reaped,
+                                          &child_result);
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
     close_if_open(&stdin_pipe[1]);
     close_if_open(&control_fd);
     unlink(control_socket_path);
 
-    int child_result = wait_for_child(child_pid, &state);
+    child_result = wait_for_child(child_pid, &state, &child_reaped,
+                                  &child_result);
     close_controller_state(&state);
     if (output_result < 0 && child_result == 0) {
         return 1;
@@ -384,4 +443,3 @@ int run_stream(char **command, const char *state_dir,
 
     return child_result;
 }
-
