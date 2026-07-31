@@ -99,6 +99,8 @@
   - manager maintains per-process cursors
   - manager appends workspace-scoped events
   - events can be filtered by workspace name or ID
+  - events list reads persisted workspace events
+  - events follow performs bounded repeated polling
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -113,8 +115,8 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Add workspace event aggregation.
-   - Support event listing and follow behavior.
    - Harden process start for commands that exit before socket discovery.
+   - Replace bounded follow polling with a long-running manager event loop.
 
 3. Implement TTY mode.
    - Allocate PTY.

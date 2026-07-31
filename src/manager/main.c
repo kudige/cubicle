@@ -54,8 +54,11 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
             "       %s [--state-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
+            "       %s [--state-dir dir] events list [--workspace NAME_OR_ID]\n"
+            "       %s [--state-dir dir] events follow --iterations N [--interval-ms N] [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
-            program, program, program, program, program, program, program);
+            program, program, program, program, program, program, program,
+            program, program);
 }
 
 static int write_all(int fd, const char *buffer, size_t length)
@@ -1047,6 +1050,96 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
     return 0;
 }
 
+static int command_events_list(const manager_state_t *state, int argc, char **argv)
+{
+    const char *workspace = NULL;
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown events list option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    workspace_record_t workspace_record;
+    if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
+        fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        return 1;
+    }
+
+    FILE *file = open_state_file_for_read(state, "workspace-events.log");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[PATH_MAX + 1400];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (workspace != NULL) {
+            char copy[PATH_MAX + 1400];
+            snprintf(copy, sizeof(copy), "%s", line);
+            char *workspace_id = strtok(copy, "\t\n");
+            if (workspace_id == NULL ||
+                strcmp(workspace_id, workspace_record.id) != 0) {
+                continue;
+            }
+        }
+
+        printf("%s", line);
+    }
+
+    fclose(file);
+    return 0;
+}
+
+static int command_events_follow(const manager_state_t *state, int argc, char **argv)
+{
+    const char *workspace = NULL;
+    int iterations = -1;
+    int interval_ms = 250;
+
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc) {
+            iterations = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
+            interval_ms = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Unknown events follow option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    if (iterations < 0 || interval_ms < 0) {
+        fprintf(stderr, "events follow requires --iterations N and nonnegative --interval-ms\n");
+        return 2;
+    }
+
+    char *poll_args[2];
+    int poll_argc = 0;
+    if (workspace != NULL) {
+        poll_args[poll_argc++] = "--workspace";
+        poll_args[poll_argc++] = (char *)workspace;
+    }
+
+    for (int i = 0; i < iterations; ++i) {
+        int result = command_events_poll(state, poll_argc, poll_args);
+        if (result != 0) {
+            return result;
+        }
+
+        if (i + 1 < iterations && interval_ms > 0) {
+            struct timespec delay;
+            delay.tv_sec = interval_ms / 1000;
+            delay.tv_nsec = (long)(interval_ms % 1000) * 1000000L;
+            nanosleep(&delay, NULL);
+        }
+    }
+
+    return 0;
+}
+
 static int dispatch_command(const manager_state_t *state, int argc, char **argv)
 {
     if (argc < 2) {
@@ -1086,6 +1179,16 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
     if (strcmp(argv[0], "events") == 0 &&
         strcmp(argv[1], "poll") == 0) {
         return command_events_poll(state, argc - 2, &argv[2]);
+    }
+
+    if (strcmp(argv[0], "events") == 0 &&
+        strcmp(argv[1], "list") == 0) {
+        return command_events_list(state, argc - 2, &argv[2]);
+    }
+
+    if (strcmp(argv[0], "events") == 0 &&
+        strcmp(argv[1], "follow") == 0) {
+        return command_events_follow(state, argc - 2, &argv[2]);
     }
 
     return 2;
