@@ -50,6 +50,18 @@ serve a local control socket, and return the child exit status:
   --mode stream -- make
 ```
 
+Stream stdin is kept open by default so clients can use `attach stdin`. Pass
+`--stdin-policy eof` for noninteractive commands that should see immediate EOF
+on stdin:
+
+```console
+./build/cubicle-controller \
+  --stdin-policy eof \
+  --state-dir /tmp/cubicle-run \
+  --control-socket /tmp/cubicle-run.sock \
+  --mode stream -- make
+```
+
 Pass `--daemon` to detach the controller before it launches the managed
 process. In daemon mode, controller stdin/stdout/stderr are redirected to
 `/dev/null`; use the control socket and persisted logs to interact with it:

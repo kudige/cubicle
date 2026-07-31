@@ -113,10 +113,13 @@ Response:
 
 ```text
 ok attached stream=stdin
+error stdin_closed
 ```
 
 After the response, bytes sent by the client are forwarded to the managed
 process stdin until the client disconnects or the controller detaches the client.
+`error stdin_closed` is returned when the process was launched with
+`--stdin-policy eof`.
 
 ### terminate
 
@@ -165,6 +168,7 @@ Current error codes:
 - `request_too_long`
 - `signal_failed`
 - `state_path_too_long`
+- `stdin_closed`
 - `too_many_clients`
 - `unknown_command`
 - `unknown_stream`
@@ -191,4 +195,16 @@ seq=N type=client_detached stream=stdin|stdout|stderr
 seq=N type=signal_delivered signal=N
 seq=N type=process_exited status=exited exit_code=N
 seq=N type=process_exited status=signaled signal=N
+```
+
+## Metadata
+
+Current metadata fields:
+
+```text
+mode=stream
+pid=PID
+pgid=PGID
+stdin_policy=open|eof
+command=COMMAND
 ```

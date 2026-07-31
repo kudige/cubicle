@@ -33,6 +33,11 @@ typedef enum control_client_kind {
     CONTROL_CLIENT_ATTACHED_STDIN = 4
 } control_client_kind_t;
 
+typedef enum stdin_policy {
+    STDIN_POLICY_OPEN = 0,
+    STDIN_POLICY_EOF = 1
+} stdin_policy_t;
+
 typedef struct stream_pipe {
     int fd;
     int output_fd;
@@ -62,8 +67,23 @@ typedef struct control_client {
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--state-dir dir] [--control-socket path] --mode stream|tty|tty-captured-stderr -- command [args...]\n",
+            "Usage: %s [--daemon] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|tty-captured-stderr -- command [args...]\n",
             program);
+}
+
+static int parse_stdin_policy(const char *name, stdin_policy_t *policy)
+{
+    if (strcmp(name, "open") == 0) {
+        *policy = STDIN_POLICY_OPEN;
+        return 0;
+    }
+
+    if (strcmp(name, "eof") == 0) {
+        *policy = STDIN_POLICY_EOF;
+        return 0;
+    }
+
+    return -1;
 }
 
 static int daemonize_controller(void)
@@ -284,7 +304,8 @@ static int append_event(controller_state_t *state, const char *event)
 static int initialize_controller_state(controller_state_t *state,
                                        const char *requested_dir,
                                        pid_t child_pid,
-                                       char **command)
+                                       char **command,
+                                       stdin_policy_t stdin_policy)
 {
     memset(state, 0, sizeof(*state));
     state->events_fd = -1;
@@ -330,8 +351,9 @@ static int initialize_controller_state(controller_state_t *state,
 
     char metadata[1024];
     int metadata_length = snprintf(metadata, sizeof(metadata),
-                                   "mode=stream\npid=%ld\npgid=%ld\ncommand=%s\n",
+                                   "mode=stream\npid=%ld\npgid=%ld\nstdin_policy=%s\ncommand=%s\n",
                                    (long)child_pid, (long)child_pid,
+                                   stdin_policy == STDIN_POLICY_EOF ? "eof" : "open",
                                    command_line);
     if (metadata_length < 0 || (size_t)metadata_length >= sizeof(metadata) ||
         write_all(metadata_fd, metadata, (size_t)metadata_length) < 0) {
@@ -656,7 +678,8 @@ static int send_attach_catchup(int client_fd, const controller_state_t *state,
 
 static int dispatch_control_request(control_client_t *client,
                                     controller_state_t *state,
-                                    pid_t child_pid)
+                                    pid_t child_pid,
+                                    int child_stdin_fd)
 {
     char *request = client->request;
     int result = 0;
@@ -682,11 +705,15 @@ static int dispatch_control_request(control_client_t *client,
         }
     } else if (strcmp(request, "attach stdin") == 0 ||
                strcmp(request, "attach in") == 0) {
-        result = write_all(client->fd, "ok attached stream=stdin\n", 25);
-        if (result == 0) {
-            client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
-            append_event(state, "type=client_attached stream=stdin");
-            return 0;
+        if (child_stdin_fd < 0) {
+            result = write_error_response(client->fd, "stdin_closed");
+        } else {
+            result = write_all(client->fd, "ok attached stream=stdin\n", 25);
+            if (result == 0) {
+                client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
+                append_event(state, "type=client_attached stream=stdin");
+                return 0;
+            }
         }
     } else if (strncmp(request, "attach ", 7) == 0) {
         char stream[16];
@@ -790,7 +817,8 @@ static int accept_control_clients(int listen_fd,
 
 static int read_control_client_request(control_client_t *client,
                                        controller_state_t *state,
-                                       pid_t child_pid)
+                                       pid_t child_pid,
+                                       int child_stdin_fd)
 {
     for (;;) {
         char buffer[128];
@@ -815,14 +843,14 @@ static int read_control_client_request(control_client_t *client,
             }
 
             client->request[client->request_length] = '\0';
-            dispatch_control_request(client, state, child_pid);
+            dispatch_control_request(client, state, child_pid, child_stdin_fd);
             return 0;
         }
 
         for (ssize_t i = 0; i < result; ++i) {
             if (buffer[i] == '\n') {
                 client->request[client->request_length] = '\0';
-                dispatch_control_request(client, state, child_pid);
+                dispatch_control_request(client, state, child_pid, child_stdin_fd);
                 return 0;
             }
 
@@ -990,7 +1018,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             short revents = poll_fds[client_indexes[i]].revents;
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
-                read_control_client_request(&clients[i], state, child_pid) < 0) {
+                read_control_client_request(&clients[i], state, child_pid,
+                                            child_stdin_fd) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading control request");
                 return -1;
@@ -1124,7 +1153,8 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state)
 }
 
 static int run_stream(char **command, const char *state_dir,
-                      const char *control_socket)
+                      const char *control_socket,
+                      stdin_policy_t stdin_policy)
 {
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
@@ -1175,7 +1205,9 @@ static int run_stream(char **command, const char *state_dir,
     close_if_open(&stdout_pipe[1]);
     close_if_open(&stderr_pipe[1]);
 
-    if (set_nonblocking(stdin_pipe[1]) < 0) {
+    if (stdin_policy == STDIN_POLICY_EOF) {
+        close_if_open(&stdin_pipe[1]);
+    } else if (set_nonblocking(stdin_pipe[1]) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&stdin_pipe[1]);
@@ -1190,7 +1222,8 @@ static int run_stream(char **command, const char *state_dir,
     cubicle_log(CUBICLE_LOG_INFO, "controller", message);
 
     controller_state_t state;
-    if (initialize_controller_state(&state, state_dir, child_pid, command) < 0) {
+    if (initialize_controller_state(&state, state_dir, child_pid, command,
+                                    stdin_policy) < 0) {
         snprintf(message, sizeof(message), "failed to initialize state: %s",
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
@@ -1259,6 +1292,7 @@ int main(int argc, char **argv)
     const char *mode = NULL;
     const char *state_dir = NULL;
     const char *control_socket = NULL;
+    stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
     int command_index = -1;
 
@@ -1285,6 +1319,14 @@ int main(int argc, char **argv)
 
         if (strcmp(argv[i], "--control-socket") == 0 && i + 1 < argc) {
             control_socket = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--stdin-policy") == 0 && i + 1 < argc) {
+            if (parse_stdin_policy(argv[++i], &stdin_policy) < 0) {
+                fprintf(stderr, "Unknown stdin policy: %s\n", argv[i]);
+                return 2;
+            }
             continue;
         }
 
@@ -1316,5 +1358,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    return run_stream(&argv[command_index], state_dir, control_socket);
+    return run_stream(&argv[command_index], state_dir, control_socket,
+                      stdin_policy);
 }

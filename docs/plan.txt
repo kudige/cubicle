@@ -55,6 +55,11 @@
   - stream read and attach framing
   - current error codes
   - primitive event shapes
+- Added explicit stream stdin policy:
+  - default --stdin-policy open for stdin attachments
+  - --stdin-policy eof for immediate child stdin EOF
+  - stdin_policy persisted in metadata
+  - attach stdin returns error stdin_closed when stdin is closed
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -69,7 +74,7 @@
 ## Next
 
 1. Finish stream protocol semantics.
-   - Decide stdin EOF policy for stream processes with no stdin attachment.
+   - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Harden controller state.
    - Choose stable controller IDs instead of pid-derived default paths.
