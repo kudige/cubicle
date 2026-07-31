@@ -2,6 +2,7 @@
 #define CUBICLE_TRANSPORT_H
 
 #include "cubicle/client_error.h"
+#include "cubicle/client_types.h"
 
 #include <stddef.h>
 #include <stdint.h>
