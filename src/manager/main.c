@@ -3,12 +3,16 @@
 #include "cubicle/log.h"
 #include "cubicle/manager_registry.h"
 #include "cubicle/process.h"
+#include "cubicle/rpc.h"
 #include "cubicle/util.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +32,11 @@ typedef struct manager_state {
     char dir[PATH_MAX];
     char controller_bin[PATH_MAX];
 } manager_state_t;
+
+#define CUBICLE_API_MAX_FRAME 65536
+#define CUBICLE_API_CAPABILITIES \
+    (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
+     CUBICLE_PROTOCOL_CAP_PROCESS_TTY | CUBICLE_PROTOCOL_CAP_ATTACHMENT_DIRECT)
 
 static void print_usage(const char *program)
 {
@@ -1367,74 +1376,185 @@ static int command_events_follow(const manager_state_t *state, int argc, char **
     return 0;
 }
 
-static int write_manager_response(int client_fd, const char *response)
+static uint64_t manager_time_ms(void)
 {
-    return cubicle_write_all(client_fd, response, strlen(response));
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) < 0) {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
 }
 
-static int handle_manager_client(const manager_state_t *state, int client_fd,
-                                 int *shutdown_requested)
+static int read_all_fd(int fd, void *buffer, size_t length)
 {
-    char request[256];
-    size_t length = 0;
-
-    while (length + 1 < sizeof(request)) {
-        char byte;
-        ssize_t result = read(client_fd, &byte, 1);
-        if (result == 0) {
-            break;
-        }
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        ssize_t result = read(fd, cursor, length);
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
             }
             return -1;
         }
-        if (byte == '\n') {
-            break;
+        if (result == 0) {
+            errno = ECONNRESET;
+            return -1;
         }
-        if (byte == '\r') {
-            continue;
-        }
-        request[length++] = byte;
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
+    return 0;
+}
+
+static int read_api_frame(int client_fd, char *request, size_t request_size)
+{
+    uint32_t length_network = 0;
+    if (read_all_fd(client_fd, &length_network, sizeof(length_network)) < 0) {
+        return -1;
+    }
+
+    uint32_t length = ntohl(length_network);
+    if (length == 0 || length >= request_size ||
+        length > CUBICLE_API_MAX_FRAME) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    if (read_all_fd(client_fd, request, length) < 0) {
+        return -1;
     }
     request[length] = '\0';
+    return 0;
+}
 
-    if (strcmp(request, "ping") == 0) {
-        char id[CUBICLE_MANAGER_ID_LENGTH + 1];
-        if (manager_id(state, id) < 0) {
-            return write_manager_response(client_fd, "error internal\n");
-        }
-
-        char response[128];
-        snprintf(response, sizeof(response),
-                 "ok manager_id=%s protocol_major=0 protocol_minor=1\n", id);
-        return write_manager_response(client_fd, response);
+static int write_api_frame(int client_fd, const char *response)
+{
+    size_t length = strlen(response);
+    if (length > CUBICLE_API_MAX_FRAME) {
+        errno = EMSGSIZE;
+        return -1;
     }
 
-    if (strcmp(request, "status") == 0) {
-        char id[CUBICLE_MANAGER_ID_LENGTH + 1];
+    uint32_t length_network = htonl((uint32_t)length);
+    return cubicle_write_all(client_fd, (const char *)&length_network,
+                             sizeof(length_network)) == 0 &&
+                   cubicle_write_all(client_fd, response, length) == 0
+               ? 0
+               : -1;
+}
+
+static int manager_api_error(int client_fd, const char *request_id,
+                             cubicle_error_code_t code, const char *message,
+                             int retryable, int system_errno)
+{
+    char response[2048];
+    if (cubicle_rpc_error(response, sizeof(response), request_id, code,
+                          message, retryable, system_errno) < 0) {
+        return -1;
+    }
+    return write_api_frame(client_fd, response);
+}
+
+static int manager_api_success(int client_fd, const char *request_id,
+                               const char *result)
+{
+    char response[4096];
+    if (cubicle_rpc_success(response, sizeof(response), request_id,
+                            result) < 0) {
+        return -1;
+    }
+    return write_api_frame(client_fd, response);
+}
+
+static int handle_manager_client(const manager_state_t *state, int client_fd,
+                                 int *shutdown_requested,
+                                 uint64_t started_at_ms)
+{
+    char request[8192];
+    if (read_api_frame(client_fd, request, sizeof(request)) < 0) {
+        return -1;
+    }
+
+    char request_id[64] = "";
+    char method[128] = "";
+    (void)cubicle_rpc_get_string(request, "request_id", request_id,
+                                 sizeof(request_id));
+    if (cubicle_rpc_get_string(request, "method", method,
+                               sizeof(method)) < 0) {
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_PROTOCOL,
+                                 "request missing method", false, 0);
+    }
+
+    char id[CUBICLE_MANAGER_ID_LENGTH + 1];
+    if (manager_id(state, id) < 0) {
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_INTERNAL,
+                                 "failed to read manager id", false, errno);
+    }
+
+    uint64_t now_ms = manager_time_ms();
+    if (strcmp(method, "session.local_bootstrap") == 0) {
+        char result[1024];
+        int length = snprintf(result, sizeof(result),
+                              "{\"session_id\":\"local-session\",\"manager_id\":\"%s\",\"client_key_id\":\"local-bootstrap\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":0}",
+                              id, CUBICLE_PROTOCOL_MAJOR,
+                              CUBICLE_PROTOCOL_MINOR,
+                              (unsigned long long)CUBICLE_API_CAPABILITIES,
+                              (unsigned long long)now_ms);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            return -1;
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "manager.ping") == 0) {
+        char result[512];
+        int length = snprintf(result, sizeof(result),
+                              "{\"manager_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"server_time_ms\":%llu,\"uptime_ms\":%llu}",
+                              id, CUBICLE_PROTOCOL_MAJOR,
+                              CUBICLE_PROTOCOL_MINOR,
+                              (unsigned long long)now_ms,
+                              (unsigned long long)(now_ms - started_at_ms));
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            return -1;
+        }
+        return manager_api_success(client_fd, request_id, result);
+    }
+
+    if (strcmp(method, "manager.status") == 0) {
         size_t workspace_count = 0;
         size_t process_count = 0;
-        if (manager_id(state, id) < 0 ||
-            count_workspaces(state, &workspace_count) < 0 ||
+        if (count_workspaces(state, &workspace_count) < 0 ||
             count_processes(state, &process_count) < 0) {
-            return write_manager_response(client_fd, "error internal\n");
+            return manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_INTERNAL,
+                                     "failed to count manager state", false,
+                                     errno);
         }
 
-        char response[192];
-        snprintf(response, sizeof(response),
-                 "ok manager_id=%s workspace_count=%zu process_count=%zu\n",
-                 id, workspace_count, process_count);
-        return write_manager_response(client_fd, response);
+        char result[1024];
+        int length = snprintf(result, sizeof(result),
+                              "{\"manager_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"capabilities\":%llu,\"started_at_ms\":%llu,\"server_time_ms\":%llu,\"workspace_count\":%zu,\"process_count\":%zu,\"controller_count\":%zu,\"active_client_sessions\":1}",
+                              id, CUBICLE_PROTOCOL_MAJOR,
+                              CUBICLE_PROTOCOL_MINOR,
+                              (unsigned long long)CUBICLE_API_CAPABILITIES,
+                              (unsigned long long)started_at_ms,
+                              (unsigned long long)now_ms, workspace_count,
+                              process_count, process_count);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            return -1;
+        }
+        return manager_api_success(client_fd, request_id, result);
     }
 
-    if (strcmp(request, "shutdown") == 0) {
+    if (strcmp(method, "manager.shutdown") == 0) {
         *shutdown_requested = 1;
-        return write_manager_response(client_fd, "ok\n");
+        return manager_api_success(client_fd, request_id, "{}");
     }
 
-    return write_manager_response(client_fd, "error unsupported\n");
+    return manager_api_error(client_fd, request_id, CUBICLE_ERR_UNSUPPORTED,
+                             "method is not implemented", false, 0);
 }
 
 static int command_daemon(const manager_state_t *state, int argc, char **argv)
@@ -1488,6 +1608,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
 
     int result = 0;
     int shutdown_requested = 0;
+    uint64_t started_at_ms = manager_time_ms();
     while (!shutdown_requested) {
         if (poll_workspace_events(state, NULL, NULL) != 0) {
             cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
@@ -1524,7 +1645,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 break;
             }
 
-            if (handle_manager_client(state, client_fd, &shutdown_requested) < 0) {
+            if (handle_manager_client(state, client_fd, &shutdown_requested,
+                                      started_at_ms) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
                 result = 1;
             }

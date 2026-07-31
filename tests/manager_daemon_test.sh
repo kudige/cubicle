@@ -6,14 +6,27 @@ manager_pid=
 cleanup() {
     if [ -n "${manager_pid:-}" ]; then
         python3 - "$socket_path" <<'PY' >/dev/null 2>&1 || true
+import json
 import socket
+import struct
 import sys
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(sys.argv[1])
-client.sendall(b"shutdown\n")
-client.shutdown(socket.SHUT_WR)
-client.recv(1024)
+request = {
+    "protocol_major": 0,
+    "protocol_minor": 1,
+    "request_id": "cleanup",
+    "session_id": "local-session",
+    "method": "manager.shutdown",
+    "params": {},
+}
+payload = json.dumps(request, separators=(",", ":")).encode()
+client.sendall(struct.pack("!I", len(payload)) + payload)
+header = client.recv(4)
+if len(header) == 4:
+    length = struct.unpack("!I", header)[0]
+    client.recv(length)
 client.close()
 PY
         wait "$manager_pid" 2>/dev/null || true
@@ -73,46 +86,63 @@ fi
 
 send_manager_command() {
     python3 - "$socket_path" "$1" <<'PY'
+import json
 import socket
+import struct
 import sys
+
+method = sys.argv[2]
+if method == "ping":
+    method = "manager.ping"
+elif method == "status":
+    method = "manager.status"
+elif method == "shutdown":
+    method = "manager.shutdown"
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(sys.argv[1])
-client.sendall((sys.argv[2] + "\n").encode())
-client.shutdown(socket.SHUT_WR)
-chunks = []
-while True:
-    chunk = client.recv(4096)
+request = {
+    "protocol_major": 0,
+    "protocol_minor": 1,
+    "request_id": "test",
+    "session_id": "local-session",
+    "method": method,
+    "params": {},
+}
+payload = json.dumps(request, separators=(",", ":")).encode()
+client.sendall(struct.pack("!I", len(payload)) + payload)
+header = client.recv(4)
+if len(header) != 4:
+    raise SystemExit("missing response header")
+length = struct.unpack("!I", header)[0]
+response = b""
+while len(response) < length:
+    chunk = client.recv(length - len(response))
     if not chunk:
-        break
-    chunks.append(chunk)
+        raise SystemExit("short response")
+    response += chunk
 client.close()
-sys.stdout.buffer.write(b"".join(chunks))
+sys.stdout.write(json.dumps(json.loads(response), sort_keys=True))
 PY
 }
 
 ping_response=$(send_manager_command ping)
-case "$ping_response" in
-    ok\ manager_id=*\ protocol_major=0\ protocol_minor=1) ;;
-    *)
-        echo "unexpected manager ping response: $ping_response" >&2
-        exit 1
-        ;;
-esac
-
-manager_id=${ping_response#ok manager_id=}
-manager_id=${manager_id%% protocol_major=*}
-manager_id=${manager_id% }
+printf "%s" "$ping_response" | grep -q '"ok": true'
+printf "%s" "$ping_response" | grep -q '"protocol_major": 0'
+printf "%s" "$ping_response" | grep -q '"protocol_minor": 1'
+manager_id=$(python3 - "$ping_response" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["result"]["manager_id"])
+PY
+)
 grep -q "^$manager_id$" "$state_dir/manager-id"
 
 status_response=$(send_manager_command status)
-case "$status_response" in
-    ok\ manager_id="$manager_id"\ workspace_count=1\ process_count=1) ;;
-    *)
-        echo "unexpected manager status response: $status_response" >&2
-        exit 1
-        ;;
-esac
+printf "%s" "$status_response" | grep -q '"ok": true'
+printf "%s" "$status_response" | grep -q "\"manager_id\": \"$manager_id\""
+printf "%s" "$status_response" | grep -q '"workspace_count": 1'
+printf "%s" "$status_response" | grep -q '"process_count": 1'
 
 for _ in $(seq 1 100); do
     if [ -f "$state_dir/workspace-events.log" ] &&
@@ -128,13 +158,13 @@ grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=ex
 grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
 
 unknown_response=$(send_manager_command unknown)
-if [ "$unknown_response" != "error unsupported" ]; then
+if ! printf "%s" "$unknown_response" | grep -q '"code": "unsupported"'; then
     echo "unexpected unknown-command response: $unknown_response" >&2
     exit 1
 fi
 
 shutdown_response=$(send_manager_command shutdown)
-if [ "$shutdown_response" != "ok" ]; then
+if ! printf "%s" "$shutdown_response" | grep -q '"ok": true'; then
     echo "unexpected shutdown response: $shutdown_response" >&2
     exit 1
 fi
