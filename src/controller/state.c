@@ -45,7 +45,25 @@ static int create_state_directory(const char *path)
         }
     }
 
-    return mkdir(path, 0700);
+    if (mkdir(path, 0700) == 0) {
+        return 0;
+    }
+
+    if (errno != EEXIST) {
+        return -1;
+    }
+
+    struct stat existing;
+    if (stat(path, &existing) < 0) {
+        return -1;
+    }
+
+    if (!S_ISDIR(existing.st_mode)) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    return 0;
 }
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
@@ -73,6 +91,45 @@ void close_controller_state(controller_state_t *state)
     close_if_open(&state->events_fd);
     close_if_open(&state->stdout_fd);
     close_if_open(&state->stderr_fd);
+}
+
+static int state_file_present(const char *dir, const char *name)
+{
+    char path[PATH_MAX];
+    if (make_state_file_path(path, dir, name) < 0) {
+        return -1;
+    }
+
+    struct stat existing;
+    if (lstat(path, &existing) == 0) {
+        errno = EEXIST;
+        return 1;
+    }
+
+    if (errno == ENOENT) {
+        return 0;
+    }
+
+    return -1;
+}
+
+static int durable_state_files_present(const char *dir)
+{
+    const char *files[] = {
+        "metadata",
+        "events.log",
+        "stdout.log",
+        "stderr.log",
+    };
+
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        int present = state_file_present(dir, files[i]);
+        if (present != 0) {
+            return present;
+        }
+    }
+
+    return 0;
 }
 
 int append_event(controller_state_t *state, const char *event)
@@ -142,8 +199,12 @@ int initialize_controller_state(controller_state_t *state,
         return -1;
     }
 
+    if (durable_state_files_present(state->dir) != 0) {
+        return -1;
+    }
+
     int metadata_fd = open_state_file(state->dir, "metadata",
-                                      O_WRONLY | O_CREAT | O_TRUNC);
+                                      O_WRONLY | O_CREAT | O_EXCL);
     if (metadata_fd < 0) {
         return -1;
     }
@@ -175,11 +236,11 @@ int initialize_controller_state(controller_state_t *state,
     close(metadata_fd);
 
     state->events_fd = open_state_file(state->dir, "events.log",
-                                       O_WRONLY | O_CREAT | O_TRUNC | O_APPEND);
+                                       O_WRONLY | O_CREAT | O_EXCL | O_APPEND);
     state->stdout_fd = open_state_file(state->dir, "stdout.log",
-                                       O_WRONLY | O_CREAT | O_TRUNC);
+                                       O_WRONLY | O_CREAT | O_EXCL);
     state->stderr_fd = open_state_file(state->dir, "stderr.log",
-                                       O_WRONLY | O_CREAT | O_TRUNC);
+                                       O_WRONLY | O_CREAT | O_EXCL);
 
     if (state->events_fd < 0 || state->stdout_fd < 0 || state->stderr_fd < 0) {
         return -1;

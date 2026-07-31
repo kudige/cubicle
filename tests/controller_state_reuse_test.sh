@@ -3,13 +3,25 @@ set -eu
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-state_dir="$tmpdir/state"
-mkdir "$state_dir"
-printf "keep-me\n" >"$state_dir/stdout.log"
+empty_state_dir="$tmpdir/empty-state"
+mkdir "$empty_state_dir"
+
+"$CUBICLE_CONTROLLER" \
+    --state-dir "$empty_state_dir" \
+    --mode stream \
+    --stdin-policy eof \
+    -- sh -c 'printf "empty-dir-ok\n"' \
+    >/dev/null 2>"$tmpdir/empty-stderr"
+
+printf "empty-dir-ok\n" | cmp - "$empty_state_dir/stdout.log"
+
+reused_state_dir="$tmpdir/reused-state"
+mkdir "$reused_state_dir"
+printf "keep-me\n" >"$reused_state_dir/stdout.log"
 
 set +e
 "$CUBICLE_CONTROLLER" \
-    --state-dir "$state_dir" \
+    --state-dir "$reused_state_dir" \
     --mode stream \
     -- sh -c 'sleep 30' \
     >/dev/null 2>"$tmpdir/stderr"
@@ -21,5 +33,5 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-grep -q "failed to initialize state $state_dir: File exists" "$tmpdir/stderr"
-printf "keep-me\n" | cmp - "$state_dir/stdout.log"
+grep -q "failed to initialize state $reused_state_dir: File exists" "$tmpdir/stderr"
+printf "keep-me\n" | cmp - "$reused_state_dir/stdout.log"
