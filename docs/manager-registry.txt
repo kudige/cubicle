@@ -159,10 +159,11 @@ Lists aggregated records already persisted in `workspace-events.log`.
 ### events follow
 
 ```console
+cubicle-manager --state-dir DIR events follow --interval-ms 250
 cubicle-manager --state-dir DIR events follow --iterations 10 --interval-ms 250
 cubicle-manager --state-dir DIR events follow --workspace "Project A" --iterations 10
 ```
 
-Repeatedly polls for new events. Follow is currently bounded by
-`--iterations`; an unbounded long-running manager event loop is not implemented
-yet.
+Runs the manager event loop and repeatedly polls for new events. Follow runs
+until interrupted by default. `--iterations` can bound the loop for tests and
+scripts. New records are flushed after each poll iteration.

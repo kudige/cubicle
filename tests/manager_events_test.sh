@@ -53,3 +53,42 @@ if [ -s "$tmpdir/events-follow" ]; then
     echo "follow should not emit already-consumed events" >&2
     exit 1
 fi
+
+if "$CUBICLE_MANAGER" --state-dir "$state_dir" events follow --workspace "$workspace_id" --iterations -1 --interval-ms 0 >"$tmpdir/events-invalid.out" 2>"$tmpdir/events-invalid.err"; then
+    echo "negative follow iterations should fail" >&2
+    exit 1
+fi
+grep -q 'events follow requires nonnegative --iterations and --interval-ms' "$tmpdir/events-invalid.err"
+
+follow_output="$tmpdir/events-follow-live"
+"$CUBICLE_MANAGER" --state-dir "$state_dir" events follow --workspace "$workspace_id" --interval-ms 50 >"$follow_output" &
+follow_pid=$!
+trap 'if [ -n "${follow_pid:-}" ]; then kill "$follow_pid" 2>/dev/null || true; wait "$follow_pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
+
+follow_start_output=$("$CUBICLE_MANAGER" \
+    --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    process start \
+    --workspace "Project A" \
+    --friendly-name events-follow-1 \
+    --mode stream \
+    --stdin-policy eof \
+    -- sh -c 'printf "follow-output\n"')
+
+follow_process_id=${follow_start_output#process id=}
+follow_process_id=${follow_process_id%% workspace_id=*}
+
+for _ in $(seq 1 100); do
+    if grep -q "^$workspace_id	$follow_process_id	events-follow-1	seq=.*type=process_exited status=exited exit_code=0" "$follow_output"; then
+        break
+    fi
+    sleep 0.05
+done
+
+kill "$follow_pid" 2>/dev/null || true
+wait "$follow_pid" 2>/dev/null || true
+follow_pid=
+
+grep -q "^$workspace_id	$follow_process_id	events-follow-1	seq=1 type=process_started" "$follow_output"
+grep -q "^$workspace_id	$follow_process_id	events-follow-1	seq=.*type=output stream=stdout" "$follow_output"
+grep -q "^$workspace_id	$follow_process_id	events-follow-1	seq=.*type=process_exited status=exited exit_code=0" "$follow_output"

@@ -35,7 +35,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events list [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] events follow --iterations N [--interval-ms N] [--workspace NAME_OR_ID]\n"
+            "       %s [--state-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program);
@@ -963,12 +963,14 @@ static int command_events_follow(const manager_state_t *state, int argc, char **
 {
     const char *workspace = NULL;
     int iterations = -1;
+    int has_iterations = 0;
     int interval_ms = 250;
 
     for (int i = 0; i < argc; ++i) {
         if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
             workspace = argv[++i];
         } else if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc) {
+            has_iterations = 1;
             iterations = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
             interval_ms = atoi(argv[++i]);
@@ -978,8 +980,8 @@ static int command_events_follow(const manager_state_t *state, int argc, char **
         }
     }
 
-    if (iterations < 0 || interval_ms < 0) {
-        fprintf(stderr, "events follow requires --iterations N and nonnegative --interval-ms\n");
+    if ((has_iterations && iterations < 0) || interval_ms < 0) {
+        fprintf(stderr, "events follow requires nonnegative --iterations and --interval-ms\n");
         return 2;
     }
 
@@ -990,13 +992,15 @@ static int command_events_follow(const manager_state_t *state, int argc, char **
         poll_args[poll_argc++] = (char *)workspace;
     }
 
-    for (int i = 0; i < iterations; ++i) {
+    for (int i = 0; iterations < 0 || i < iterations; ++i) {
         int result = command_events_poll(state, poll_argc, poll_args);
         if (result != 0) {
             return result;
         }
 
-        if (i + 1 < iterations && interval_ms > 0) {
+        fflush(stdout);
+
+        if ((iterations < 0 || i + 1 < iterations) && interval_ms > 0) {
             struct timespec delay;
             delay.tv_sec = interval_ms / 1000;
             delay.tv_nsec = (long)(interval_ms % 1000) * 1000000L;
