@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -115,6 +116,34 @@ static int append_line(const manager_state_t *state, const char *file_name,
     return result;
 }
 
+static int lock_state(const manager_state_t *state)
+{
+    char path[PATH_MAX];
+    if (state_path(path, state, "manager.lock") < 0) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static void unlock_state(int lock_fd)
+{
+    if (lock_fd >= 0) {
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+    }
+}
+
 static FILE *open_state_file_for_read(const manager_state_t *state,
                                       const char *file_name)
 {
@@ -161,20 +190,64 @@ static int workspace_name_exists(const manager_state_t *state, const char *name)
     return find_workspace(state, name, &record) == 0;
 }
 
+static int process_conflict_exists(const manager_state_t *state,
+                                   const char *workspace_id,
+                                   const char *process_id,
+                                   const char *friendly_name,
+                                   int *process_id_conflict,
+                                   int *friendly_name_conflict)
+{
+    *process_id_conflict = 0;
+    *friendly_name_conflict = 0;
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[PATH_MAX + 512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) != 0) {
+            continue;
+        }
+
+        if (strcmp(record.process_id, process_id) == 0) {
+            *process_id_conflict = 1;
+        }
+
+        if (strcmp(record.workspace_id, workspace_id) == 0 &&
+            strcmp(record.friendly_name, friendly_name) == 0) {
+            *friendly_name_conflict = 1;
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
 static int command_workspace_create(const manager_state_t *state, const char *name)
 {
     if (validate_field(name, "workspace name") < 0) {
         return 2;
     }
 
+    int lock_fd = lock_state(state);
+    if (lock_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
     if (workspace_name_exists(state, name)) {
         fprintf(stderr, "Workspace already exists: %s\n", name);
+        unlock_state(lock_fd);
         return 1;
     }
 
     char id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (cubicle_generate_hex_id(id, sizeof(id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -183,9 +256,11 @@ static int command_workspace_create(const manager_state_t *state, const char *na
     if (length < 0 || (size_t)length >= sizeof(line) ||
         append_line(state, "workspaces.tsv", line) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
+    unlock_state(lock_fd);
     printf("workspace id=%s name=%s\n", id, name);
     return 0;
 }
@@ -378,9 +453,16 @@ static int command_process_register(const manager_state_t *state, int argc,
         return 2;
     }
 
+    int lock_fd = lock_state(state);
+    if (lock_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
     cubicle_workspace_record_t workspace_record;
     if (find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -388,11 +470,36 @@ static int command_process_register(const manager_state_t *state, int argc,
     if (requested_process_id != NULL) {
         if (validate_field(requested_process_id, "process id") < 0 ||
             strlen(requested_process_id) > CUBICLE_MANAGER_ID_LENGTH) {
+            unlock_state(lock_fd);
             return 2;
         }
         snprintf(process_id, sizeof(process_id), "%s", requested_process_id);
     } else if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    int process_id_conflict = 0;
+    int friendly_name_conflict = 0;
+    if (process_conflict_exists(state, workspace_record.id, process_id,
+                                friendly_name, &process_id_conflict,
+                                &friendly_name_conflict) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    if (process_id_conflict) {
+        fprintf(stderr, "Process already exists: %s\n", process_id);
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    if (friendly_name_conflict) {
+        fprintf(stderr, "Process friendly name already exists in workspace: %s\n",
+                friendly_name);
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -400,9 +507,11 @@ static int command_process_register(const manager_state_t *state, int argc,
                               friendly_name, mode, "running", controller_id,
                               control_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
+    unlock_state(lock_fd);
     printf("process id=%s workspace_id=%s friendly_name=%s controller_id=%s control_socket=%s\n",
            process_id, workspace_record.id, friendly_name, controller_id,
            control_socket);
@@ -625,15 +734,46 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 2;
     }
 
+    int lock_fd = lock_state(state);
+    if (lock_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
     cubicle_workspace_record_t workspace_record;
     if (find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        unlock_state(lock_fd);
         return 1;
     }
 
     char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    int process_id_conflict = 0;
+    int friendly_name_conflict = 0;
+    if (process_conflict_exists(state, workspace_record.id, process_id,
+                                friendly_name, &process_id_conflict,
+                                &friendly_name_conflict) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    if (process_id_conflict) {
+        fprintf(stderr, "Process already exists: %s\n", process_id);
+        unlock_state(lock_fd);
+        return 1;
+    }
+
+    if (friendly_name_conflict) {
+        fprintf(stderr, "Process friendly name already exists in workspace: %s\n",
+                friendly_name);
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -643,6 +783,7 @@ static int command_process_start(const manager_state_t *state, int argc,
     if (controller_state_path(controller_state, state, process_id) < 0 ||
         controller_socket_path(control_socket, state, process_id) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -650,6 +791,7 @@ static int command_process_start(const manager_state_t *state, int argc,
                           controller_state);
     if (result < 0 || (size_t)result >= sizeof(metadata_path)) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", "metadata path too long");
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -659,6 +801,7 @@ static int command_process_start(const manager_state_t *state, int argc,
         wait_for_controller_ready(control_socket, metadata_path, process_state,
                                   sizeof(process_state)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -666,6 +809,7 @@ static int command_process_start(const manager_state_t *state, int argc,
     if (read_metadata_field(metadata_path, "controller_id", controller_id,
                             sizeof(controller_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
@@ -673,9 +817,11 @@ static int command_process_start(const manager_state_t *state, int argc,
                               friendly_name, mode, process_state, controller_id,
                               control_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
+    unlock_state(lock_fd);
     printf("process id=%s workspace_id=%s friendly_name=%s controller_id=%s control_socket=%s\n",
            process_id, workspace_record.id, friendly_name, controller_id,
            control_socket);
@@ -830,15 +976,23 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
         return 1;
     }
 
+    int lock_fd = lock_state(state);
+    if (lock_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
     cubicle_cursor_record_t cursors[256];
     size_t cursor_count = 0;
     if (load_cursors(state, cursors, &cursor_count) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
     FILE *processes = open_state_file_for_read(state, "processes.tsv");
     if (processes == NULL) {
+        unlock_state(lock_fd);
         return 0;
     }
 
@@ -887,6 +1041,7 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
                 fclose(events);
                 fclose(processes);
                 cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                unlock_state(lock_fd);
                 return 1;
             }
 
@@ -903,6 +1058,7 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
                           max_sequence) < 0) {
             fclose(processes);
             cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            unlock_state(lock_fd);
             return 1;
         }
     }
@@ -911,9 +1067,11 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
 
     if (save_cursors(state, cursors, cursor_count) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
         return 1;
     }
 
+    unlock_state(lock_fd);
     return 0;
 }
 

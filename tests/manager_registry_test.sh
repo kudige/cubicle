@@ -49,6 +49,46 @@ grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/c
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project A" >"$tmpdir/resolve-by-name"
 grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/resolve-by-name"
 
+if "$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+    --workspace "Project A" \
+    --friendly-name make-2 \
+    --mode stream \
+    --controller-id controller-duplicate-id \
+    --control-socket "$tmpdir/controller-duplicate-id.sock" \
+    --process-id "$process_id" >/dev/null 2>"$tmpdir/duplicate-process-id-error"; then
+    echo "duplicate process id registration unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q "Process already exists: $process_id" "$tmpdir/duplicate-process-id-error"
+
+if "$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+    --workspace "Project A" \
+    --friendly-name make-1 \
+    --mode stream \
+    --controller-id controller-duplicate-name \
+    --control-socket "$tmpdir/controller-duplicate-name.sock" >/dev/null 2>"$tmpdir/duplicate-friendly-name-error"; then
+    echo "duplicate friendly-name registration unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q 'Process friendly name already exists in workspace: make-1' "$tmpdir/duplicate-friendly-name-error"
+
+workspace_b_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project B")
+workspace_b_id=${workspace_b_output#workspace id=}
+workspace_b_id=${workspace_b_id%% name=*}
+
+register_b_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+    --workspace "Project B" \
+    --friendly-name make-1 \
+    --mode stream \
+    --controller-id controller-b \
+    --control-socket "$tmpdir/controller-b.sock")
+
+process_b_id=${register_b_output#process id=}
+process_b_id=${process_b_id%% workspace_id=*}
+
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project B" >"$tmpdir/resolve-by-name-b"
+grep -q "^$process_b_id	$workspace_b_id	make-1	stream	running	controller-b	$tmpdir/controller-b.sock$" "$tmpdir/resolve-by-name-b"
+
 set +e
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 >/dev/null 2>"$tmpdir/resolve-error"
 resolve_status=$?

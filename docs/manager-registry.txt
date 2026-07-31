@@ -1,8 +1,8 @@
 # Cubicle manager registry
 
 The current manager implementation is a foreground CLI for persistent registry
-operations and stream controller launch. It does not run a long-lived event loop
-yet.
+operations and stream controller launch. `events follow` provides a long-running
+event loop, but the manager does not run as a persistent daemon yet.
 
 ## State directory
 
@@ -22,6 +22,8 @@ Use `--state-dir DIR` to override it.
 workspace_id<TAB>workspace_name
 ```
 
+Workspace names are unique.
+
 ### processes.tsv
 
 ```text
@@ -29,6 +31,12 @@ process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_
 ```
 
 The current process state written by `process register` is `running`.
+Process IDs are globally unique. Friendly names are unique within a workspace.
+
+### manager.lock
+
+Mutating manager commands take an exclusive advisory lock on `manager.lock`
+while reading and writing registry state.
 
 ## Commands
 
@@ -39,6 +47,7 @@ cubicle-manager --state-dir DIR workspace create "Project A"
 ```
 
 Creates a workspace record with a generated stable workspace ID.
+Fails if a workspace with the same name already exists.
 
 ### workspace list
 
@@ -68,6 +77,8 @@ name or workspace ID. `--process-id ID` may be supplied; otherwise the manager
 generates a stable process ID.
 
 Only `stream` mode can be registered currently.
+Registration fails if the process ID already exists or the friendly name is
+already present in the target workspace.
 
 ### process list
 
@@ -114,6 +125,8 @@ cubicle-manager \
 
 Starts a stream-mode controller as a daemon, waits for its control socket and
 metadata, then registers the process/controller mapping.
+Start fails before launching a controller if the friendly name is already
+present in the target workspace.
 
 Controller state is stored under:
 

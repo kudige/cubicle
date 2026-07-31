@@ -119,6 +119,10 @@
   - events follow runs until interrupted when --iterations is omitted
   - bounded --iterations mode remains available for tests and scripts
   - follow flushes emitted workspace events after each poll iteration
+- Hardened manager persistence in the current CLI architecture:
+  - mutating manager commands take an exclusive advisory state lock
+  - process IDs are enforced as globally unique
+  - process friendly names are enforced as workspace-local unique
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -170,10 +174,7 @@
 ## Next
 
 1. Harden manager persistence.
-   - Replace direct TSV mutation with a concurrency-safe manager authority.
    - Prefer a persistent manager daemon with transactional storage.
-   - Enforce uniqueness for workspace names, process IDs, and workspace-local
-     friendly names.
 
 2. Implement TTY mode.
    - Allocate PTY.
@@ -181,20 +182,20 @@
    - Handle terminal resize.
    - Support observer-mode output attachments.
 
-3. Implement TTY with captured stderr.
-   - Wire stdin/stdout through PTY.
-   - Capture stderr through a separate pipe.
-   - Persist and expose stderr independently.
-
-4. Add provisional user-facing CLI commands.
+3. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-5. Expand tests.
+4. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
    - PTY behavior tests when PTY support lands.
+
+5. Implement TTY with captured stderr.
+   - Wire stdin/stdout through PTY.
+   - Capture stderr through a separate pipe.
+   - Persist and expose stderr independently.
