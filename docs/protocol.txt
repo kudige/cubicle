@@ -9,8 +9,11 @@ for tests and the first manager integration slice, but not yet a public API.
 
 - Unix-domain stream socket.
 - One command line starts each connection.
-- Command lines are UTF-8 text ending in `\n`.
+- Command lines are ASCII command tokens ending in `\n`.
+- `\r\n` is accepted and treated the same as `\n`.
 - Command lines are limited to 255 bytes before the newline.
+- Command lines containing embedded NUL bytes are rejected with
+  `error bad_request`.
 - Non-attachment commands close after one response.
 - Attachment commands keep the socket open until the process exits, the client
   disconnects, or the controller detaches the client.

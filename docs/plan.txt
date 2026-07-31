@@ -127,6 +127,10 @@
   - durable state and event journaling
   - control socket protocol and attachments
   - shared controller I/O helpers
+- Hardened controller command-line protocol parsing:
+  - accept LF and CRLF request terminators
+  - reject embedded NUL bytes as bad_request
+  - document ASCII command tokens with raw byte response payloads
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next

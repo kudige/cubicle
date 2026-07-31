@@ -505,6 +505,21 @@ static int dispatch_control_request(control_client_t *client,
     return result < 0 ? 0 : result;
 }
 
+static int finish_control_request(control_client_t *client,
+                                  controller_state_t *state,
+                                  pid_t child_pid,
+                                  int child_stdin_fd)
+{
+    if (client->request_length > 0 &&
+        client->request[client->request_length - 1] == '\r') {
+        --client->request_length;
+    }
+
+    client->request[client->request_length] = '\0';
+    dispatch_control_request(client, state, child_pid, child_stdin_fd);
+    return 0;
+}
+
 int accept_control_clients(int listen_fd,
                                   control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
                                   controller_state_t *state)
@@ -578,14 +593,19 @@ int read_control_client_request(control_client_t *client,
             }
 
             client->request[client->request_length] = '\0';
-            dispatch_control_request(client, state, child_pid, child_stdin_fd);
-            return 0;
+            return finish_control_request(client, state, child_pid,
+                                          child_stdin_fd);
         }
 
         for (ssize_t i = 0; i < result; ++i) {
             if (buffer[i] == '\n') {
-                client->request[client->request_length] = '\0';
-                dispatch_control_request(client, state, child_pid, child_stdin_fd);
+                return finish_control_request(client, state, child_pid,
+                                              child_stdin_fd);
+            }
+
+            if (buffer[i] == '\0') {
+                write_error_response(client->fd, "bad_request");
+                close_control_client(client, state);
                 return 0;
             }
 
@@ -660,4 +680,3 @@ int forward_attached_stdin(control_client_t *client,
         }
     }
 }
-

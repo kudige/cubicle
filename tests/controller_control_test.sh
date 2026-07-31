@@ -102,6 +102,53 @@ esac
 
 wait "$idle_pid"
 
+crlf_response=$(python3 - "$socket_path" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(path)
+client.sendall(b"status\r\n")
+client.shutdown(socket.SHUT_WR)
+while True:
+    chunk = client.recv(4096)
+    if not chunk:
+        break
+    sys.stdout.buffer.write(chunk)
+client.close()
+PY
+)
+case "$crlf_response" in
+    ok\ state=running\ pid=*\ pgid=*\ stdout_offset=*\ stderr_offset=*) ;;
+    *)
+        echo "unexpected CRLF status response: $crlf_response" >&2
+        exit 1
+        ;;
+esac
+
+nul_response=$(python3 - "$socket_path" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(path)
+client.sendall(b"status\0\n")
+client.shutdown(socket.SHUT_WR)
+while True:
+    chunk = client.recv(4096)
+    if not chunk:
+        break
+    sys.stdout.buffer.write(chunk)
+client.close()
+PY
+)
+if [ "$nul_response" != "error bad_request" ]; then
+    echo "unexpected NUL request response: $nul_response" >&2
+    exit 1
+fi
+
 terminate_response=$(send_command terminate)
 if [ "$terminate_response" != "ok" ]; then
     echo "unexpected terminate response: $terminate_response" >&2
