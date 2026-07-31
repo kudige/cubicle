@@ -65,6 +65,9 @@
   - default state directories use controller IDs instead of child PIDs
   - controller_id persisted in metadata
   - process_started events include controller_id
+- Hardened primitive event writes:
+  - events.log is opened with append semantics
+  - each event record is emitted with one append write
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -82,7 +85,6 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Harden controller state.
-   - Use append-safe event writes.
    - Add restart/recovery read paths for metadata and event cursors.
    - Define event and metadata formats more explicitly.
 

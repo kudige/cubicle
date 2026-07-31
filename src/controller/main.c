@@ -339,7 +339,23 @@ static int append_event(controller_state_t *state, const char *event)
         return -1;
     }
 
-    return write_all(state->events_fd, line, (size_t)length);
+    for (;;) {
+        ssize_t result = write(state->events_fd, line, (size_t)length);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            return -1;
+        }
+
+        if (result != length) {
+            errno = EIO;
+            return -1;
+        }
+
+        return 0;
+    }
 }
 
 static int initialize_controller_state(controller_state_t *state,
@@ -409,7 +425,7 @@ static int initialize_controller_state(controller_state_t *state,
     close(metadata_fd);
 
     state->events_fd = open_state_file(state->dir, "events.log",
-                                       O_WRONLY | O_CREAT | O_TRUNC);
+                                       O_WRONLY | O_CREAT | O_TRUNC | O_APPEND);
     state->stdout_fd = open_state_file(state->dir, "stdout.log",
                                        O_WRONLY | O_CREAT | O_TRUNC);
     state->stderr_fd = open_state_file(state->dir, "stderr.log",

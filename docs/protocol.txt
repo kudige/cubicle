@@ -182,6 +182,8 @@ detaches that client and records a detach event.
 ## Events
 
 The controller writes primitive events to `events.log`.
+The journal is opened in append mode, and each event record is emitted with one
+append write.
 
 Current event shapes:
 
