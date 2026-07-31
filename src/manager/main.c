@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -20,6 +22,7 @@
 
 typedef struct manager_state {
     char dir[PATH_MAX];
+    char controller_bin[PATH_MAX];
 } manager_state_t;
 
 typedef struct workspace_record {
@@ -43,8 +46,9 @@ static void print_usage(const char *program)
             "Usage: %s [--state-dir dir] workspace create NAME\n"
             "       %s [--state-dir dir] workspace list\n"
             "       %s [--state-dir dir] process register --workspace NAME_OR_ID --friendly-name NAME --mode MODE --controller-id ID --control-socket PATH [--process-id ID]\n"
+            "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
-            program, program, program, program);
+            program, program, program, program, program);
 }
 
 static int write_all(int fd, const char *buffer, size_t length)
@@ -169,6 +173,34 @@ static int state_path(char path[PATH_MAX], const manager_state_t *state,
                       const char *name)
 {
     int result = snprintf(path, PATH_MAX, "%s/%s", state->dir, name);
+    if (result < 0 || result >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int controller_state_path(char path[PATH_MAX],
+                                 const manager_state_t *state,
+                                 const char *process_id)
+{
+    int result = snprintf(path, PATH_MAX, "%s/controllers/%s", state->dir,
+                          process_id);
+    if (result < 0 || result >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int controller_socket_path(char path[PATH_MAX],
+                                  const manager_state_t *state,
+                                  const char *process_id)
+{
+    int result = snprintf(path, PATH_MAX, "%s/controllers/%s/control.sock",
+                          state->dir, process_id);
     if (result < 0 || result >= PATH_MAX) {
         errno = ENAMETOOLONG;
         return -1;
@@ -328,6 +360,26 @@ static int command_workspace_list(const manager_state_t *state)
     return 0;
 }
 
+static int append_process_record(const manager_state_t *state,
+                                 const char *process_id,
+                                 const char *workspace_id,
+                                 const char *friendly_name,
+                                 const char *mode,
+                                 const char *controller_id,
+                                 const char *control_socket)
+{
+    char line[PATH_MAX + 512];
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\trunning\t%s\t%s\n",
+                          process_id, workspace_id, friendly_name, mode,
+                          controller_id, control_socket);
+    if (length < 0 || (size_t)length >= sizeof(line)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return append_line(state, "processes.tsv", line);
+}
+
 static int command_process_register(const manager_state_t *state, int argc,
                                     char **argv)
 {
@@ -388,12 +440,237 @@ static int command_process_register(const manager_state_t *state, int argc,
         return 1;
     }
 
-    char line[PATH_MAX + 512];
-    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\trunning\t%s\t%s\n",
-                          process_id, workspace_record.id, friendly_name, mode,
-                          controller_id, control_socket);
-    if (length < 0 || (size_t)length >= sizeof(line) ||
-        append_line(state, "processes.tsv", line) < 0) {
+    if (append_process_record(state, process_id, workspace_record.id,
+                              friendly_name, mode, controller_id,
+                              control_socket) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    printf("process id=%s workspace_id=%s friendly_name=%s controller_id=%s control_socket=%s\n",
+           process_id, workspace_record.id, friendly_name, controller_id,
+           control_socket);
+    return 0;
+}
+
+static int wait_for_controller_ready(const char *control_socket,
+                                     const char *metadata_path)
+{
+    for (int i = 0; i < 100; ++i) {
+        struct stat socket_stat;
+        struct stat metadata_stat;
+        if (stat(control_socket, &socket_stat) == 0 &&
+            S_ISSOCK(socket_stat.st_mode) &&
+            stat(metadata_path, &metadata_stat) == 0 &&
+            metadata_stat.st_size > 0) {
+            return 0;
+        }
+
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 50000000};
+        nanosleep(&delay, NULL);
+    }
+
+    errno = ETIMEDOUT;
+    return -1;
+}
+
+static int read_metadata_field(const char *metadata_path, const char *field,
+                               char *value, size_t value_size)
+{
+    FILE *file = fopen(metadata_path, "r");
+    if (file == NULL) {
+        return -1;
+    }
+
+    char prefix[64];
+    int prefix_length = snprintf(prefix, sizeof(prefix), "%s=", field);
+    if (prefix_length < 0 || (size_t)prefix_length >= sizeof(prefix)) {
+        fclose(file);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strncmp(line, prefix, (size_t)prefix_length) != 0) {
+            continue;
+        }
+
+        char *start = line + prefix_length;
+        start[strcspn(start, "\n")] = '\0';
+        int result = snprintf(value, value_size, "%s", start);
+        fclose(file);
+        if (result < 0 || (size_t)result >= value_size) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return 0;
+    }
+
+    fclose(file);
+    errno = ENOENT;
+    return -1;
+}
+
+static int launch_controller(const manager_state_t *state,
+                             const char *controller_state,
+                             const char *control_socket,
+                             const char *mode,
+                             const char *stdin_policy,
+                             char **command)
+{
+    size_t command_count = 0;
+    while (command[command_count] != NULL) {
+        ++command_count;
+    }
+
+    size_t argv_count = 11 + command_count + 1;
+    char **controller_argv = calloc(argv_count, sizeof(char *));
+    if (controller_argv == NULL) {
+        return -1;
+    }
+
+    size_t index = 0;
+    controller_argv[index++] = (char *)state->controller_bin;
+    controller_argv[index++] = "--daemon";
+    controller_argv[index++] = "--stdin-policy";
+    controller_argv[index++] = (char *)stdin_policy;
+    controller_argv[index++] = "--state-dir";
+    controller_argv[index++] = (char *)controller_state;
+    controller_argv[index++] = "--control-socket";
+    controller_argv[index++] = (char *)control_socket;
+    controller_argv[index++] = "--mode";
+    controller_argv[index++] = (char *)mode;
+    controller_argv[index++] = "--";
+    for (size_t i = 0; i < command_count; ++i) {
+        controller_argv[index++] = command[i];
+    }
+    controller_argv[index] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        free(controller_argv);
+        return -1;
+    }
+
+    if (pid == 0) {
+        execvp(state->controller_bin, controller_argv);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    free(controller_argv);
+
+    int status = 0;
+    for (;;) {
+        if (waitpid(pid, &status, 0) >= 0) {
+            break;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        return -1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        errno = ECHILD;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int command_process_start(const manager_state_t *state, int argc,
+                                 char **argv)
+{
+    const char *workspace = NULL;
+    const char *friendly_name = NULL;
+    const char *mode = "stream";
+    const char *stdin_policy = "open";
+    int command_index = -1;
+
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else if (strcmp(argv[i], "--friendly-name") == 0 && i + 1 < argc) {
+            friendly_name = argv[++i];
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            mode = argv[++i];
+        } else if (strcmp(argv[i], "--stdin-policy") == 0 && i + 1 < argc) {
+            stdin_policy = argv[++i];
+        } else if (strcmp(argv[i], "--") == 0 && i + 1 < argc) {
+            command_index = i + 1;
+            break;
+        } else {
+            fprintf(stderr, "Unknown process start option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    if (command_index < 0 ||
+        validate_field(workspace, "workspace") < 0 ||
+        validate_field(friendly_name, "friendly name") < 0 ||
+        validate_field(mode, "mode") < 0 ||
+        validate_field(stdin_policy, "stdin policy") < 0) {
+        return 2;
+    }
+
+    if (strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_STREAM)) != 0) {
+        fprintf(stderr, "Only stream mode can be started currently\n");
+        return 2;
+    }
+
+    if (strcmp(stdin_policy, "open") != 0 && strcmp(stdin_policy, "eof") != 0) {
+        fprintf(stderr, "Unknown stdin policy: %s\n", stdin_policy);
+        return 2;
+    }
+
+    workspace_record_t workspace_record;
+    if (find_workspace(state, workspace, &workspace_record) < 0) {
+        fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        return 1;
+    }
+
+    char process_id[MANAGER_ID_LENGTH + 1];
+    if (generate_id(process_id) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    char controller_state[PATH_MAX];
+    char control_socket[PATH_MAX];
+    char metadata_path[PATH_MAX];
+    if (controller_state_path(controller_state, state, process_id) < 0 ||
+        controller_socket_path(control_socket, state, process_id) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    int result = snprintf(metadata_path, sizeof(metadata_path), "%s/metadata",
+                          controller_state);
+    if (result < 0 || (size_t)result >= sizeof(metadata_path)) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", "metadata path too long");
+        return 1;
+    }
+
+    if (launch_controller(state, controller_state, control_socket, mode,
+                          stdin_policy, &argv[command_index]) < 0 ||
+        wait_for_controller_ready(control_socket, metadata_path) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    char controller_id[MANAGER_ID_LENGTH + 1];
+    if (read_metadata_field(metadata_path, "controller_id", controller_id,
+                            sizeof(controller_id)) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    if (append_process_record(state, process_id, workspace_record.id,
+                              friendly_name, mode, controller_id,
+                              control_socket) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
@@ -471,6 +748,11 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
     }
 
     if (strcmp(argv[0], "process") == 0 &&
+        strcmp(argv[1], "start") == 0) {
+        return command_process_start(state, argc - 2, &argv[2]);
+    }
+
+    if (strcmp(argv[0], "process") == 0 &&
         strcmp(argv[1], "list") == 0) {
         return command_process_list(state, argc - 2, &argv[2]);
     }
@@ -482,6 +764,7 @@ int main(int argc, char **argv)
 {
     manager_state_t state;
     snprintf(state.dir, sizeof(state.dir), ".cubicle/manager");
+    snprintf(state.controller_bin, sizeof(state.controller_bin), "cubicle-controller");
 
     int command_index = -1;
     for (int i = 1; i < argc; ++i) {
@@ -494,6 +777,16 @@ int main(int argc, char **argv)
             int result = snprintf(state.dir, sizeof(state.dir), "%s", argv[++i]);
             if (result < 0 || (size_t)result >= sizeof(state.dir)) {
                 fprintf(stderr, "State directory path is too long\n");
+                return 2;
+            }
+            continue;
+        }
+
+        if (strcmp(argv[i], "--controller-bin") == 0 && i + 1 < argc) {
+            int result = snprintf(state.controller_bin,
+                                  sizeof(state.controller_bin), "%s", argv[++i]);
+            if (result < 0 || (size_t)result >= sizeof(state.controller_bin)) {
+                fprintf(stderr, "Controller binary path is too long\n");
                 return 2;
             }
             continue;

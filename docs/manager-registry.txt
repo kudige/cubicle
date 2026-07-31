@@ -1,7 +1,8 @@
 # Cubicle manager registry
 
 The current manager implementation is a foreground CLI for persistent registry
-operations. It does not launch controllers yet and does not run an event loop.
+operations and stream controller launch. It does not run a long-lived event loop
+yet.
 
 ## State directory
 
@@ -80,3 +81,29 @@ Prints:
 ```text
 process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
 ```
+
+### process start
+
+```console
+cubicle-manager \
+  --state-dir DIR \
+  --controller-bin /path/to/cubicle-controller \
+  process start \
+  --workspace "Project A" \
+  --friendly-name make-1 \
+  --mode stream \
+  --stdin-policy eof \
+  -- make
+```
+
+Starts a stream-mode controller as a daemon, waits for its control socket and
+metadata, then registers the process/controller mapping.
+
+Controller state is stored under:
+
+```text
+DIR/controllers/PROCESS_ID
+```
+
+The returned `control_socket` is the direct controller socket clients should use
+for high-volume process I/O.

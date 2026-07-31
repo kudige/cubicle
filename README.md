@@ -51,6 +51,15 @@ process/controller records:
   --mode stream \
   --controller-id controller-1 \
   --control-socket /tmp/cubicle-run.sock
+./build/cubicle-manager \
+  --state-dir /tmp/cubicle-manager \
+  --controller-bin ./build/cubicle-controller \
+  process start \
+  --workspace "Project A" \
+  --friendly-name make-1 \
+  --mode stream \
+  --stdin-policy eof \
+  -- make
 ./build/cubicle-manager --state-dir /tmp/cubicle-manager process list --workspace "Project A"
 ```
 
