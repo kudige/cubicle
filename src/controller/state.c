@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int open_state_file(const char *dir, const char *name, int flags)
@@ -20,6 +21,31 @@ static int open_state_file(const char *dir, const char *name, int flags)
     }
 
     return open(path, flags, 0600);
+}
+
+static int create_state_directory(const char *path)
+{
+    char parent[PATH_MAX];
+    int result = snprintf(parent, sizeof(parent), "%s", path);
+    if (result < 0 || (size_t)result >= sizeof(parent)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    char *slash = strrchr(parent, '/');
+    if (slash != NULL) {
+        if (slash == parent) {
+            slash[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+
+        if (cubicle_mkdir_p(parent) < 0) {
+            return -1;
+        }
+    }
+
+    return mkdir(path, 0700);
 }
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
@@ -111,7 +137,7 @@ int initialize_controller_state(controller_state_t *state,
         }
     }
 
-    if (cubicle_mkdir_p(state->dir) < 0) {
+    if (create_state_directory(state->dir) < 0) {
         return -1;
     }
 

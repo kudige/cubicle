@@ -143,6 +143,10 @@
   - oversized requests fail only that client
   - malformed attach requests fail only that client
   - later status and terminate requests continue to work
+- Hardened controller state directory creation:
+  - create parent directories but require a new leaf state directory
+  - fail normal launch instead of truncating reused state
+  - regress reused state directory preservation
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
