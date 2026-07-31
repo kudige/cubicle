@@ -181,7 +181,8 @@ static int write_best_effort(int fd, const char *buffer, size_t length)
             }
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return 0;
+                errno = EAGAIN;
+                return -1;
             }
 
             return -1;

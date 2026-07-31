@@ -80,4 +80,8 @@ raw future bytes until the process exits or the client disconnects. Stdin
 `attach` sends a header, then forwards bytes from the socket to the managed
 process stdin until the client disconnects.
 
+Attached clients are fail-closed on backpressure: if a nonblocking attachment
+cannot accept or forward bytes, the controller detaches that client instead of
+silently dropping data.
+
 TTY modes and manager/controller routing are not implemented yet.

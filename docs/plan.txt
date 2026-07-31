@@ -45,6 +45,10 @@
   - forward attached bytes into child stdin
   - record input primitive events
   - support stdin attachment in the Python control socket client
+- Defined initial stream backpressure behavior:
+  - nonblocking attachment writes fail closed
+  - slow output clients are detached instead of silently losing bytes
+  - stdin clients are detached if their bytes cannot be forwarded
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -59,7 +63,6 @@
 ## Next
 
 1. Finish stream protocol semantics.
-   - Decide how attached-client backpressure should be handled.
    - Decide the final framing format for binary stream reads and attach catch-up.
    - Define stable response schemas and error codes.
    - Decide stdin EOF policy for stream processes with no stdin attachment.
