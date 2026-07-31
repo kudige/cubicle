@@ -21,6 +21,7 @@ target_compile_options(cubicle_common PRIVATE
 
 add_executable(cubicle-manager
     src/manager/main.c
+    src/manager/registry.c
 )
 
 target_link_libraries(cubicle-manager PRIVATE cubicle_common)
@@ -72,6 +73,21 @@ target_compile_options(cubicle-util-test PRIVATE
 )
 
 add_test(NAME cubicle-util-test COMMAND cubicle-util-test)
+
+add_executable(cubicle-manager-registry-unit-test
+    tests/manager_registry_unit_test.c
+    src/manager/registry.c
+)
+
+target_link_libraries(cubicle-manager-registry-unit-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-manager-registry-unit-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-manager-registry-unit-test COMMAND cubicle-manager-registry-unit-test)
 
 add_test(
     NAME cubicle-manager-registry-test

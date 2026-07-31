@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cubicle/log.h"
+#include "cubicle/manager_registry.h"
 #include "cubicle/process.h"
 #include "cubicle/util.h"
 
@@ -19,32 +20,10 @@
 #define PATH_MAX CUBICLE_PATH_MAX
 #endif
 
-#define MANAGER_ID_LENGTH 32
-
 typedef struct manager_state {
     char dir[PATH_MAX];
     char controller_bin[PATH_MAX];
 } manager_state_t;
-
-typedef struct workspace_record {
-    char id[MANAGER_ID_LENGTH + 1];
-    char name[128];
-} workspace_record_t;
-
-typedef struct process_record {
-    char process_id[MANAGER_ID_LENGTH + 1];
-    char workspace_id[MANAGER_ID_LENGTH + 1];
-    char friendly_name[128];
-    char mode[32];
-    char state[32];
-    char controller_id[MANAGER_ID_LENGTH + 1];
-    char control_socket[PATH_MAX];
-} process_record_t;
-
-typedef struct cursor_record {
-    char process_id[MANAGER_ID_LENGTH + 1];
-    long long sequence;
-} cursor_record_t;
 
 static void print_usage(const char *program)
 {
@@ -136,57 +115,6 @@ static int append_line(const manager_state_t *state, const char *file_name,
     return result;
 }
 
-static int parse_workspace_line(char *line, workspace_record_t *record)
-{
-    char *id = strtok(line, "\t\n");
-    char *name = strtok(NULL, "\t\n");
-    if (id == NULL || name == NULL) {
-        return -1;
-    }
-
-    snprintf(record->id, sizeof(record->id), "%s", id);
-    snprintf(record->name, sizeof(record->name), "%s", name);
-    return 0;
-}
-
-static int parse_process_line(char *line, process_record_t *record)
-{
-    char *process_id = strtok(line, "\t\n");
-    char *workspace_id = strtok(NULL, "\t\n");
-    char *friendly_name = strtok(NULL, "\t\n");
-    char *mode = strtok(NULL, "\t\n");
-    char *state = strtok(NULL, "\t\n");
-    char *controller_id = strtok(NULL, "\t\n");
-    char *control_socket = strtok(NULL, "\t\n");
-    if (process_id == NULL || workspace_id == NULL || friendly_name == NULL ||
-        mode == NULL || state == NULL || controller_id == NULL ||
-        control_socket == NULL) {
-        return -1;
-    }
-
-    snprintf(record->process_id, sizeof(record->process_id), "%s", process_id);
-    snprintf(record->workspace_id, sizeof(record->workspace_id), "%s", workspace_id);
-    snprintf(record->friendly_name, sizeof(record->friendly_name), "%s", friendly_name);
-    snprintf(record->mode, sizeof(record->mode), "%s", mode);
-    snprintf(record->state, sizeof(record->state), "%s", state);
-    snprintf(record->controller_id, sizeof(record->controller_id), "%s", controller_id);
-    snprintf(record->control_socket, sizeof(record->control_socket), "%s", control_socket);
-    return 0;
-}
-
-static int parse_cursor_line(char *line, cursor_record_t *record)
-{
-    char *process_id = strtok(line, "\t\n");
-    char *sequence = strtok(NULL, "\t\n");
-    if (process_id == NULL || sequence == NULL) {
-        return -1;
-    }
-
-    snprintf(record->process_id, sizeof(record->process_id), "%s", process_id);
-    record->sequence = atoll(sequence);
-    return 0;
-}
-
 static FILE *open_state_file_for_read(const manager_state_t *state,
                                       const char *file_name)
 {
@@ -204,7 +132,7 @@ static FILE *open_state_file_for_read(const manager_state_t *state,
 }
 
 static int find_workspace(const manager_state_t *state, const char *name_or_id,
-                          workspace_record_t *record)
+                          cubicle_workspace_record_t *record)
 {
     FILE *file = open_state_file_for_read(state, "workspaces.tsv");
     if (file == NULL) {
@@ -213,8 +141,8 @@ static int find_workspace(const manager_state_t *state, const char *name_or_id,
 
     char line[512];
     while (fgets(line, sizeof(line), file) != NULL) {
-        workspace_record_t candidate;
-        if (parse_workspace_line(line, &candidate) == 0 &&
+        cubicle_workspace_record_t candidate;
+        if (cubicle_parse_workspace_record(line, &candidate) == 0 &&
             (strcmp(candidate.id, name_or_id) == 0 ||
              strcmp(candidate.name, name_or_id) == 0)) {
             *record = candidate;
@@ -229,7 +157,7 @@ static int find_workspace(const manager_state_t *state, const char *name_or_id,
 
 static int workspace_name_exists(const manager_state_t *state, const char *name)
 {
-    workspace_record_t record;
+    cubicle_workspace_record_t record;
     return find_workspace(state, name, &record) == 0;
 }
 
@@ -244,7 +172,7 @@ static int command_workspace_create(const manager_state_t *state, const char *na
         return 1;
     }
 
-    char id[MANAGER_ID_LENGTH + 1];
+    char id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (cubicle_generate_hex_id(id, sizeof(id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
@@ -271,8 +199,8 @@ static int command_workspace_list(const manager_state_t *state)
 
     char line[512];
     while (fgets(line, sizeof(line), file) != NULL) {
-        workspace_record_t record;
-        if (parse_workspace_line(line, &record) == 0) {
+        cubicle_workspace_record_t record;
+        if (cubicle_parse_workspace_record(line, &record) == 0) {
             printf("%s\t%s\n", record.id, record.name);
         }
     }
@@ -315,7 +243,7 @@ static int process_events_path(char path[PATH_MAX], const manager_state_t *state
     return 0;
 }
 
-static long long cursor_for_process(cursor_record_t *cursors, size_t cursor_count,
+static long long cursor_for_process(cubicle_cursor_record_t *cursors, size_t cursor_count,
                                     const char *process_id)
 {
     for (size_t i = 0; i < cursor_count; ++i) {
@@ -327,7 +255,7 @@ static long long cursor_for_process(cursor_record_t *cursors, size_t cursor_coun
     return 0;
 }
 
-static int update_cursor(cursor_record_t *cursors, size_t *cursor_count,
+static int update_cursor(cubicle_cursor_record_t *cursors, size_t *cursor_count,
                          const char *process_id, long long sequence)
 {
     for (size_t i = 0; i < *cursor_count; ++i) {
@@ -352,7 +280,7 @@ static int update_cursor(cursor_record_t *cursors, size_t *cursor_count,
 }
 
 static int load_cursors(const manager_state_t *state,
-                        cursor_record_t *cursors,
+                        cubicle_cursor_record_t *cursors,
                         size_t *cursor_count)
 {
     *cursor_count = 0;
@@ -364,8 +292,8 @@ static int load_cursors(const manager_state_t *state,
 
     char line[256];
     while (fgets(line, sizeof(line), file) != NULL && *cursor_count < 256) {
-        cursor_record_t record;
-        if (parse_cursor_line(line, &record) == 0) {
+        cubicle_cursor_record_t record;
+        if (cubicle_parse_cursor_record(line, &record) == 0) {
             cursors[*cursor_count] = record;
             ++(*cursor_count);
         }
@@ -376,7 +304,7 @@ static int load_cursors(const manager_state_t *state,
 }
 
 static int save_cursors(const manager_state_t *state,
-                        cursor_record_t *cursors,
+                        cubicle_cursor_record_t *cursors,
                         size_t cursor_count)
 {
     char path[PATH_MAX];
@@ -406,11 +334,6 @@ static int save_cursors(const manager_state_t *state,
     }
 
     return rename(temp_path, path);
-}
-
-static int parse_event_sequence(const char *line, long long *sequence)
-{
-    return sscanf(line, "seq=%lld", sequence) == 1 ? 0 : -1;
 }
 
 static int command_process_register(const manager_state_t *state, int argc,
@@ -455,16 +378,16 @@ static int command_process_register(const manager_state_t *state, int argc,
         return 2;
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
     }
 
-    char process_id[MANAGER_ID_LENGTH + 1];
+    char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (requested_process_id != NULL) {
         if (validate_field(requested_process_id, "process id") < 0 ||
-            strlen(requested_process_id) > MANAGER_ID_LENGTH) {
+            strlen(requested_process_id) > CUBICLE_MANAGER_ID_LENGTH) {
             return 2;
         }
         snprintf(process_id, sizeof(process_id), "%s", requested_process_id);
@@ -702,13 +625,13 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 2;
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
     }
 
-    char process_id[MANAGER_ID_LENGTH + 1];
+    char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
@@ -739,7 +662,7 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 1;
     }
 
-    char controller_id[MANAGER_ID_LENGTH + 1];
+    char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (read_metadata_field(metadata_path, "controller_id", controller_id,
                             sizeof(controller_id)) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
@@ -771,7 +694,7 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
         }
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
@@ -784,8 +707,8 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
 
     char line[PATH_MAX + 512];
     while (fgets(line, sizeof(line), file) != NULL) {
-        process_record_t record;
-        if (parse_process_line(line, &record) != 0) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) != 0) {
             continue;
         }
 
@@ -804,7 +727,7 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
     return 0;
 }
 
-static void print_process_record(const process_record_t *record)
+static void print_process_record(const cubicle_process_record_t *record)
 {
     printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
            record->process_id, record->workspace_id, record->friendly_name,
@@ -831,7 +754,7 @@ static int command_process_resolve(const manager_state_t *state, int argc,
         }
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
@@ -843,12 +766,12 @@ static int command_process_resolve(const manager_state_t *state, int argc,
         return 1;
     }
 
-    process_record_t found;
+    cubicle_process_record_t found;
     int match_count = 0;
     char line[PATH_MAX + 512];
     while (fgets(line, sizeof(line), file) != NULL) {
-        process_record_t record;
-        if (parse_process_line(line, &record) != 0) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) != 0) {
             continue;
         }
 
@@ -901,13 +824,13 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
         }
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
     }
 
-    cursor_record_t cursors[256];
+    cubicle_cursor_record_t cursors[256];
     size_t cursor_count = 0;
     if (load_cursors(state, cursors, &cursor_count) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
@@ -921,8 +844,8 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
 
     char process_line[PATH_MAX + 512];
     while (fgets(process_line, sizeof(process_line), processes) != NULL) {
-        process_record_t process;
-        if (parse_process_line(process_line, &process) != 0) {
+        cubicle_process_record_t process;
+        if (cubicle_parse_process_record(process_line, &process) != 0) {
             continue;
         }
 
@@ -947,7 +870,7 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
         char event_line[1024];
         while (fgets(event_line, sizeof(event_line), events) != NULL) {
             long long sequence = 0;
-            if (parse_event_sequence(event_line, &sequence) < 0 ||
+            if (cubicle_parse_event_sequence(event_line, &sequence) < 0 ||
                 sequence <= cursor) {
                 continue;
             }
@@ -1006,7 +929,7 @@ static int command_events_list(const manager_state_t *state, int argc, char **ar
         }
     }
 
-    workspace_record_t workspace_record;
+    cubicle_workspace_record_t workspace_record;
     if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         return 1;
