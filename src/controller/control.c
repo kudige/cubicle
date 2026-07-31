@@ -502,6 +502,7 @@ static int dispatch_control_request(control_client_t *client,
                                     pid_t child_pid,
                                     int child_stdin_fd,
                                     int resize_fd,
+                                    terminal_size_state_t *terminal_size,
                                     int process_completed,
                                     int child_result)
 {
@@ -567,6 +568,11 @@ static int dispatch_control_request(control_client_t *client,
         } else if (sscanf(request + 7, "%u %u", &rows, &columns) != 2 ||
                    rows == 0 || columns == 0) {
             result = enqueue_error_response(client, "bad_resize");
+        } else if (terminal_size != NULL && terminal_size->known &&
+                   terminal_size->rows == (unsigned short)rows &&
+                   terminal_size->columns == (unsigned short)columns) {
+            client->kind = CONTROL_CLIENT_RESPONDING;
+            result = enqueue_response(client, "ok\n", 3);
         } else {
             struct winsize size;
             memset(&size, 0, sizeof(size));
@@ -575,6 +581,11 @@ static int dispatch_control_request(control_client_t *client,
             if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
                 result = enqueue_error_response(client, "resize_failed");
             } else {
+                if (terminal_size != NULL) {
+                    terminal_size->rows = (unsigned short)rows;
+                    terminal_size->columns = (unsigned short)columns;
+                    terminal_size->known = 1;
+                }
                 kill(-child_pid, SIGWINCH);
                 char event[128];
                 int event_length = snprintf(event, sizeof(event),
@@ -660,6 +671,7 @@ static int finish_control_request(control_client_t *client,
                                   pid_t child_pid,
                                   int child_stdin_fd,
                                   int resize_fd,
+                                  terminal_size_state_t *terminal_size,
                                   int process_completed,
                                   int child_result)
 {
@@ -671,6 +683,7 @@ static int finish_control_request(control_client_t *client,
     client->request[client->request_length] = '\0';
     dispatch_control_request(client, state, child_pid, child_stdin_fd,
                              resize_fd,
+                             terminal_size,
                              process_completed, child_result);
     return 0;
 }
@@ -764,6 +777,7 @@ int read_control_client_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result)
 {
@@ -792,6 +806,7 @@ int read_control_client_request(control_client_t *client,
             client->request[client->request_length] = '\0';
             return finish_control_request(client, state, child_pid,
                                           child_stdin_fd, resize_fd,
+                                          terminal_size,
                                           process_completed,
                                           child_result);
         }
@@ -800,6 +815,7 @@ int read_control_client_request(control_client_t *client,
             if (buffer[i] == '\n') {
                 return finish_control_request(client, state, child_pid,
                                               child_stdin_fd, resize_fd,
+                                              terminal_size,
                                               process_completed,
                                               child_result);
             }

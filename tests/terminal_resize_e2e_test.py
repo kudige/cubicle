@@ -66,6 +66,16 @@ def wait_for_event(path, predicate, description, after=0):
     raise AssertionError(f"missing recorder event: {description}; got {load_events(path)!r}")
 
 
+def assert_no_event(path, predicate, description, after=0, duration=0.3):
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        events = load_events(path)
+        for event in events[after:]:
+            if predicate(event):
+                raise AssertionError(f"unexpected recorder event: {description}; got {events!r}")
+        time.sleep(0.05)
+
+
 def event_is(name, rows=None, columns=None):
     def predicate(event):
         if event.get("event") != name:
@@ -188,11 +198,31 @@ def controller_and_socket_resize(controller, control_client, recorder):
             if "size=20x60" not in border:
                 raise AssertionError(f"socket did not render 20x60 border: {border!r}")
 
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    control_client,
+                    socket_path,
+                    "resize",
+                    "20",
+                    "60",
+                ],
+                stdout=subprocess.DEVNULL,
+            )
+            assert_no_event(output_path, event_is("resize", 20, 60),
+                            "duplicate socket resize 20x60", cursor)
+
             os.write(controller_master, b"a")
             cursor = wait_for_event(output_path, event_is("input"),
                                     "foreground controller input", cursor)
             cursor = wait_for_event(output_path, event_is("resize", 34, 100),
                                     "foreground controller active resize reassert", cursor)
+
+            os.write(controller_master, b"b")
+            cursor = wait_for_event(output_path, event_is("input"),
+                                    "foreground controller input without resize", cursor)
+            assert_no_event(output_path, event_is("resize", 34, 100),
+                            "duplicate foreground resize 34x100", cursor)
 
             os.write(socket_master, b"\x03")
             cursor = wait_for_event(output_path, event_is("control_c"),

@@ -67,7 +67,8 @@ static void restore_terminal_mode(terminal_mode_t *mode)
     }
 }
 
-static int apply_terminal_window_size(int pty_fd)
+static int apply_terminal_window_size(int pty_fd,
+                                      terminal_size_state_t *terminal_size)
 {
     if (!isatty(STDOUT_FILENO)) {
         return 0;
@@ -82,7 +83,23 @@ static int apply_terminal_window_size(int pty_fd)
         return 0;
     }
 
-    return ioctl(pty_fd, TIOCSWINSZ, &size);
+    if (terminal_size != NULL && terminal_size->known &&
+        terminal_size->rows == size.ws_row &&
+        terminal_size->columns == size.ws_col) {
+        return 0;
+    }
+
+    if (ioctl(pty_fd, TIOCSWINSZ, &size) < 0) {
+        return -1;
+    }
+
+    if (terminal_size != NULL) {
+        terminal_size->rows = size.ws_row;
+        terminal_size->columns = size.ws_col;
+        terminal_size->known = 1;
+    }
+
+    return 1;
 }
 
 static void notify_terminal_window_size_changed(pid_t child_pid)
@@ -92,17 +109,22 @@ static void notify_terminal_window_size_changed(pid_t child_pid)
     }
 }
 
-static int sync_local_terminal_window_size(int resize_fd, pid_t child_pid)
+static int sync_local_terminal_window_size(int resize_fd,
+                                           terminal_size_state_t *terminal_size,
+                                           pid_t child_pid)
 {
     if (resize_fd < 0) {
         return 0;
     }
 
-    if (apply_terminal_window_size(resize_fd) < 0) {
+    int result = apply_terminal_window_size(resize_fd, terminal_size);
+    if (result < 0) {
         return -1;
     }
 
-    notify_terminal_window_size_changed(child_pid);
+    if (result > 0) {
+        notify_terminal_window_size_changed(child_pid);
+    }
     return 0;
 }
 
@@ -198,6 +220,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                              int child_stdin_fd,
                              int local_input_fd,
                              int resize_fd,
+                             terminal_size_state_t *terminal_size,
                              int *child_reaped,
                              int *child_result)
 {
@@ -224,7 +247,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
 
         if (resize_fd >= 0 && terminal_resize_pending) {
             terminal_resize_pending = 0;
-            if (sync_local_terminal_window_size(resize_fd, child_pid) < 0) {
+            if (sync_local_terminal_window_size(resize_fd, terminal_size,
+                                                child_pid) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
                 return -1;
             }
@@ -333,6 +357,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                                 strerror(errno));
                     return -1;
                 } else if (sync_local_terminal_window_size(resize_fd,
+                                                           terminal_size,
                                                            child_pid) < 0) {
                     cubicle_log(CUBICLE_LOG_ERROR, "controller",
                                 strerror(errno));
@@ -366,7 +391,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
-                                            child_stdin_fd, resize_fd, 0,
+                                            child_stdin_fd, resize_fd,
+                                            terminal_size, 0,
                                             *child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading control request");
@@ -586,7 +612,7 @@ static int completed_retention_loop(controller_state_t *state,
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid, -1,
-                                            -1, 1, child_result) < 0) {
+                                            -1, NULL, 1, child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading completed control request");
                 close_all_control_clients(clients, state);
@@ -755,6 +781,7 @@ int run_stream(char **command, const char *state_dir,
 
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
                                           stdin_pipe[1], -1, -1,
+                                          NULL,
                                           &child_reaped, &child_result);
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
@@ -853,7 +880,8 @@ int run_tty(char **command, const char *state_dir,
         return 1;
     }
 
-    if (apply_terminal_window_size(master_fd) < 0) {
+    terminal_size_state_t terminal_size = {.rows = 0, .columns = 0, .known = 0};
+    if (apply_terminal_window_size(master_fd, &terminal_size) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
@@ -942,6 +970,7 @@ int run_tty(char **command, const char *state_dir,
     int input_fd = stdin_policy == STDIN_POLICY_OPEN ? master_fd : -1;
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
                                           input_fd, local_input_fd, master_fd,
+                                          &terminal_size,
                                           &child_reaped, &child_result);
 
     restore_terminal_mode(&terminal_mode);

@@ -52,6 +52,12 @@ typedef struct controller_state {
     long long stderr_offset;
 } controller_state_t;
 
+typedef struct terminal_size_state {
+    unsigned short rows;
+    unsigned short columns;
+    int known;
+} terminal_size_state_t;
+
 typedef struct control_client {
     int fd;
     control_client_kind_t kind;
@@ -93,6 +99,7 @@ int read_control_client_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result);
 int flush_control_client_response(control_client_t *client,
