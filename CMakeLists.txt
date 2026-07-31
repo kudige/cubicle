@@ -174,6 +174,13 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-tty-local-input-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_tty_local_input_test.py
+)
+
+add_test(
     NAME cubicle-controller-default-state-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

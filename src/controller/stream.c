@@ -14,8 +14,76 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+static volatile sig_atomic_t terminal_resize_pending = 0;
+
+typedef struct terminal_mode {
+    int enabled;
+    struct termios original;
+} terminal_mode_t;
+
+static void handle_terminal_resize_signal(int signal_number)
+{
+    (void)signal_number;
+    terminal_resize_pending = 1;
+}
+
+static int enable_terminal_raw_mode(terminal_mode_t *mode)
+{
+    mode->enabled = 0;
+
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+
+    if (tcgetattr(STDIN_FILENO, &mode->original) < 0) {
+        return -1;
+    }
+
+    struct termios raw = mode->original;
+    raw.c_iflag &= ~(tcflag_t)(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~(tcflag_t)OPOST;
+    raw.c_cflag |= CS8;
+    raw.c_lflag &= ~(tcflag_t)(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
+        return -1;
+    }
+
+    mode->enabled = 1;
+    return 0;
+}
+
+static void restore_terminal_mode(terminal_mode_t *mode)
+{
+    if (mode->enabled) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &mode->original);
+        mode->enabled = 0;
+    }
+}
+
+static int apply_terminal_window_size(int pty_fd)
+{
+    if (!isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+
+    struct winsize size;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0) {
+        return -1;
+    }
+
+    if (size.ws_row == 0 || size.ws_col == 0) {
+        return 0;
+    }
+
+    return ioctl(pty_fd, TIOCSWINSZ, &size);
+}
 
 static int create_pipe(int pipe_fds[2], const char *name)
 {
@@ -107,6 +175,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                              int control_fd,
                              pid_t child_pid,
                              int child_stdin_fd,
+                             int local_input_fd,
+                             int resize_fd,
                              int *child_reaped,
                              int *child_result)
 {
@@ -131,9 +201,18 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             break;
         }
 
-        struct pollfd poll_fds[3 + CUBICLE_MAX_CONTROL_CLIENTS];
+        if (resize_fd >= 0 && terminal_resize_pending) {
+            terminal_resize_pending = 0;
+            if (apply_terminal_window_size(resize_fd) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+                return -1;
+            }
+        }
+
+        struct pollfd poll_fds[4 + CUBICLE_MAX_CONTROL_CLIENTS];
         nfds_t poll_count = 0;
         nfds_t control_index = (nfds_t)-1;
+        nfds_t local_input_index = (nfds_t)-1;
         nfds_t client_indexes[CUBICLE_MAX_CONTROL_CLIENTS];
 
         for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
@@ -144,6 +223,14 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             control_index = poll_count;
             poll_fds[poll_count].fd = control_fd;
             poll_fds[poll_count].events = POLLIN;
+            poll_fds[poll_count].revents = 0;
+            ++poll_count;
+        }
+
+        if (local_input_fd >= 0 && child_stdin_fd >= 0) {
+            local_input_index = poll_count;
+            poll_fds[poll_count].fd = local_input_fd;
+            poll_fds[poll_count].events = POLLIN | POLLHUP | POLLERR;
             poll_fds[poll_count].revents = 0;
             ++poll_count;
         }
@@ -201,6 +288,34 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed accepting control client");
                 return -1;
+            }
+        }
+
+        if (local_input_index != (nfds_t)-1) {
+            short revents = poll_fds[local_input_index].revents;
+            if ((revents & POLLIN) != 0) {
+                char buffer[1024];
+                ssize_t read_result = read(local_input_fd, buffer,
+                                           sizeof(buffer));
+                if (read_result < 0) {
+                    if (errno != EINTR) {
+                        cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                                    strerror(errno));
+                        return -1;
+                    }
+                } else if (read_result == 0) {
+                    local_input_fd = -1;
+                } else if (write_best_effort(child_stdin_fd, buffer,
+                                             (size_t)read_result) < 0 &&
+                           errno != EAGAIN) {
+                    cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                                strerror(errno));
+                    return -1;
+                }
+            }
+
+            if ((revents & (POLLHUP | POLLERR)) != 0) {
+                local_input_fd = -1;
             }
         }
 
@@ -613,8 +728,8 @@ int run_stream(char **command, const char *state_dir,
     };
 
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
-                                          stdin_pipe[1], &child_reaped,
-                                          &child_result);
+                                          stdin_pipe[1], -1, -1,
+                                          &child_reaped, &child_result);
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
     close_if_open(&stdin_pipe[1]);
@@ -712,6 +827,13 @@ int run_tty(char **command, const char *state_dir,
         return 1;
     }
 
+    if (apply_terminal_window_size(master_fd) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        kill(-child_pid, SIGTERM);
+        close_if_open(&master_fd);
+        return 1;
+    }
+
     char message[256];
     snprintf(message, sizeof(message), "started pid %ld in tty mode",
              (long)child_pid);
@@ -766,10 +888,40 @@ int run_tty(char **command, const char *state_dir,
          .open = 0},
     };
 
+    terminal_mode_t terminal_mode = {.enabled = 0};
+    int local_input_fd = -1;
+    struct sigaction previous_winch;
+    int restore_winch = 0;
+    if (stdin_policy == STDIN_POLICY_OPEN &&
+        enable_terminal_raw_mode(&terminal_mode) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        kill(-child_pid, SIGTERM);
+        close_if_open(&control_fd);
+        close_if_open(&master_fd);
+        close_controller_state(&state);
+        return 1;
+    }
+
+    if (terminal_mode.enabled) {
+        local_input_fd = STDIN_FILENO;
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = handle_terminal_resize_signal;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGWINCH, &action, &previous_winch) == 0) {
+            restore_winch = 1;
+        }
+    }
+
     int input_fd = stdin_policy == STDIN_POLICY_OPEN ? master_fd : -1;
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
-                                          input_fd, &child_reaped,
-                                          &child_result);
+                                          input_fd, local_input_fd, master_fd,
+                                          &child_reaped, &child_result);
+
+    restore_terminal_mode(&terminal_mode);
+    if (restore_winch) {
+        sigaction(SIGWINCH, &previous_winch, NULL);
+    }
 
     child_result = wait_for_child(child_pid, &state, &child_reaped,
                                   &child_result);

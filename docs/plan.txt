@@ -31,7 +31,9 @@
 - Implemented controller TTY mode:
   - allocate a PTY for stdin/stdout/stderr
   - expose combined terminal output through the existing stdout stream
-  - preserve stdin attachment semantics for interactive TTY input
+  - forward foreground terminal stdin to the PTY in raw mode
+  - propagate initial and changed terminal window size
+  - preserve socket stdin attachment semantics for interactive TTY input
   - keep tty-captured-stderr reserved for the later phase
 - Added initial durable controller state for stream mode:
   - metadata
@@ -42,6 +44,8 @@
   recording, metadata, and child exit status.
 - Added a controller TTY integration test covering PTY terminal detection,
   combined output capture, metadata, and exit events.
+- Added a controller foreground TTY integration test covering local stdin
+  forwarding and SIGWINCH resize propagation.
 - Added a controller-local control socket for stream mode:
   - status queries
   - stdout/stderr range reads from persisted logs
