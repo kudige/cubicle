@@ -41,6 +41,9 @@ fi
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process list --workspace "$workspace_id" >"$tmpdir/processes"
 grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket$" "$tmpdir/processes"
 
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve started-1 --workspace "Project A" >"$tmpdir/resolve-started"
+grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket$" "$tmpdir/resolve-started"
+
 for _ in $(seq 1 100); do
     read_response=$(python3 "$CUBICLE_CONTROL_CLIENT" "$control_socket" read stdout 0 14)
     if [ "$read_response" = "$(printf 'ok length=14\nmanager-start\n')" ]; then

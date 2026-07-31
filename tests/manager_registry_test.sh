@@ -43,6 +43,23 @@ process_id=${process_id%% workspace_id=*}
 grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/processes"
 grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$state_dir/processes.tsv"
 
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$process_id" >"$tmpdir/resolve-by-id"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/resolve-by-id"
+
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project A" >"$tmpdir/resolve-by-name"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/resolve-by-name"
+
+set +e
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 >/dev/null 2>"$tmpdir/resolve-error"
+resolve_status=$?
+set -e
+
+if [ "$resolve_status" -eq 0 ]; then
+    echo "friendly-name resolution without workspace unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q 'friendly names require --workspace' "$tmpdir/resolve-error"
+
 set +e
 "$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project A" >/dev/null 2>"$tmpdir/duplicate-error"
 duplicate_status=$?

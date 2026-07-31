@@ -82,6 +82,22 @@ Prints:
 process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
 ```
 
+### process resolve
+
+```console
+cubicle-manager --state-dir DIR process resolve PROCESS_ID
+cubicle-manager --state-dir DIR process resolve make-1 --workspace "Project A"
+```
+
+Resolves a process ID globally, or a friendly name within a workspace. Friendly
+name resolution requires `--workspace`.
+
+Prints the direct controller details:
+
+```text
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+```
+
 ### process start
 
 ```console

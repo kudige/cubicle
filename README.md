@@ -61,6 +61,7 @@ process/controller records:
   --stdin-policy eof \
   -- make
 ./build/cubicle-manager --state-dir /tmp/cubicle-manager process list --workspace "Project A"
+./build/cubicle-manager --state-dir /tmp/cubicle-manager process resolve make-1 --workspace "Project A"
 ```
 
 The controller can launch stream-mode processes, mirror stdout/stderr, persist

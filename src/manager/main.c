@@ -47,8 +47,9 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] workspace list\n"
             "       %s [--state-dir dir] process register --workspace NAME_OR_ID --friendly-name NAME --mode MODE --controller-id ID --control-socket PATH [--process-id ID]\n"
             "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
+            "       %s [--state-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
-            program, program, program, program, program);
+            program, program, program, program, program, program);
 }
 
 static int write_all(int fd, const char *buffer, size_t length)
@@ -726,6 +727,91 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
     return 0;
 }
 
+static void print_process_record(const process_record_t *record)
+{
+    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+           record->process_id, record->workspace_id, record->friendly_name,
+           record->mode, record->state, record->controller_id,
+           record->control_socket);
+}
+
+static int command_process_resolve(const manager_state_t *state, int argc,
+                                   char **argv)
+{
+    if (argc < 1) {
+        return 2;
+    }
+
+    const char *target = argv[0];
+    const char *workspace = NULL;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--workspace") == 0 && i + 1 < argc) {
+            workspace = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown process resolve option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    workspace_record_t workspace_record;
+    if (workspace != NULL && find_workspace(state, workspace, &workspace_record) < 0) {
+        fprintf(stderr, "Unknown workspace: %s\n", workspace);
+        return 1;
+    }
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        fprintf(stderr, "Unknown process: %s\n", target);
+        return 1;
+    }
+
+    process_record_t found;
+    int match_count = 0;
+    char line[PATH_MAX + 512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        process_record_t record;
+        if (parse_process_line(line, &record) != 0) {
+            continue;
+        }
+
+        int matches = strcmp(record.process_id, target) == 0;
+        if (!matches && workspace != NULL &&
+            strcmp(record.workspace_id, workspace_record.id) == 0 &&
+            strcmp(record.friendly_name, target) == 0) {
+            matches = 1;
+        }
+
+        if (!matches) {
+            continue;
+        }
+
+        found = record;
+        ++match_count;
+    }
+
+    fclose(file);
+
+    if (match_count == 0) {
+        if (workspace == NULL) {
+            fprintf(stderr,
+                    "Unknown process: %s (friendly names require --workspace)\n",
+                    target);
+        } else {
+            fprintf(stderr, "Unknown process: %s\n", target);
+        }
+        return 1;
+    }
+
+    if (match_count > 1) {
+        fprintf(stderr, "Ambiguous process: %s\n", target);
+        return 1;
+    }
+
+    print_process_record(&found);
+    return 0;
+}
+
 static int dispatch_command(const manager_state_t *state, int argc, char **argv)
 {
     if (argc < 2) {
@@ -755,6 +841,11 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
     if (strcmp(argv[0], "process") == 0 &&
         strcmp(argv[1], "list") == 0) {
         return command_process_list(state, argc - 2, &argv[2]);
+    }
+
+    if (strcmp(argv[0], "process") == 0 &&
+        strcmp(argv[1], "resolve") == 0) {
+        return command_process_resolve(state, argc - 2, &argv[2]);
     }
 
     return 2;

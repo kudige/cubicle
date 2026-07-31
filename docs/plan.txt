@@ -91,6 +91,8 @@
   - controller state is stored under manager state by process ID
   - manager waits for controller socket and metadata
   - manager registers controller ID and direct control socket
+  - process resolve returns direct controller details by process ID
+  - process resolve supports workspace-local friendly names
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
 - Added a controller stdin attachment integration test.
@@ -105,8 +107,6 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Add manager/controller routing.
-   - Resolve friendly names and process IDs.
-   - Return direct controller attachment details.
    - Keep terminal/output bytes out of the manager.
 
 3. Add workspace event aggregation.
