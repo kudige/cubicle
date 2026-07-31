@@ -31,10 +31,67 @@ int make_control_socket_path(char path[PATH_MAX],
     return make_state_file_path(path, state->dir, "control.sock");
 }
 
+static int is_live_unix_socket(const char *path)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+
+    int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    int saved_errno = errno;
+    close(fd);
+
+    if (result == 0) {
+        return 1;
+    }
+
+    errno = saved_errno;
+    return 0;
+}
+
+static int prepare_control_socket_path(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) < 0) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+
+        return -1;
+    }
+
+    if (!S_ISSOCK(st.st_mode)) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    int live = is_live_unix_socket(path);
+    if (live < 0) {
+        return -1;
+    }
+
+    if (live) {
+        errno = EADDRINUSE;
+        return -1;
+    }
+
+    return unlink(path);
+}
+
 int open_control_socket(const char *path)
 {
     if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
         errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (prepare_control_socket_path(path) < 0) {
         return -1;
     }
 
@@ -48,9 +105,9 @@ int open_control_socket(const char *path)
     address.sun_family = AF_UNIX;
     snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
 
-    unlink(path);
     if (set_nonblocking(fd) < 0 ||
         bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        chmod(path, 0600) < 0 ||
         listen(fd, 16) < 0) {
         close(fd);
         return -1;

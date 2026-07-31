@@ -147,6 +147,11 @@
   - create parent directories but require a new leaf state directory
   - fail normal launch instead of truncating reused state
   - regress reused state directory preservation
+- Hardened controller control socket creation:
+  - do not unlink live socket paths
+  - do not unlink non-socket filesystem entries
+  - replace stale socket paths only
+  - set control socket permissions explicitly
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next

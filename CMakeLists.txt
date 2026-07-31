@@ -172,6 +172,14 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-control-socket-path-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_control_socket_path_test.sh
+)
+
+add_test(
     NAME cubicle-controller-recovery-read-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
