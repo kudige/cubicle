@@ -16,6 +16,7 @@ if [ -s "$PWD/manager-help.out" ]; then
 fi
 grep -q 'Usage: .*cubicle-manager' "$PWD/manager-help.err"
 grep -q 'events follow \[--iterations N\]' "$PWD/manager-help.err"
+grep -q 'daemon \[--control-socket PATH\]' "$PWD/manager-help.err"
 
 rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
 rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"

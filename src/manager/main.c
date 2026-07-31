@@ -11,8 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -37,9 +39,10 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
+            "       %s [--state-dir dir] daemon [--control-socket PATH]\n"
             "       %s [--state-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
-            program, program);
+            program, program, program);
 }
 
 static int validate_field(const char *value, const char *name)
@@ -158,6 +161,155 @@ static FILE *open_state_file_for_read(const manager_state_t *state,
     }
 
     return file;
+}
+
+static int manager_socket_path(char path[PATH_MAX], const manager_state_t *state,
+                               const char *requested_socket)
+{
+    if (requested_socket != NULL) {
+        int result = snprintf(path, PATH_MAX, "%s", requested_socket);
+        if (result < 0 || result >= PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return 0;
+    }
+
+    return state_path(path, state, "manager.sock");
+}
+
+static int is_live_unix_socket(const char *path)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+
+    int live = connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
+    close(fd);
+    return live;
+}
+
+static int prepare_manager_socket_path(const char *path)
+{
+    struct stat existing;
+    if (lstat(path, &existing) < 0) {
+        return errno == ENOENT ? 0 : -1;
+    }
+
+    if (!S_ISSOCK(existing.st_mode)) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    int live = is_live_unix_socket(path);
+    if (live != 0) {
+        errno = live > 0 ? EADDRINUSE : errno;
+        return -1;
+    }
+
+    return unlink(path);
+}
+
+static int open_manager_socket(const char *path)
+{
+    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (prepare_manager_socket_path(path) < 0) {
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        chmod(path, 0600) < 0 ||
+        listen(fd, 16) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static int manager_id(const manager_state_t *state, char id[CUBICLE_MANAGER_ID_LENGTH + 1])
+{
+    FILE *file = open_state_file_for_read(state, "manager-id");
+    if (file != NULL) {
+        if (fgets(id, CUBICLE_MANAGER_ID_LENGTH + 1, file) == NULL) {
+            fclose(file);
+            errno = EINVAL;
+            return -1;
+        }
+        id[strcspn(id, "\n")] = '\0';
+        fclose(file);
+        return 0;
+    }
+
+    if (cubicle_generate_hex_id(id, CUBICLE_MANAGER_ID_LENGTH + 1) < 0) {
+        return -1;
+    }
+
+    char line[CUBICLE_MANAGER_ID_LENGTH + 2];
+    snprintf(line, sizeof(line), "%s\n", id);
+    return append_line(state, "manager-id", line);
+}
+
+static int count_workspaces(const manager_state_t *state, size_t *count)
+{
+    *count = 0;
+
+    FILE *file = open_state_file_for_read(state, "workspaces.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_workspace_record_t record;
+        if (cubicle_parse_workspace_record(line, &record) == 0) {
+            ++(*count);
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
+static int count_processes(const manager_state_t *state, size_t *count)
+{
+    *count = 0;
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[PATH_MAX + 512];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) == 0) {
+            ++(*count);
+        }
+    }
+
+    fclose(file);
+    return 0;
 }
 
 static int find_workspace(const manager_state_t *state, const char *name_or_id,
@@ -1169,8 +1321,136 @@ static int command_events_follow(const manager_state_t *state, int argc, char **
     return 0;
 }
 
+static int write_manager_response(int client_fd, const char *response)
+{
+    return cubicle_write_all(client_fd, response, strlen(response));
+}
+
+static int handle_manager_client(const manager_state_t *state, int client_fd,
+                                 int *shutdown_requested)
+{
+    char request[256];
+    size_t length = 0;
+
+    while (length + 1 < sizeof(request)) {
+        char byte;
+        ssize_t result = read(client_fd, &byte, 1);
+        if (result == 0) {
+            break;
+        }
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (byte == '\n') {
+            break;
+        }
+        if (byte == '\r') {
+            continue;
+        }
+        request[length++] = byte;
+    }
+    request[length] = '\0';
+
+    if (strcmp(request, "ping") == 0) {
+        char id[CUBICLE_MANAGER_ID_LENGTH + 1];
+        if (manager_id(state, id) < 0) {
+            return write_manager_response(client_fd, "error internal\n");
+        }
+
+        char response[128];
+        snprintf(response, sizeof(response),
+                 "ok manager_id=%s protocol_major=0 protocol_minor=1\n", id);
+        return write_manager_response(client_fd, response);
+    }
+
+    if (strcmp(request, "status") == 0) {
+        char id[CUBICLE_MANAGER_ID_LENGTH + 1];
+        size_t workspace_count = 0;
+        size_t process_count = 0;
+        if (manager_id(state, id) < 0 ||
+            count_workspaces(state, &workspace_count) < 0 ||
+            count_processes(state, &process_count) < 0) {
+            return write_manager_response(client_fd, "error internal\n");
+        }
+
+        char response[192];
+        snprintf(response, sizeof(response),
+                 "ok manager_id=%s workspace_count=%zu process_count=%zu\n",
+                 id, workspace_count, process_count);
+        return write_manager_response(client_fd, response);
+    }
+
+    if (strcmp(request, "shutdown") == 0) {
+        *shutdown_requested = 1;
+        return write_manager_response(client_fd, "ok\n");
+    }
+
+    return write_manager_response(client_fd, "error unsupported\n");
+}
+
+static int command_daemon(const manager_state_t *state, int argc, char **argv)
+{
+    const char *requested_socket = NULL;
+
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--control-socket") == 0 && i + 1 < argc) {
+            requested_socket = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown daemon option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    char socket_path[PATH_MAX];
+    if (manager_socket_path(socket_path, state, requested_socket) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    int listen_fd = open_manager_socket(socket_path);
+    if (listen_fd < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+
+    int result = 0;
+    int shutdown_requested = 0;
+    while (!shutdown_requested) {
+        int client_fd = accept(listen_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            result = 1;
+            break;
+        }
+
+        if (handle_manager_client(state, client_fd, &shutdown_requested) < 0) {
+            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            result = 1;
+        }
+        close(client_fd);
+    }
+
+    close(listen_fd);
+    unlink(socket_path);
+    return result;
+}
+
 static int dispatch_command(const manager_state_t *state, int argc, char **argv)
 {
+    if (argc < 1) {
+        return 2;
+    }
+
+    if (strcmp(argv[0], "daemon") == 0) {
+        return command_daemon(state, argc - 1, &argv[1]);
+    }
+
     if (argc < 2) {
         return 2;
     }

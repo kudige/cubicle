@@ -169,18 +169,30 @@
   - completed status includes the child result and final stream offsets
   - read-only status, metadata, events, and stream reads remain available
   - interactive commands fail with process_completed
+- Merged the draft transport-neutral API specification:
+  - docs/api-spec-v0.md defines manager/controller semantic APIs
+  - manager and controller APIs are specified independently of wire encoding
+  - Unix sockets are the initial implementation transport
+- Added the initial persistent manager daemon lifecycle:
+  - daemon command runs a long-lived foreground manager process
+  - Unix socket lifecycle supports ping, status, and shutdown
+  - manager ID is persisted in manager state
+  - stale manager socket paths are replaced safely
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
-1. Harden manager persistence.
-   - Prefer a persistent manager daemon with transactional storage.
+1. Complete persistent manager daemon ownership.
+   - Own manager state mutation and event aggregation in the daemon.
+   - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
+   - Move toward transactional storage behind the daemon authority.
 
-2. Implement TTY mode.
-   - Allocate PTY.
-   - Wire stdin/stdout/stderr through PTY.
-   - Handle terminal resize.
-   - Support observer-mode output attachments.
+2. Implement the API specification over decoupled transports.
+   - Introduce shared manager/controller API request and response types.
+   - Keep the semantic API independent from the transport layer.
+   - Implement the initial manager API subset over Unix sockets.
+   - Implement the initial controller attachment/internal API subset over Unix sockets.
+   - Add fixtures and conformance tests for API behavior.
 
 3. Add provisional user-facing CLI commands.
    - work
@@ -189,13 +201,19 @@
    - attach
    - stop
 
-4. Expand tests.
+4. Implement TTY mode.
+   - Allocate PTY.
+   - Wire stdin/stdout/stderr through PTY.
+   - Handle terminal resize.
+   - Support observer-mode output attachments.
+
+5. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
    - PTY behavior tests when PTY support lands.
 
-5. Implement TTY with captured stderr.
+6. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.

@@ -1,8 +1,9 @@
 # Cubicle manager registry
 
-The current manager implementation is a foreground CLI for persistent registry
-operations and stream controller launch. `events follow` provides a long-running
-event loop, but the manager does not run as a persistent daemon yet.
+The current manager implementation supports foreground CLI operations for
+persistent registry state and an initial long-running daemon lifecycle over a
+Unix socket. Stream process I/O still routes directly to per-process controller
+sockets.
 
 ## State directory
 
@@ -37,6 +38,15 @@ Process IDs are globally unique. Friendly names are unique within a workspace.
 
 Mutating manager commands take an exclusive advisory lock on `manager.lock`
 while reading and writing registry state.
+
+### manager-id
+
+The daemon stores its stable manager ID in `manager-id` when first queried.
+
+### manager.sock
+
+The default manager daemon Unix socket path is `DIR/manager.sock`. A daemon
+command may override it with `--control-socket PATH`.
 
 ## Commands
 
@@ -180,3 +190,14 @@ cubicle-manager --state-dir DIR events follow --workspace "Project A" --iteratio
 Runs the manager event loop and repeatedly polls for new events. Follow runs
 until interrupted by default. `--iterations` can bound the loop for tests and
 scripts. New records are flushed after each poll iteration.
+
+### daemon
+
+```console
+cubicle-manager --state-dir DIR daemon
+cubicle-manager --state-dir DIR daemon --control-socket /path/to/manager.sock
+```
+
+Runs the initial persistent manager daemon in the foreground. The lifecycle
+socket currently supports `ping`, `status`, and `shutdown` as a narrow bootstrap
+surface for the transport-neutral API implementation.
