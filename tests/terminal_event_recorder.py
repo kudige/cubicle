@@ -109,6 +109,8 @@ def main():
                     break
 
                 record_event(output, "input", hex=data.hex(), text=byte_text(data))
+                if b"\x03" in data:
+                    record_event(output, "control_c")
                 if exit_byte in data:
                     record_event(output, "exit", reason="exit_key")
                     break
