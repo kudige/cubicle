@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(cubicle_client STATIC
     ../src/client/client.c
     ../src/client/error.c
+    ../src/client/transport_unix.c
 )
 
 add_library(Cubicle::Client ALIAS cubicle_client)
@@ -25,4 +26,14 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic
     )
     add_test(NAME libcubicle-scaffold-test COMMAND libcubicle-scaffold-test)
+
+    add_executable(libcubicle-unix-transport-test
+        ../tests/unix_transport_test.c
+    )
+    target_link_libraries(libcubicle-unix-transport-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-unix-transport-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-unix-transport-test
+             COMMAND libcubicle-unix-transport-test)
 endif()
