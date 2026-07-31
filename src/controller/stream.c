@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 600
 #define _POSIX_C_SOURCE 200809L
 
 #include "internal.h"
@@ -9,7 +10,9 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -259,6 +262,12 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             ssize_t read_result = read(pipes[i].fd, buffer, sizeof(buffer));
             if (read_result < 0) {
                 if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EIO) {
+                    close_if_open(&pipes[i].fd);
+                    pipes[i].open = 0;
+                    --open_count;
                     continue;
                 }
 
@@ -557,7 +566,7 @@ int run_stream(char **command, const char *state_dir,
     int child_reaped = 0;
     int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,
-                                    stdin_policy) < 0) {
+                                    CUBICLE_PROCESS_STREAM, stdin_policy) < 0) {
         snprintf(message, sizeof(message), "failed to initialize state: %s",
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
@@ -608,6 +617,157 @@ int run_stream(char **command, const char *state_dir,
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
     close_if_open(&stdin_pipe[1]);
+
+    child_result = wait_for_child(child_pid, &state, &child_reaped,
+                                  &child_result);
+    int retention_result = 0;
+    if (output_result == 0) {
+        retention_result = completed_retention_loop(&state, control_fd,
+                                                    child_pid, child_result,
+                                                    completed_retention_ms);
+    }
+    close_if_open(&control_fd);
+    unlink(control_socket_path);
+    close_controller_state(&state);
+    if ((output_result < 0 || retention_result < 0) && child_result == 0) {
+        return 1;
+    }
+
+    return child_result;
+}
+
+static int open_pty_pair(int *master_fd, int *slave_fd)
+{
+    *master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (*master_fd < 0) {
+        return -1;
+    }
+
+    if (grantpt(*master_fd) < 0 || unlockpt(*master_fd) < 0) {
+        close_if_open(master_fd);
+        return -1;
+    }
+
+    char *slave_name = ptsname(*master_fd);
+    if (slave_name == NULL) {
+        close_if_open(master_fd);
+        return -1;
+    }
+
+    *slave_fd = open(slave_name, O_RDWR | O_NOCTTY);
+    if (*slave_fd < 0) {
+        close_if_open(master_fd);
+        return -1;
+    }
+
+    return 0;
+}
+
+int run_tty(char **command, const char *state_dir,
+            const char *control_socket,
+            stdin_policy_t stdin_policy,
+            int completed_retention_ms)
+{
+    int master_fd = -1;
+    int slave_fd = -1;
+
+    if (open_pty_pair(&master_fd, &slave_fd) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        return 1;
+    }
+
+    pid_t child_pid = fork();
+    if (child_pid < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        close_if_open(&master_fd);
+        close_if_open(&slave_fd);
+        return 1;
+    }
+
+    if (child_pid == 0) {
+        close_if_open(&master_fd);
+        if (setsid() < 0) {
+            _exit(127);
+        }
+        ioctl(slave_fd, TIOCSCTTY, 0);
+
+        if (dup2(slave_fd, STDIN_FILENO) < 0 ||
+            dup2(slave_fd, STDOUT_FILENO) < 0 ||
+            dup2(slave_fd, STDERR_FILENO) < 0) {
+            _exit(127);
+        }
+
+        close_if_open(&slave_fd);
+        execvp(command[0], command);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    close_if_open(&slave_fd);
+
+    if (set_nonblocking(master_fd) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        kill(-child_pid, SIGTERM);
+        close_if_open(&master_fd);
+        return 1;
+    }
+
+    char message[256];
+    snprintf(message, sizeof(message), "started pid %ld in tty mode",
+             (long)child_pid);
+    cubicle_log(CUBICLE_LOG_INFO, "controller", message);
+
+    controller_state_t state;
+    initialize_empty_controller_state(&state);
+    int child_reaped = 0;
+    int child_result = 1;
+    if (initialize_controller_state(&state, state_dir, child_pid, command,
+                                    CUBICLE_PROCESS_TTY, stdin_policy) < 0) {
+        snprintf(message, sizeof(message), "failed to initialize state: %s",
+                 strerror(errno));
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
+        kill(-child_pid, SIGTERM);
+        wait_for_child(child_pid, &state, &child_reaped, &child_result);
+        close_if_open(&master_fd);
+        close_controller_state(&state);
+        return 1;
+    }
+
+    cubicle_log(CUBICLE_LOG_INFO, "controller", "state directory initialized");
+
+    char control_socket_path[PATH_MAX];
+    int control_fd = -1;
+    if (make_control_socket_path(control_socket_path, control_socket, &state) < 0 ||
+        (control_fd = open_control_socket(control_socket_path)) < 0) {
+        snprintf(message, sizeof(message), "failed to initialize control socket: %s",
+                 strerror(errno));
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
+        kill(-child_pid, SIGTERM);
+        wait_for_child(child_pid, &state, &child_reaped, &child_result);
+        close_if_open(&master_fd);
+        close_controller_state(&state);
+        return 1;
+    }
+    cubicle_log(CUBICLE_LOG_INFO, "controller", "control socket initialized");
+
+    stream_pipe_t pipes[2] = {
+        {.fd = master_fd,
+         .output_fd = STDOUT_FILENO,
+         .log_fd = state.stdout_fd,
+         .name = "stdout",
+         .offset = &state.stdout_offset,
+         .open = 1},
+        {.fd = -1,
+         .output_fd = STDERR_FILENO,
+         .log_fd = state.stderr_fd,
+         .name = "stderr",
+         .offset = &state.stderr_offset,
+         .open = 0},
+    };
+
+    int input_fd = stdin_policy == STDIN_POLICY_OPEN ? master_fd : -1;
+    int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
+                                          input_fd, &child_reaped,
+                                          &child_result);
 
     child_result = wait_for_child(child_pid, &state, &child_reaped,
                                   &child_result);

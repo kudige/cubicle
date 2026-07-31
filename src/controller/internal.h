@@ -75,6 +75,7 @@ int initialize_controller_state(controller_state_t *state,
                                 const char *requested_dir,
                                 pid_t child_pid,
                                 char **command,
+                                cubicle_process_mode_t mode,
                                 stdin_policy_t stdin_policy);
 
 int make_control_socket_path(char path[PATH_MAX], const char *requested_socket,
@@ -108,5 +109,9 @@ int run_stream(char **command, const char *state_dir,
                const char *control_socket,
                stdin_policy_t stdin_policy,
                int completed_retention_ms);
+int run_tty(char **command, const char *state_dir,
+            const char *control_socket,
+            stdin_policy_t stdin_policy,
+            int completed_retention_ms);
 
 #endif

@@ -116,3 +116,28 @@ if [ -S "$fast_socket" ]; then
 fi
 
 printf "fast\n" | cmp - "$state_dir/controllers/$fast_process_id/stdout.log"
+
+tty_output=$("$CUBICLE_MANAGER" \
+    --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    process start \
+    --workspace "Project A" \
+    --friendly-name tty-1 \
+    --mode tty \
+    --stdin-policy eof \
+    -- sh -c 'test -t 0 && test -t 1 && test -t 2; printf "manager-tty\n"; printf "manager-tty-err\n" >&2')
+
+tty_process_id=${tty_output#process id=}
+tty_process_id=${tty_process_id%% workspace_id=*}
+tty_socket=${tty_output##* control_socket=}
+
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$tty_process_id" >"$tmpdir/resolve-tty"
+grep -q "^$tty_process_id	$workspace_id	tty-1	tty	exited	.*	$tty_socket$" "$tmpdir/resolve-tty"
+
+grep -q 'manager-tty' "$state_dir/controllers/$tty_process_id/stdout.log"
+grep -q 'manager-tty-err' "$state_dir/controllers/$tty_process_id/stdout.log"
+
+if [ -s "$state_dir/controllers/$tty_process_id/stderr.log" ]; then
+    echo "manager-started tty should not capture independent stderr" >&2
+    exit 1
+fi

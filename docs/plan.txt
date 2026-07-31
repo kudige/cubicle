@@ -28,6 +28,11 @@
   - EOF stdin until attachments exist
   - stdout/stderr mirroring to the invoking terminal
   - child exit status propagation
+- Implemented controller TTY mode:
+  - allocate a PTY for stdin/stdout/stderr
+  - expose combined terminal output through the existing stdout stream
+  - preserve stdin attachment semantics for interactive TTY input
+  - keep tty-captured-stderr reserved for the later phase
 - Added initial durable controller state for stream mode:
   - metadata
   - stdout.log
@@ -35,6 +40,8 @@
   - sequence-numbered events.log
 - Added a controller stream integration test covering output capture, event
   recording, metadata, and child exit status.
+- Added a controller TTY integration test covering PTY terminal detection,
+  combined output capture, metadata, and exit events.
 - Added a controller-local control socket for stream mode:
   - status queries
   - stdout/stderr range reads from persisted logs
@@ -129,6 +136,7 @@
 - Added a controller daemon integration test.
 - Added a manager registry integration test.
 - Added a manager process-start integration test.
+- Extended the manager process-start integration test to cover TTY mode.
 - Split the controller implementation into focused internal modules:
   - CLI entrypoint
   - stream process lifecycle
@@ -187,38 +195,30 @@
 
 ## Next
 
-1. Complete persistent manager daemon ownership.
-   - Move manager state mutation commands behind daemon request handling.
-   - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
-   - Move toward transactional storage behind the daemon authority.
-
-2. Implement the API specification over decoupled transports.
+1. Implement the API specification over decoupled transports.
    - Introduce shared manager/controller API request and response types.
    - Keep the semantic API independent from the transport layer.
    - Implement the initial manager API subset over Unix sockets.
    - Implement the initial controller attachment/internal API subset over Unix sockets.
+   - Move manager state mutation commands behind daemon request handling.
+   - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
+   - Move toward transactional storage behind the daemon authority.
    - Add fixtures and conformance tests for API behavior.
 
-3. Add provisional user-facing CLI commands.
+2. Add provisional user-facing CLI commands.
    - work
    - dev
    - tty
    - attach
    - stop
 
-4. Implement TTY mode.
-   - Allocate PTY.
-   - Wire stdin/stdout/stderr through PTY.
-   - Handle terminal resize.
-   - Support observer-mode output attachments.
-
-5. Expand tests.
+3. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
    - PTY behavior tests when PTY support lands.
 
-6. Implement TTY with captured stderr.
+4. Implement TTY with captured stderr.
    - Wire stdin/stdout through PTY.
    - Capture stderr through a separate pipe.
    - Persist and expose stderr independently.

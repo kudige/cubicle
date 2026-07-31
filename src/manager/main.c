@@ -35,7 +35,7 @@ static void print_usage(const char *program)
             "Usage: %s [--state-dir dir] workspace create NAME\n"
             "       %s [--state-dir dir] workspace list\n"
             "       %s [--state-dir dir] process register --workspace NAME_OR_ID --friendly-name NAME --mode MODE --controller-id ID --control-socket PATH [--process-id ID]\n"
-            "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
+            "       %s [--state-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream|tty [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
             "       %s [--state-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] events list [--workspace NAME_OR_ID]\n"
@@ -912,8 +912,9 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 2;
     }
 
-    if (strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_STREAM)) != 0) {
-        fprintf(stderr, "Only stream mode can be started currently\n");
+    if (strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_STREAM)) != 0 &&
+        strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_TTY)) != 0) {
+        fprintf(stderr, "Only stream and tty modes can be started currently\n");
         return 2;
     }
 

@@ -184,7 +184,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (process_mode != CUBICLE_PROCESS_STREAM) {
+    if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
         fprintf(stderr, "%s mode is parsed but not implemented yet\n",
                 cubicle_process_mode_name(process_mode));
         return 3;
@@ -193,6 +193,11 @@ int main(int argc, char **argv)
     if (daemon && daemonize_controller() < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         return 1;
+    }
+
+    if (process_mode == CUBICLE_PROCESS_TTY) {
+        return run_tty(&argv[command_index], state_dir, control_socket,
+                       stdin_policy, completed_retention_ms);
     }
 
     return run_stream(&argv[command_index], state_dir, control_socket,

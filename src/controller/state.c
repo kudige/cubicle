@@ -113,6 +113,7 @@ int initialize_controller_state(controller_state_t *state,
                                        const char *requested_dir,
                                        pid_t child_pid,
                                        char **command,
+                                       cubicle_process_mode_t mode,
                                        stdin_policy_t stdin_policy)
 {
     initialize_empty_controller_state(state);
@@ -160,8 +161,9 @@ int initialize_controller_state(controller_state_t *state,
 
     char metadata[1024];
     int metadata_length = snprintf(metadata, sizeof(metadata),
-                                   "controller_id=%s\nmode=stream\npid=%ld\npgid=%ld\nstdin_policy=%s\ncommand=%s\n",
+                                   "controller_id=%s\nmode=%s\npid=%ld\npgid=%ld\nstdin_policy=%s\ncommand=%s\n",
                                    state->controller_id,
+                                   cubicle_process_mode_name(mode),
                                    (long)child_pid, (long)child_pid,
                                    stdin_policy == STDIN_POLICY_EOF ? "eof" : "open",
                                    command_line);
@@ -185,9 +187,10 @@ int initialize_controller_state(controller_state_t *state,
 
     char event[256];
     int event_length = snprintf(event, sizeof(event),
-                                "type=process_started controller_id=%s pid=%ld pgid=%ld mode=stream",
+                                "type=process_started controller_id=%s pid=%ld pgid=%ld mode=%s",
                                 state->controller_id, (long)child_pid,
-                                (long)child_pid);
+                                (long)child_pid,
+                                cubicle_process_mode_name(mode));
     if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
         errno = ENAMETOOLONG;
         return -1;
