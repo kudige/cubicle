@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(cubicle_client STATIC
     ../src/client/client.c
     ../src/client/error.c
+    ../src/common/rpc.c
     ../src/client/transport_unix.c
 )
 
@@ -46,4 +47,13 @@ if(BUILD_TESTING)
     )
     add_test(NAME libcubicle-public-headers-test
              COMMAND libcubicle-public-headers-test)
+
+    add_executable(libcubicle-rpc-test
+        ../tests/rpc_test.c
+    )
+    target_link_libraries(libcubicle-rpc-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-rpc-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-rpc-test COMMAND libcubicle-rpc-test)
 endif()
