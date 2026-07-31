@@ -567,7 +567,8 @@ int run_stream(char **command, const char *state_dir,
     int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,
                                     CUBICLE_PROCESS_STREAM, stdin_policy) < 0) {
-        snprintf(message, sizeof(message), "failed to initialize state: %s",
+        snprintf(message, sizeof(message), "failed to initialize state %s: %s",
+                 state_dir == NULL ? "(default)" : state_dir,
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);
@@ -722,7 +723,8 @@ int run_tty(char **command, const char *state_dir,
     int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,
                                     CUBICLE_PROCESS_TTY, stdin_policy) < 0) {
-        snprintf(message, sizeof(message), "failed to initialize state: %s",
+        snprintf(message, sizeof(message), "failed to initialize state %s: %s",
+                 state_dir == NULL ? "(default)" : state_dir,
                  strerror(errno));
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);

@@ -21,5 +21,5 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-grep -q 'failed to initialize state:' "$tmpdir/stderr"
+grep -q "failed to initialize state $state_dir: File exists" "$tmpdir/stderr"
 printf "keep-me\n" | cmp - "$state_dir/stdout.log"

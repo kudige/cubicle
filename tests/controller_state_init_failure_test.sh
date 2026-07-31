@@ -20,7 +20,7 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-grep -q 'failed to initialize state:' "$tmpdir/stderr"
+grep -q "failed to initialize state $state_path:" "$tmpdir/stderr"
 
 if [ -d "$state_path" ]; then
     echo "invalid state path was converted into a directory" >&2
