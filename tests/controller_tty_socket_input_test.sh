@@ -29,6 +29,12 @@ if [ ! -S "$socket_path" ]; then
     exit 1
 fi
 
+mode_response=$(python3 "$CUBICLE_CONTROL_CLIENT" "$socket_path" mode)
+if [ "$mode_response" != "tty" ]; then
+    echo "unexpected mode response: $mode_response" >&2
+    exit 1
+fi
+
 resize_response=$(python3 "$CUBICLE_CONTROL_CLIENT" "$socket_path" resize 40 120)
 if [ "$resize_response" != "ok" ]; then
     echo "unexpected resize response: $resize_response" >&2

@@ -72,6 +72,8 @@
   - forward attached bytes into child stdin
   - record input primitive events
   - support stdin attachment in the Python control socket client
+  - Python control socket client can detect controller mode from metadata
+  - Python control socket client enables raw terminal input for TTY stdin attachment
 - Defined initial stream backpressure behavior:
   - nonblocking attachment writes fail closed
   - slow output clients are detached instead of silently losing bytes

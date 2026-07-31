@@ -26,6 +26,12 @@ grep -q '^ok length=' "$tmpdir/metadata-response"
 grep -q '^controller_id=' "$tmpdir/metadata-response"
 grep -q '^mode=stream$' "$tmpdir/metadata-response"
 
+mode_response=$(python3 "$CUBICLE_CONTROL_CLIENT" "$socket_path" mode)
+if [ "$mode_response" != "stream" ]; then
+    echo "unexpected mode response: $mode_response" >&2
+    exit 1
+fi
+
 python3 "$CUBICLE_CONTROL_CLIENT" "$socket_path" events-after 0 10 >"$tmpdir/events-response"
 grep -q '^ok count=.* length=' "$tmpdir/events-response"
 grep -q '^seq=1 type=process_started' "$tmpdir/events-response"
