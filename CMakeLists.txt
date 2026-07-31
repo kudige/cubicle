@@ -80,6 +80,13 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-stdin-attach-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_stdin_attach_test.sh
+)
+
+add_test(
     NAME cubicle-controller-daemon-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

@@ -40,6 +40,11 @@
   - live follow newly captured output
   - close attachments when the process exits
   - client attached/detached primitive events
+- Added stdin attachment for stream mode:
+  - attach stdin/in over the control socket
+  - forward attached bytes into child stdin
+  - record input primitive events
+  - support stdin attachment in the Python control socket client
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -47,16 +52,17 @@
   - keep interaction available through the control socket and persisted logs
 - Added a controller control-socket integration test.
 - Added a controller attachment integration test.
+- Added a controller stdin attachment integration test.
 - Added a controller daemon integration test.
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
 
-1. Finish stream attachment semantics.
-   - Add stdin attachment now that the controller has an event loop.
+1. Finish stream protocol semantics.
    - Decide how attached-client backpressure should be handled.
    - Decide the final framing format for binary stream reads and attach catch-up.
    - Define stable response schemas and error codes.
+   - Decide stdin EOF policy for stream processes with no stdin attachment.
 
 2. Harden controller state.
    - Choose stable controller IDs instead of pid-derived default paths.

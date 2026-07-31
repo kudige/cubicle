@@ -4,11 +4,29 @@ import socket
 import sys
 
 
-def send_command(socket_path, command):
+def send_command(socket_path, command, forward_stdin=False):
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         client.connect(socket_path)
         client.sendall(command.encode("utf-8") + b"\n")
+
+        if forward_stdin:
+            response = b""
+            while not response.endswith(b"\n"):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            sys.stdout.buffer.write(response)
+            sys.stdout.buffer.flush()
+
+            while True:
+                chunk = sys.stdin.buffer.read(4096)
+                if not chunk:
+                    break
+                client.sendall(chunk)
+            return
+
         if not command.startswith("attach "):
             client.shutdown(socket.SHUT_WR)
 
@@ -44,8 +62,8 @@ def main():
     read_parser.add_argument("length", type=int)
 
     attach_parser = subparsers.add_parser("attach")
-    attach_parser.add_argument("stream", choices=["stdout", "stderr", "out", "err"])
-    attach_parser.add_argument("start", type=int)
+    attach_parser.add_argument("stream", choices=["stdin", "stdout", "stderr", "in", "out", "err"])
+    attach_parser.add_argument("start", type=int, nargs="?")
 
     raw_parser = subparsers.add_parser("raw")
     raw_parser.add_argument("line", help="Raw one-line control command to send.")
@@ -61,6 +79,14 @@ def main():
     elif args.command == "read":
         command = f"read {args.stream} {args.start} {args.length}"
     elif args.command == "attach":
+        if args.stream in ("stdin", "in"):
+            if args.start is not None:
+                parser.error("attach stdin does not take a start offset")
+            command = f"attach {args.stream}"
+            send_command(args.socket_path, command, forward_stdin=True)
+            return
+        if args.start is None:
+            parser.error("attach stdout/stderr requires a start offset")
         command = f"attach {args.stream} {args.start}"
     else:
         command = args.line

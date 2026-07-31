@@ -29,7 +29,8 @@ typedef enum control_client_kind {
     CONTROL_CLIENT_EMPTY = 0,
     CONTROL_CLIENT_READING = 1,
     CONTROL_CLIENT_ATTACHED_STDOUT = 2,
-    CONTROL_CLIENT_ATTACHED_STDERR = 3
+    CONTROL_CLIENT_ATTACHED_STDERR = 3,
+    CONTROL_CLIENT_ATTACHED_STDIN = 4
 } control_client_kind_t;
 
 typedef struct stream_pipe {
@@ -447,6 +448,8 @@ static void close_control_client(control_client_t *client, controller_state_t *s
             append_event(state, "type=client_detached stream=stdout");
         } else if (client->kind == CONTROL_CLIENT_ATTACHED_STDERR) {
             append_event(state, "type=client_detached stream=stderr");
+        } else if (client->kind == CONTROL_CLIENT_ATTACHED_STDIN) {
+            append_event(state, "type=client_detached stream=stdin");
         }
         close(client->fd);
     }
@@ -676,6 +679,14 @@ static int dispatch_control_request(control_client_t *client,
         } else {
             result = write_error_response(client->fd, "bad_read_command");
         }
+    } else if (strcmp(request, "attach stdin") == 0 ||
+               strcmp(request, "attach in") == 0) {
+        result = write_all(client->fd, "ok attached stream=stdin\n", 25);
+        if (result == 0) {
+            client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
+            append_event(state, "type=client_attached stream=stdin");
+            return 0;
+        }
     } else if (strncmp(request, "attach ", 7) == 0) {
         char stream[16];
         long long start = 0;
@@ -846,10 +857,51 @@ static void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTR
     }
 }
 
+static int forward_attached_stdin(control_client_t *client,
+                                  controller_state_t *state,
+                                  int child_stdin_fd)
+{
+    char buffer[4096];
+
+    for (;;) {
+        ssize_t read_result = read(client->fd, buffer, sizeof(buffer));
+        if (read_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+
+            close_control_client(client, state);
+            return 0;
+        }
+
+        if (read_result == 0) {
+            close_control_client(client, state);
+            return 0;
+        }
+
+        if (write_best_effort(child_stdin_fd, buffer, (size_t)read_result) < 0) {
+            close_control_client(client, state);
+            return 0;
+        }
+
+        char event[128];
+        int event_length = snprintf(event, sizeof(event),
+                                    "type=input length=%zd", read_result);
+        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
+            append_event(state, event);
+        }
+    }
+}
+
 static int stream_event_loop(stream_pipe_t pipes[2],
                              controller_state_t *state,
                              int control_fd,
-                             pid_t child_pid)
+                             pid_t child_pid,
+                             int child_stdin_fd)
 {
     control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS];
     initialize_control_clients(clients);
@@ -901,7 +953,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             client_indexes[i] = poll_count;
             poll_fds[poll_count].fd = clients[i].fd;
             poll_fds[poll_count].events = POLLHUP | POLLERR;
-            if (clients[i].kind == CONTROL_CLIENT_READING) {
+            if (clients[i].kind == CONTROL_CLIENT_READING ||
+                clients[i].kind == CONTROL_CLIENT_ATTACHED_STDIN) {
                 poll_fds[poll_count].events |= POLLIN;
             }
             poll_fds[poll_count].revents = 0;
@@ -939,6 +992,14 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 read_control_client_request(&clients[i], state, child_pid) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading control request");
+                return -1;
+            }
+
+            if (clients[i].kind == CONTROL_CLIENT_ATTACHED_STDIN &&
+                (revents & POLLIN) != 0 &&
+                forward_attached_stdin(&clients[i], state, child_stdin_fd) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed forwarding stdin attachment");
                 return -1;
             }
 
@@ -1113,8 +1174,14 @@ static int run_stream(char **command, const char *state_dir,
     close_if_open(&stdout_pipe[1]);
     close_if_open(&stderr_pipe[1]);
 
-    /* No attachment path exists yet, so the child sees EOF on stdin. */
-    close_if_open(&stdin_pipe[1]);
+    if (set_nonblocking(stdin_pipe[1]) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        kill(-child_pid, SIGTERM);
+        close_if_open(&stdin_pipe[1]);
+        close_if_open(&stdout_pipe[0]);
+        close_if_open(&stderr_pipe[0]);
+        return 1;
+    }
 
     char message[256];
     snprintf(message, sizeof(message), "started pid %ld in stream mode",
@@ -1128,6 +1195,7 @@ static int run_stream(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state);
+        close_if_open(&stdin_pipe[1]);
         close_if_open(&stdout_pipe[0]);
         close_if_open(&stderr_pipe[0]);
         close_controller_state(&state);
@@ -1145,6 +1213,7 @@ static int run_stream(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", message);
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state);
+        close_if_open(&stdin_pipe[1]);
         close_controller_state(&state);
         return 1;
     }
@@ -1165,9 +1234,11 @@ static int run_stream(char **command, const char *state_dir,
          .open = 1},
     };
 
-    int output_result = stream_event_loop(pipes, &state, control_fd, child_pid);
+    int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
+                                          stdin_pipe[1]);
     close_if_open(&pipes[0].fd);
     close_if_open(&pipes[1].fd);
+    close_if_open(&stdin_pipe[1]);
     close_if_open(&control_fd);
     unlink(control_socket_path);
 

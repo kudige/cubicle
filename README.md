@@ -70,11 +70,14 @@ read stdout 0 4096
 read stderr 0 4096
 attach stdout 0
 attach stderr 0
+attach stdin
 terminate
 signal 15
 ```
 
-`attach` sends a header with the persisted catch-up length, then streams raw
-future bytes until the process exits or the client disconnects.
+Output `attach` sends a header with the persisted catch-up length, then streams
+raw future bytes until the process exits or the client disconnects. Stdin
+`attach` sends a header, then forwards bytes from the socket to the managed
+process stdin until the client disconnects.
 
-TTY modes, stdin attachments, and manager/controller routing are not implemented yet.
+TTY modes and manager/controller routing are not implemented yet.
