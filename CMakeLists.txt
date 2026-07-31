@@ -151,6 +151,13 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-state-init-failure-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_state_init_failure_test.sh
+)
+
+add_test(
     NAME cubicle-controller-control-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

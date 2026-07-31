@@ -62,6 +62,7 @@ int write_best_effort(int fd, const char *buffer, size_t length);
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
                          const char *name);
+void initialize_empty_controller_state(controller_state_t *state);
 void close_controller_state(controller_state_t *state);
 int append_event(controller_state_t *state, const char *event);
 int initialize_controller_state(controller_state_t *state,

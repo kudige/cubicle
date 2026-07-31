@@ -26,8 +26,25 @@ static int create_pipe(int pipe_fds[2], const char *name)
     return -1;
 }
 
-static int child_result_from_status(int status, controller_state_t *state)
+static int child_result_from_status(int status)
 {
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+
+    return 1;
+}
+
+static void record_child_exit(controller_state_t *state, int status)
+{
+    if (state->events_fd < 0) {
+        return;
+    }
+
     char event[256];
     if (WIFEXITED(status)) {
         int exit_code = WEXITSTATUS(status);
@@ -37,7 +54,7 @@ static int child_result_from_status(int status, controller_state_t *state)
         if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
             append_event(state, event);
         }
-        return exit_code;
+        return;
     }
 
     if (WIFSIGNALED(status)) {
@@ -48,10 +65,7 @@ static int child_result_from_status(int status, controller_state_t *state)
         if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
             append_event(state, event);
         }
-        return 128 + signal_number;
     }
-
-    return 1;
 }
 
 static int reap_child_nonblocking(pid_t child_pid, controller_state_t *state,
@@ -70,7 +84,8 @@ static int reap_child_nonblocking(pid_t child_pid, controller_state_t *state,
 
         if (result == child_pid) {
             *child_reaped = 1;
-            *child_result = child_result_from_status(status, state);
+            *child_result = child_result_from_status(status);
+            record_child_exit(state, status);
             return 0;
         }
 
@@ -303,7 +318,8 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state,
     }
 
     *child_reaped = 1;
-    *child_result = child_result_from_status(status, state);
+    *child_result = child_result_from_status(status);
+    record_child_exit(state, status);
     return *child_result;
 }
 
@@ -377,6 +393,7 @@ int run_stream(char **command, const char *state_dir,
     cubicle_log(CUBICLE_LOG_INFO, "controller", message);
 
     controller_state_t state;
+    initialize_empty_controller_state(&state);
     int child_reaped = 0;
     int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,

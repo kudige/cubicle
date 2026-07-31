@@ -34,6 +34,14 @@ int make_state_file_path(char path[PATH_MAX], const char *dir,
     return 0;
 }
 
+void initialize_empty_controller_state(controller_state_t *state)
+{
+    memset(state, 0, sizeof(*state));
+    state->events_fd = -1;
+    state->stdout_fd = -1;
+    state->stderr_fd = -1;
+}
+
 void close_controller_state(controller_state_t *state)
 {
     close_if_open(&state->events_fd);
@@ -43,6 +51,11 @@ void close_controller_state(controller_state_t *state)
 
 int append_event(controller_state_t *state, const char *event)
 {
+    if (state->events_fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+
     char line[1024];
     int length = snprintf(line, sizeof(line), "seq=%lld %s\n",
                           state->next_sequence++, event);
@@ -76,10 +89,7 @@ int initialize_controller_state(controller_state_t *state,
                                        char **command,
                                        stdin_policy_t stdin_policy)
 {
-    memset(state, 0, sizeof(*state));
-    state->events_fd = -1;
-    state->stdout_fd = -1;
-    state->stderr_fd = -1;
+    initialize_empty_controller_state(state);
     state->next_sequence = 1;
 
     if (cubicle_generate_hex_id(state->controller_id, sizeof(state->controller_id)) < 0) {
