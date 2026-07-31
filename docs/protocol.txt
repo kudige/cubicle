@@ -69,6 +69,39 @@ ok length=N
 `N` may be shorter than the requested length if fewer bytes are currently
 available.
 
+### metadata
+
+Request:
+
+```text
+metadata
+```
+
+Response:
+
+```text
+ok length=N
+<N raw metadata bytes>
+```
+
+### events
+
+Request:
+
+```text
+events after SEQUENCE LIMIT
+```
+
+Response:
+
+```text
+ok count=N length=M
+<M raw event log bytes>
+```
+
+The response includes events with sequence numbers greater than `SEQUENCE`, up
+to `LIMIT` records.
+
 ### attach stdout/stderr
 
 Request:
@@ -158,6 +191,7 @@ The controller sends the requested signal to the managed process group.
 Current error codes:
 
 - `bad_attach_command`
+- `bad_events_command`
 - `bad_read_command`
 - `bad_request`
 - `bad_signal`
@@ -165,6 +199,7 @@ Current error codes:
 - `invalid_range`
 - `open_failed`
 - `range_past_end`
+- `read_too_large`
 - `request_too_long`
 - `signal_failed`
 - `state_path_too_long`

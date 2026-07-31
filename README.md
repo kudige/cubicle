@@ -81,6 +81,8 @@ The initial control socket protocol accepts one command per connection:
 
 ```text
 status
+metadata
+events after 0 100
 read stdout 0 4096
 read stderr 0 4096
 attach stdout 0

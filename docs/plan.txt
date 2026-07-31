@@ -68,6 +68,10 @@
 - Hardened primitive event writes:
   - events.log is opened with append semantics
   - each event record is emitted with one append write
+- Added controller recovery read paths:
+  - metadata command returns raw metadata through the control socket
+  - events after SEQUENCE LIMIT returns primitive events after a cursor
+  - Python control socket client supports metadata and events-after
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -85,7 +89,6 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Harden controller state.
-   - Add restart/recovery read paths for metadata and event cursors.
    - Define event and metadata formats more explicitly.
 
 3. Implement the first manager registry slice.

@@ -51,7 +51,12 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
+    subparsers.add_parser("metadata")
     subparsers.add_parser("terminate")
+
+    events_parser = subparsers.add_parser("events-after")
+    events_parser.add_argument("sequence", type=int)
+    events_parser.add_argument("limit", type=int)
 
     signal_parser = subparsers.add_parser("signal")
     signal_parser.add_argument("number", type=int)
@@ -72,8 +77,12 @@ def main():
 
     if args.command == "status":
         command = "status"
+    elif args.command == "metadata":
+        command = "metadata"
     elif args.command == "terminate":
         command = "terminate"
+    elif args.command == "events-after":
+        command = f"events after {args.sequence} {args.limit}"
     elif args.command == "signal":
         command = f"signal {args.number}"
     elif args.command == "read":

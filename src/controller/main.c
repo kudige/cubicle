@@ -714,6 +714,114 @@ static int write_stream_bytes(int client_fd, const controller_state_t *state,
     return 0;
 }
 
+static int write_file_response(int client_fd, const controller_state_t *state,
+                               const char *file_name)
+{
+    char path[PATH_MAX];
+    if (make_state_file_path(path, state->dir, file_name) < 0) {
+        return write_error_response(client_fd, "state_path_too_long");
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return write_error_response(client_fd, "open_failed");
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size < 0 || st.st_size > 65536) {
+        close(fd);
+        return write_error_response(client_fd, "read_too_large");
+    }
+
+    char header[64];
+    int header_length = snprintf(header, sizeof(header), "ok length=%lld\n",
+                                 (long long)st.st_size);
+    if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
+        write_all(client_fd, header, (size_t)header_length) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    char buffer[4096];
+    for (;;) {
+        ssize_t read_result = read(fd, buffer, sizeof(buffer));
+        if (read_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            close(fd);
+            return -1;
+        }
+
+        if (read_result == 0) {
+            break;
+        }
+
+        if (write_all(client_fd, buffer, (size_t)read_result) < 0) {
+            close(fd);
+            return -1;
+        }
+    }
+
+    close(fd);
+    return 0;
+}
+
+static int write_events_after_response(int client_fd,
+                                       const controller_state_t *state,
+                                       long long after_sequence,
+                                       long long limit)
+{
+    if (after_sequence < 0 || limit < 0 || limit > 1024) {
+        return write_error_response(client_fd, "invalid_event_range");
+    }
+
+    char path[PATH_MAX];
+    if (make_state_file_path(path, state->dir, "events.log") < 0) {
+        return write_error_response(client_fd, "state_path_too_long");
+    }
+
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return write_error_response(client_fd, "open_failed");
+    }
+
+    char payload[65536];
+    size_t used = 0;
+    long long count = 0;
+    char line[1024];
+
+    while (fgets(line, sizeof(line), file) != NULL && count < limit) {
+        long long sequence = -1;
+        if (sscanf(line, "seq=%lld", &sequence) != 1 ||
+            sequence <= after_sequence) {
+            continue;
+        }
+
+        size_t line_length = strlen(line);
+        if (line_length > sizeof(payload) - used) {
+            break;
+        }
+
+        memcpy(payload + used, line, line_length);
+        used += line_length;
+        ++count;
+    }
+
+    fclose(file);
+
+    char header[96];
+    int header_length = snprintf(header, sizeof(header),
+                                 "ok count=%lld length=%zu\n", count, used);
+    if (header_length < 0 || (size_t)header_length >= sizeof(header) ||
+        write_all(client_fd, header, (size_t)header_length) < 0) {
+        return -1;
+    }
+
+    return write_all(client_fd, payload, used);
+}
+
 static int send_attach_catchup(int client_fd, const controller_state_t *state,
                                const char *stream, long long start)
 {
@@ -756,6 +864,17 @@ static int dispatch_control_request(control_client_t *client,
             result = -1;
         } else {
             result = write_all(client->fd, response, (size_t)length);
+        }
+    } else if (strcmp(request, "metadata") == 0) {
+        result = write_file_response(client->fd, state, "metadata");
+    } else if (strncmp(request, "events after ", 13) == 0) {
+        long long after_sequence = 0;
+        long long limit = 0;
+        if (sscanf(request + 13, "%lld %lld", &after_sequence, &limit) == 2) {
+            result = write_events_after_response(client->fd, state,
+                                                 after_sequence, limit);
+        } else {
+            result = write_error_response(client->fd, "bad_events_command");
         }
     } else if (strncmp(request, "read ", 5) == 0) {
         char stream[16];
