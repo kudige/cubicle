@@ -49,6 +49,7 @@ typedef struct stream_pipe {
 
 typedef struct controller_state {
     char dir[PATH_MAX];
+    char controller_id[33];
     int events_fd;
     int stdout_fd;
     int stderr_fd;
@@ -149,6 +150,46 @@ static int parse_mode(const char *name, cubicle_process_mode_t *mode)
     }
 
     return -1;
+}
+
+static int generate_controller_id(char controller_id[33])
+{
+    unsigned char bytes[16];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    while (offset < sizeof(bytes)) {
+        ssize_t result = read(fd, bytes + offset, sizeof(bytes) - offset);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            close(fd);
+            return -1;
+        }
+
+        if (result == 0) {
+            close(fd);
+            errno = EIO;
+            return -1;
+        }
+
+        offset += (size_t)result;
+    }
+
+    close(fd);
+
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(bytes); ++i) {
+        controller_id[i * 2] = hex[bytes[i] >> 4];
+        controller_id[i * 2 + 1] = hex[bytes[i] & 0x0f];
+    }
+    controller_id[32] = '\0';
+    return 0;
 }
 
 static void close_if_open(int *fd)
@@ -313,6 +354,10 @@ static int initialize_controller_state(controller_state_t *state,
     state->stderr_fd = -1;
     state->next_sequence = 1;
 
+    if (generate_controller_id(state->controller_id) < 0) {
+        return -1;
+    }
+
     if (requested_dir != NULL) {
         int result = snprintf(state->dir, sizeof(state->dir), "%s", requested_dir);
         if (result < 0 || (size_t)result >= sizeof(state->dir)) {
@@ -321,7 +366,7 @@ static int initialize_controller_state(controller_state_t *state,
         }
     } else {
         int result = snprintf(state->dir, sizeof(state->dir),
-                              ".cubicle/controllers/%ld", (long)child_pid);
+                              ".cubicle/controllers/%s", state->controller_id);
         if (result < 0 || (size_t)result >= sizeof(state->dir)) {
             errno = ENAMETOOLONG;
             return -1;
@@ -351,7 +396,8 @@ static int initialize_controller_state(controller_state_t *state,
 
     char metadata[1024];
     int metadata_length = snprintf(metadata, sizeof(metadata),
-                                   "mode=stream\npid=%ld\npgid=%ld\nstdin_policy=%s\ncommand=%s\n",
+                                   "controller_id=%s\nmode=stream\npid=%ld\npgid=%ld\nstdin_policy=%s\ncommand=%s\n",
+                                   state->controller_id,
                                    (long)child_pid, (long)child_pid,
                                    stdin_policy == STDIN_POLICY_EOF ? "eof" : "open",
                                    command_line);
@@ -375,8 +421,9 @@ static int initialize_controller_state(controller_state_t *state,
 
     char event[256];
     int event_length = snprintf(event, sizeof(event),
-                                "type=process_started pid=%ld pgid=%ld mode=stream",
-                                (long)child_pid, (long)child_pid);
+                                "type=process_started controller_id=%s pid=%ld pgid=%ld mode=stream",
+                                state->controller_id, (long)child_pid,
+                                (long)child_pid);
     if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
         errno = ENAMETOOLONG;
         return -1;

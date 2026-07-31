@@ -50,6 +50,9 @@ serve a local control socket, and return the child exit status:
   --mode stream -- make
 ```
 
+If `--state-dir` is omitted, the controller creates
+`.cubicle/controllers/<controller_id>` using a generated controller ID.
+
 Stream stdin is kept open by default so clients can use `attach stdin`. Pass
 `--stdin-policy eof` for noninteractive commands that should see immediate EOF
 on stdin:

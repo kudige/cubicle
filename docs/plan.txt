@@ -60,6 +60,11 @@
   - --stdin-policy eof for immediate child stdin EOF
   - stdin_policy persisted in metadata
   - attach stdin returns error stdin_closed when stdin is closed
+- Hardened default controller state identity:
+  - generated controller IDs
+  - default state directories use controller IDs instead of child PIDs
+  - controller_id persisted in metadata
+  - process_started events include controller_id
 - Added controller daemon mode:
   - --daemon option
   - detach before launching the managed process
@@ -77,7 +82,6 @@
    - Reconcile the text protocol with future binary-safe framing before manager integration.
 
 2. Harden controller state.
-   - Choose stable controller IDs instead of pid-derived default paths.
    - Use append-safe event writes.
    - Add restart/recovery read paths for metadata and event cursors.
    - Define event and metadata formats more explicitly.

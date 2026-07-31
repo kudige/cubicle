@@ -186,7 +186,7 @@ The controller writes primitive events to `events.log`.
 Current event shapes:
 
 ```text
-seq=N type=process_started pid=PID pgid=PGID mode=stream
+seq=N type=process_started controller_id=ID pid=PID pgid=PGID mode=stream
 seq=N type=output stream=stdout start=OFFSET length=N
 seq=N type=output stream=stderr start=OFFSET length=N
 seq=N type=input length=N
@@ -202,9 +202,16 @@ seq=N type=process_exited status=signaled signal=N
 Current metadata fields:
 
 ```text
+controller_id=ID
 mode=stream
 pid=PID
 pgid=PGID
 stdin_policy=open|eof
 command=COMMAND
+```
+
+When `--state-dir` is omitted, the default state directory is:
+
+```text
+.cubicle/controllers/ID
 ```
