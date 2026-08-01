@@ -30,6 +30,8 @@ typedef struct cubicle_validation_error {
 } cubicle_validation_error_t;
 
 int cubicle_json_parse(cubicle_json_doc_t *parsed, const char *json);
+int cubicle_json_parse_n(cubicle_json_doc_t *parsed, const char *json,
+                         size_t length);
 void cubicle_json_cleanup(cubicle_json_doc_t *parsed);
 
 yyjson_val *cubicle_json_object_get(yyjson_val *object, const char *field);

@@ -326,13 +326,23 @@ static int get_required_u32(yyjson_val *object, const char *field,
 int cubicle_rpc_decode_request(cubicle_rpc_request_envelope_t *envelope,
                                const char *json)
 {
+    if (json == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    return cubicle_rpc_decode_request_n(envelope, json, strlen(json));
+}
+
+int cubicle_rpc_decode_request_n(cubicle_rpc_request_envelope_t *envelope,
+                                 const char *json, size_t length)
+{
     if (envelope == NULL) {
         errno = EINVAL;
         return -1;
     }
     memset(envelope, 0, sizeof(*envelope));
 
-    if (cubicle_json_parse(&envelope->document, json) < 0 ||
+    if (cubicle_json_parse_n(&envelope->document, json, length) < 0 ||
         !yyjson_is_obj(envelope->document.root)) {
         cubicle_rpc_request_envelope_cleanup(envelope);
         errno = EINVAL;
@@ -396,13 +406,25 @@ int cubicle_rpc_decode_response(cubicle_rpc_response_envelope_t *envelope,
                                 const char *json,
                                 const char *expected_request_id)
 {
+    if (json == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    return cubicle_rpc_decode_response_n(envelope, json, strlen(json),
+                                         expected_request_id);
+}
+
+int cubicle_rpc_decode_response_n(cubicle_rpc_response_envelope_t *envelope,
+                                  const char *json, size_t length,
+                                  const char *expected_request_id)
+{
     if (envelope == NULL || expected_request_id == NULL) {
         errno = EINVAL;
         return -1;
     }
     memset(envelope, 0, sizeof(*envelope));
 
-    if (cubicle_json_parse(&envelope->document, json) < 0 ||
+    if (cubicle_json_parse_n(&envelope->document, json, length) < 0 ||
         !yyjson_is_obj(envelope->document.root)) {
         cubicle_rpc_response_envelope_cleanup(envelope);
         errno = EINVAL;
@@ -530,22 +552,29 @@ int cubicle_rpc_error(char *buffer, size_t buffer_size,
         return -1;
     }
 
-    char escaped_message[512];
-    if (cubicle_json_escape(escaped_message, sizeof(escaped_message),
-                            message) < 0) {
-        return -1;
-    }
-
-    int length = snprintf(buffer, buffer_size,
-                          "{\"request_id\":\"%s\",\"success\":false,\"error\":{\"code\":\"%s\",\"message\":\"%s\",\"retryable\":%s,\"system_errno\":%d}}",
-                          request_id, cubicle_error_code_name(code),
-                          escaped_message, retryable ? "true" : "false",
-                          system_errno);
-    if (length < 0 || (size_t)length >= buffer_size) {
+    size_t used = 0;
+    buffer[0] = '\0';
+    char suffix[128];
+    int suffix_length = snprintf(suffix, sizeof(suffix),
+                                 ",\"retryable\":%s,\"system_errno\":%d}}",
+                                 retryable ? "true" : "false", system_errno);
+    if (suffix_length < 0 || (size_t)suffix_length >= sizeof(suffix)) {
         errno = ENOSPC;
         return -1;
     }
-    return 0;
+
+    return append_raw(buffer, buffer_size, &used, "{\"request_id\":") == 0 &&
+                   append_json_string(buffer, buffer_size, &used,
+                                      request_id) == 0 &&
+                   append_raw(buffer, buffer_size, &used,
+                              ",\"success\":false,\"error\":{\"code\":") == 0 &&
+                   append_json_string(buffer, buffer_size, &used,
+                                      cubicle_error_code_name(code)) == 0 &&
+                   append_raw(buffer, buffer_size, &used, ",\"message\":") == 0 &&
+                   append_json_string(buffer, buffer_size, &used, message) == 0 &&
+                   append_raw(buffer, buffer_size, &used, suffix) == 0
+               ? 0
+               : -1;
 }
 
 int cubicle_rpc_get_string(const char *json, const char *field,

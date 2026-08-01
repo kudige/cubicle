@@ -173,8 +173,20 @@ static void read_all(int fd, void *buffer, size_t length)
     }
 }
 
+static void raw_api_request_bytes(const char *socket_path, const char *request,
+                                  size_t request_length, char *response,
+                                  size_t response_size);
+
 static void raw_api_request(const char *socket_path, const char *json,
                             char *response, size_t response_size)
+{
+    raw_api_request_bytes(socket_path, json, strlen(json), response,
+                          response_size);
+}
+
+static void raw_api_request_bytes(const char *socket_path, const char *request,
+                                  size_t request_length, char *response,
+                                  size_t response_size)
 {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     assert(fd >= 0);
@@ -187,11 +199,10 @@ static void raw_api_request(const char *socket_path, const char *json,
     assert(length > 0 && (size_t)length < sizeof(address.sun_path));
     assert(connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
 
-    size_t request_length = strlen(json);
     assert(request_length < UINT32_MAX);
     uint32_t frame_length = htonl((uint32_t)request_length);
     write_all(fd, &frame_length, sizeof(frame_length));
-    write_all(fd, json, request_length);
+    write_all(fd, request, request_length);
 
     uint32_t response_length_network = 0;
     read_all(fd, &response_length_network, sizeof(response_length_network));
@@ -439,6 +450,20 @@ int main(void)
     assert(memcmp(chunk.data, "hello\n", 6) == 0);
     cubicle_output_chunk_free(&chunk);
 
+    char large_stdout[4096];
+    memset(large_stdout, 'x', sizeof(large_stdout) - 1);
+    large_stdout[sizeof(large_stdout) - 1] = '\0';
+    write_file(stdout_path, large_stdout);
+    memset(&chunk, 0, sizeof(chunk));
+    // Endpoint regression test for process.read_output responses over 4 KiB
+    assert(cubicle_process_read_output(client, process_id,
+                                       CUBICLE_STREAM_STDOUT, 0,
+                                       sizeof(large_stdout) - 1,
+                                       &chunk) == CUBICLE_OK);
+    assert(chunk.length == sizeof(large_stdout) - 1);
+    assert(memcmp(chunk.data, large_stdout, chunk.length) == 0);
+    cubicle_output_chunk_free(&chunk);
+
     cubicle_attachment_request_t attachment_request;
     memset(&attachment_request, 0, sizeof(attachment_request));
     attachment_request.process_id = process_id;
@@ -595,6 +620,27 @@ int main(void)
         "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-4\","
         "\"session_id\":\"local-session\",\"method\":\"workspace.create\","
         "\"params\":{\"name\":null}}");
+
+    char response[4096];
+    // Endpoint regression test for escaped request IDs in error responses
+    raw_api_request(
+        socket_path,
+        "{\"protocol_major\":0,\"protocol_minor\":1,"
+        "\"request_id\":\"bad-\\\"quote\",\"session_id\":\"local-session\","
+        "\"method\":\"unknown.method\",\"params\":{}}",
+        response, sizeof(response));
+    assert(strstr(response, "\"success\":false") != NULL);
+    assert(strstr(response, "\"request_id\":\"bad-\\\"quote\"") != NULL);
+
+    static const char nul_request[] =
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-nul\","
+        "\"session_id\":\"local-session\",\"method\":\"manager.ping\","
+        "\"params\":{}}\0garbage";
+    // Endpoint regression test for length-delimited frames with embedded NUL
+    raw_api_request_bytes(socket_path, nul_request, sizeof(nul_request) - 1,
+                          response, sizeof(response));
+    assert(strstr(response, "\"success\":false") != NULL);
+    assert(strstr(response, "\"code\":\"protocol\"") != NULL);
 
     client = connect_client(socket_path);
 
