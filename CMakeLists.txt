@@ -17,6 +17,7 @@ if(CUBICLE_ENABLE_COVERAGE)
 endif()
 
 add_library(cubicle_common
+    src/client/error.c
     src/common/log.c
     src/common/process.c
     src/common/rpc.c
