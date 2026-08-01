@@ -37,6 +37,7 @@ grep -q 'cube logs \[--follow\] NAME' "$PWD/cube-help.out"
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube config show|paths|validate' "$PWD/cube-help.out"
 grep -q 'cube cleanup' "$PWD/cube-help.out"
+grep -q 'cube access list|add|set-role|remove' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
 
 set +e

@@ -28,6 +28,7 @@ state_dir=$state_dir
 runtime_dir=$runtime_dir
 log_dir=$log_dir
 listen=unix://$socket_path
+socket_mode=0664
 controller_binary=$controller_binary
 
 [client]
@@ -56,6 +57,11 @@ fi
 [ -d "$state_dir" ]
 [ -d "$runtime_dir" ]
 [ -d "$log_dir" ]
+socket_mode=$(stat -c '%a' "$socket_path")
+if [ "$socket_mode" != "664" ]; then
+    echo "configured socket mode was not applied: $socket_mode" >&2
+    exit 1
+fi
 
 CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config validate \
     >"$tmpdir/config-validate.out"
@@ -66,6 +72,7 @@ CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config paths \
 grep -q "^manager.state_dir=$state_dir$" "$tmpdir/config-paths.out"
 grep -q "^manager.runtime_dir=$runtime_dir$" "$tmpdir/config-paths.out"
 grep -q "^manager.log_dir=$log_dir$" "$tmpdir/config-paths.out"
+grep -q '^manager.socket_mode=0664$' "$tmpdir/config-paths.out"
 
 CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" workspace "Project A" \
     >"$tmpdir/workspace.out"

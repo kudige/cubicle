@@ -9,6 +9,7 @@
 #include "cubicle/config.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
+#include "cubicle/workspace.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -116,6 +117,7 @@ static void print_usage(FILE *stream)
             "  cube events [--follow [--iterations N]]\n"
             "  cube config show|paths|validate\n"
             "  cube cleanup\n"
+            "  cube access list|add|set-role|remove ...\n"
             "  cube connect [--ro] NAME\n"
             "  cube stop NAME\n"
             "\n"
@@ -187,6 +189,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "kill") == 0 ||
            strcmp(command, "remove") == 0 ||
            strcmp(command, "cleanup") == 0 ||
+           strcmp(command, "access") == 0 ||
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0 ||
            strcmp(command, "defaults") == 0;
@@ -244,6 +247,8 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.state_dir=%s\n", config->manager_state_dir);
         printf("manager.runtime_dir=%s\n", config->manager_runtime_dir);
         printf("manager.log_dir=%s\n", config->manager_log_dir);
+        printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
+        printf("manager.socket_group=%s\n", config->manager_socket_group);
         printf("manager.controller_binary=%s\n", config->controller_binary);
         return 0;
     }
@@ -257,6 +262,8 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.listen=%s\n", config->manager_listen_uri);
         printf("manager.controller_binary=%s\n", config->controller_binary);
         printf("manager.log_dir=%s\n", config->manager_log_dir);
+        printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
+        printf("manager.socket_group=%s\n", config->manager_socket_group);
         printf("client.manager=%s\n", config->client_manager_uri);
         printf("defaults.launch=%s\n",
                cubicle_launch_default_name(config->default_launch));
@@ -1565,6 +1572,260 @@ static int command_workspace(const char *manager_socket,
     }
 
     fprintf(stderr, "cube: invalid workspace command\n");
+    return 2;
+}
+
+static cubicle_capability_mask_t cube_access_role_mask(const char *role)
+{
+    cubicle_capability_mask_t observer =
+        CUBICLE_CAP_WORKSPACE_READ |
+        CUBICLE_CAP_PROCESS_READ |
+        CUBICLE_CAP_PROCESS_OBSERVE |
+        CUBICLE_CAP_EVENTS_READ;
+    cubicle_capability_mask_t operator_mask =
+        observer |
+        CUBICLE_CAP_WORKSPACE_STOP |
+        CUBICLE_CAP_PROCESS_START |
+        CUBICLE_CAP_PROCESS_INPUT |
+        CUBICLE_CAP_PROCESS_SIGNAL |
+        CUBICLE_CAP_PROCESS_REMOVE;
+    cubicle_capability_mask_t owner =
+        operator_mask |
+        CUBICLE_CAP_WORKSPACE_RENAME |
+        CUBICLE_CAP_WORKSPACE_DELETE |
+        CUBICLE_CAP_WORKSPACE_MANAGE_KEYS;
+
+    if (strcmp(role, "observer") == 0) {
+        return observer;
+    }
+    if (strcmp(role, "operator") == 0) {
+        return operator_mask;
+    }
+    if (strcmp(role, "owner") == 0) {
+        return owner;
+    }
+    return 0;
+}
+
+static int read_public_key_hex(const char *path_or_hex,
+                               char public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH])
+{
+    FILE *file = fopen(path_or_hex, "r");
+    if (file != NULL) {
+        if (fgets(public_key_hex, CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH, file) ==
+            NULL) {
+            fclose(file);
+            return -1;
+        }
+        fclose(file);
+        public_key_hex[strcspn(public_key_hex, "\r\n")] = '\0';
+    } else {
+        int length = snprintf(public_key_hex,
+                              CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH, "%s",
+                              path_or_hex);
+        if (length < 0 ||
+            (size_t)length >= CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH) {
+            return -1;
+        }
+    }
+
+    unsigned char decoded[CUBICLE_AUTH_PUBLIC_KEY_BYTES];
+    return cubicle_auth_hex_decode(public_key_hex, decoded, sizeof(decoded));
+}
+
+static int command_access(const char *manager_socket,
+                          const cube_options_t *options,
+                          int argc,
+                          char **argv,
+                          int command_index)
+{
+    int remaining = argc - command_index - 1;
+    char **arguments = &argv[command_index + 1];
+    char workspace[CUBICLE_NAME_MAX];
+    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+    char escaped_workspace[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                            workspace) < 0) {
+        fprintf(stderr, "cube: workspace name is too long\n");
+        return 2;
+    }
+
+    if (remaining == 1 && strcmp(arguments[0], "list") == 0) {
+        char params[1024];
+        snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
+                 escaped_workspace);
+        cube_rpc_response_t response;
+        if (call_manager(manager_socket, "workspace.key.list", params,
+                         &response) < 0) {
+            return print_rpc_error(&response);
+        }
+        if (options->json) {
+            printf("%s\n", response.result_json);
+            cleanup_rpc_response(&response);
+            return 0;
+        }
+        cubicle_json_doc_t document;
+        if (cubicle_json_parse(&document, response.result_json) < 0) {
+            cleanup_rpc_response(&response);
+            fprintf(stderr, "cube: invalid access list response\n");
+            return 2;
+        }
+        yyjson_val *keys = yyjson_obj_get(document.root, "keys");
+        printf("KEY ID\tLABEL\tCAPABILITIES\tREVOKED\n");
+        if (yyjson_is_arr(keys)) {
+            size_t index;
+            size_t max;
+            yyjson_val *item;
+            yyjson_arr_foreach(keys, index, max, item) {
+                char key_id[CUBICLE_ID_STRING_LENGTH];
+                char label[CUBICLE_KEY_LABEL_MAX];
+                uint64_t capabilities = 0;
+                uint64_t revoked_at_ms = 0;
+                if (json_string_field(item, "key_id", key_id,
+                                      sizeof(key_id)) == 0 &&
+                    json_string_field(item, "label", label,
+                                      sizeof(label)) == 0 &&
+                    json_u64_field(item, "capabilities",
+                                   &capabilities) == 0) {
+                    (void)json_u64_field(item, "revoked_at_ms",
+                                         &revoked_at_ms);
+                    printf("%s\t%s\t%llu\t%s\n", key_id, label,
+                           (unsigned long long)capabilities,
+                           revoked_at_ms == 0 ? "no" : "yes");
+                }
+            }
+        }
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    if (remaining >= 2 && strcmp(arguments[0], "add") == 0) {
+        const char *role = "operator";
+        const char *label = "";
+        int index = 2;
+        while (index < remaining) {
+            if (strcmp(arguments[index], "--role") == 0 &&
+                index + 1 < remaining) {
+                role = arguments[index + 1];
+                index += 2;
+                continue;
+            }
+            if (strcmp(arguments[index], "--label") == 0 &&
+                index + 1 < remaining) {
+                label = arguments[index + 1];
+                index += 2;
+                continue;
+            }
+            fprintf(stderr, "cube: invalid access add option '%s'\n",
+                    arguments[index]);
+            return 2;
+        }
+        cubicle_capability_mask_t capabilities = cube_access_role_mask(role);
+        if (capabilities == 0) {
+            fprintf(stderr, "cube: role must be observer, operator, or owner\n");
+            return 2;
+        }
+        char public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
+        if (read_public_key_hex(arguments[1], public_key_hex) < 0) {
+            fprintf(stderr, "cube: invalid public key\n");
+            return 2;
+        }
+        char escaped_label[CUBICLE_KEY_LABEL_MAX * 2];
+        if (cubicle_json_escape(escaped_label, sizeof(escaped_label),
+                                label) < 0) {
+            fprintf(stderr, "cube: label is too long\n");
+            return 2;
+        }
+        char params[2048];
+        snprintf(params, sizeof(params),
+                 "{\"workspace_id\":\"%s\",\"public_key\":\"%s\",\"label\":\"%s\",\"capabilities\":%llu}",
+                 escaped_workspace, public_key_hex, escaped_label,
+                 (unsigned long long)capabilities);
+        cube_rpc_response_t response;
+        if (call_manager(manager_socket, "workspace.key.add", params,
+                         &response) < 0) {
+            return print_rpc_error(&response);
+        }
+        if (options->json) {
+            printf("%s\n", response.result_json);
+        } else {
+            cubicle_json_doc_t document;
+            char key_id[CUBICLE_ID_STRING_LENGTH] = "";
+            if (cubicle_json_parse(&document, response.result_json) == 0) {
+                (void)json_string_field(document.root, "key_id", key_id,
+                                        sizeof(key_id));
+                cubicle_json_cleanup(&document);
+            }
+            printf("Access added%s%s\n", key_id[0] ? ": " : "", key_id);
+        }
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    if (remaining == 3 && strcmp(arguments[0], "set-role") == 0) {
+        cubicle_capability_mask_t capabilities =
+            cube_access_role_mask(arguments[2]);
+        if (capabilities == 0) {
+            fprintf(stderr, "cube: role must be observer, operator, or owner\n");
+            return 2;
+        }
+        char escaped_key[CUBICLE_ID_STRING_LENGTH * 2];
+        if (cubicle_json_escape(escaped_key, sizeof(escaped_key),
+                                arguments[1]) < 0) {
+            fprintf(stderr, "cube: key id is too long\n");
+            return 2;
+        }
+        char params[1024];
+        snprintf(params, sizeof(params),
+                 "{\"workspace_id\":\"%s\",\"key_id\":\"%s\",\"capabilities\":%llu}",
+                 escaped_workspace, escaped_key,
+                 (unsigned long long)capabilities);
+        cube_rpc_response_t response;
+        if (call_manager(manager_socket, "workspace.key.update", params,
+                         &response) < 0) {
+            return print_rpc_error(&response);
+        }
+        if (options->json) {
+            printf("%s\n", response.result_json);
+        } else {
+            printf("Access updated\n");
+        }
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    if (remaining == 2 &&
+        (strcmp(arguments[0], "remove") == 0 ||
+         strcmp(arguments[0], "revoke") == 0)) {
+        char escaped_key[CUBICLE_ID_STRING_LENGTH * 2];
+        if (cubicle_json_escape(escaped_key, sizeof(escaped_key),
+                                arguments[1]) < 0) {
+            fprintf(stderr, "cube: key id is too long\n");
+            return 2;
+        }
+        char params[1024];
+        snprintf(params, sizeof(params),
+                 "{\"workspace_id\":\"%s\",\"key_id\":\"%s\"}",
+                 escaped_workspace, escaped_key);
+        cube_rpc_response_t response;
+        if (call_manager(manager_socket, "workspace.key.revoke", params,
+                         &response) < 0) {
+            return print_rpc_error(&response);
+        }
+        if (options->json) {
+            printf("%s\n", response.result_json);
+        } else {
+            printf("Access removed\n");
+        }
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    fprintf(stderr, "cube: invalid access command\n");
     return 2;
 }
 
@@ -3265,6 +3526,11 @@ int main(int argc, char **argv)
             return 2;
         }
         return process_cleanup(manager_endpoint, &options);
+    }
+
+    if (strcmp(command, "access") == 0) {
+        return command_access(manager_endpoint, &options, argc, argv,
+                              command_index);
     }
 
     if (strcmp(command, "inspect") == 0) {

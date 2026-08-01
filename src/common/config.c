@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -106,6 +107,28 @@ static int parse_mode(const char *value,
     return -1;
 }
 
+static int parse_socket_mode(const char *value,
+                             unsigned int *mode,
+                             char *error,
+                             size_t error_size)
+{
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 8);
+    if (errno != 0 || end == value || *end != '\0' || parsed > 0777) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size,
+                     "manager.socket_mode must be an octal mode such as 0660");
+        }
+        return -1;
+    }
+    *mode = (unsigned int)parsed;
+    return 0;
+}
+
 static const char *user_home_directory(void)
 {
     const char *home = getenv("HOME");
@@ -193,6 +216,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
              "/var/log/cubicle");
     snprintf(config->manager_listen_uri, sizeof(config->manager_listen_uri),
              "unix:///run/cubicle/manager.sock");
+    config->manager_socket_mode = 0660;
+    config->manager_socket_group[0] = '\0';
     snprintf(config->controller_binary, sizeof(config->controller_binary),
              "/usr/libexec/cubicle/cubicle-controller");
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
@@ -272,6 +297,10 @@ static int apply_econf_file(cubicle_config_t *config,
                             config->manager_listen_uri,
                             sizeof(config->manager_listen_uri),
                             error, error_size) < 0 ||
+        get_optional_string(file, "manager", "socket_group",
+                            config->manager_socket_group,
+                            sizeof(config->manager_socket_group),
+                            error, error_size) < 0 ||
         get_optional_string(file, "manager", "controller_binary",
                             config->controller_binary,
                             sizeof(config->controller_binary),
@@ -293,6 +322,15 @@ static int apply_econf_file(cubicle_config_t *config,
                             error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_launch(value, &config->default_launch, error, error_size) < 0)) {
+        return -1;
+    }
+
+    value[0] = '\0';
+    if (get_optional_string(file, "manager", "socket_mode", value,
+                            sizeof(value), error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_socket_mode(value, &config->manager_socket_mode,
+                           error, error_size) < 0)) {
         return -1;
     }
 

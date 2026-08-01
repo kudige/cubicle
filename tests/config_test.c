@@ -53,6 +53,8 @@ static void test_defaults(void)
     }
     assert(strcmp(config.controller_binary,
                   "/usr/libexec/cubicle/cubicle-controller") == 0);
+    assert(config.manager_socket_mode == 0660);
+    assert(strcmp(config.manager_socket_group, "") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
 }
@@ -67,6 +69,8 @@ static void test_override_file(void)
                "runtime_dir=/tmp/cubicle-run\n"
                "log_dir=/tmp/cubicle-log\n"
                "listen=unix:///tmp/cubicle-run/manager.sock\n"
+               "socket_mode=0664\n"
+               "socket_group=cubicle\n"
                "controller_binary=/tmp/cubicle-controller\n"
                "\n"
                "[client]\n"
@@ -83,6 +87,8 @@ static void test_override_file(void)
     assert(strcmp(config.manager_state_dir, "/tmp/cubicle-state") == 0);
     assert(strcmp(config.manager_runtime_dir, "/tmp/cubicle-run") == 0);
     assert(strcmp(config.manager_log_dir, "/tmp/cubicle-log") == 0);
+    assert(config.manager_socket_mode == 0664);
+    assert(strcmp(config.manager_socket_group, "cubicle") == 0);
     assert(strcmp(config.controller_binary, "/tmp/cubicle-controller") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
@@ -119,6 +125,12 @@ static void test_invalid_values(void)
                "listen=tcp://127.0.0.1\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "manager.listen") != NULL);
+
+    write_file(path,
+               "[manager]\n"
+               "socket_mode=9999\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "manager.socket_mode") != NULL);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 

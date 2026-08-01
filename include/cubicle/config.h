@@ -20,6 +20,8 @@ typedef struct cubicle_config {
     char manager_runtime_dir[CUBICLE_PATH_MAX];
     char manager_log_dir[CUBICLE_PATH_MAX];
     char manager_listen_uri[CUBICLE_ENDPOINT_URI_MAX];
+    unsigned int manager_socket_mode;
+    char manager_socket_group[256];
     char controller_binary[CUBICLE_PATH_MAX];
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char client_server_identity[256];

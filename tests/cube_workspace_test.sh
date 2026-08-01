@@ -18,6 +18,7 @@ state_dir="$tmpdir/manager"
 socket_path="$tmpdir/manager.sock"
 xdg_state_home="$tmpdir/xdg-state"
 xdg_runtime_dir="$tmpdir/xdg-runtime"
+xdg_config_home="$tmpdir/xdg-config"
 mkdir -p "$xdg_runtime_dir"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
@@ -39,6 +40,7 @@ fi
 cube() {
     XDG_STATE_HOME="$xdg_state_home" \
         XDG_RUNTIME_DIR="$xdg_runtime_dir" \
+        XDG_CONFIG_HOME="$xdg_config_home" \
         CUBICLE_MANAGER_SOCKET="$socket_path" \
         "$CUBE" "$@"
 }
@@ -48,6 +50,38 @@ if [ "$output" != "Workspace Project A created and selected" ]; then
     echo "unexpected workspace create output: $output" >&2
     exit 1
 fi
+
+owner_key=$(tr -d '\n' <"$xdg_config_home/cubicle/keys/client.pub")
+access_list=$(cube access list)
+printf "%s\n" "$access_list" | grep -q '^KEY ID	LABEL	CAPABILITIES	REVOKED$'
+printf "%s\n" "$access_list" | grep -q '	owner	.*	no$'
+access_json=$(cube --json access list)
+printf "%s" "$access_json" | grep -q '"keys"'
+printf "%s" "$access_json" | grep -q '"label":"owner"'
+
+second_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+add_json=$(cube --json access add "$second_key" --role observer --label "Alice")
+printf "%s" "$add_json" | grep -q '"label":"Alice"'
+second_key_id=$(python3 - "$add_json" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["key_id"])
+PY
+)
+update_output=$(cube access set-role "$second_key_id" operator)
+if [ "$update_output" != "Access updated" ]; then
+    echo "unexpected access set-role output: $update_output" >&2
+    exit 1
+fi
+remove_output=$(cube access remove "$second_key_id")
+if [ "$remove_output" != "Access removed" ]; then
+    echo "unexpected access remove output: $remove_output" >&2
+    exit 1
+fi
+access_after_remove=$(cube --json access list)
+printf "%s" "$access_after_remove" | grep -q "\"key_id\":\"$second_key_id\""
+printf "%s" "$access_after_remove" | grep -q "\"revoked_at_ms\":[1-9]"
+printf "%s" "$owner_key" | grep -Eq '^[0-9a-f]{64}$'
 
 json_create_output=$(cube --json workspace create "Project JSON")
 printf "%s" "$json_create_output" | grep -q '"name":"Project JSON"'

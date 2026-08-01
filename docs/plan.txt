@@ -426,6 +426,10 @@
   - manager daemon now stores authenticated sessions and verifies auth.resume HMACs
   - libcubicle now caches Unix manager sessions in XDG_RUNTIME_DIR and resumes them with auth.resume
   - cube now caches Unix manager sessions in XDG_RUNTIME_DIR and resumes them with auth.resume
+  - manager applies workspace capability checks for workspace, process, event, attachment, and key-management APIs
+  - workspace.create bootstraps the authenticated same-UID caller key as workspace owner
+  - cube access add/list/set-role/remove manages workspace public-key access
+  - manager Unix sockets support configurable socket_mode and socket_group
 
 ## Next
 
@@ -451,7 +455,10 @@
      - make sanitizer and malformed-message runs mandatory in CI
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
-   - enforce workspace capability checks and bootstrap owner keys
+   - add cross-UID/group E2E coverage with a second local user where available
+   - implement secure TCP authentication and authorization
+   - invalidate or reject resumed sessions after workspace key revocation
+   - add audit records for workspace key changes
 
 5. Expand tests.
    - Large output tests.

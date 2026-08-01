@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <limits.h>
 #include <netdb.h>
 #include <poll.h>
@@ -44,6 +45,8 @@ typedef struct manager_state {
     char runtime_dir[PATH_MAX];
     char log_dir[PATH_MAX];
     char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
+    mode_t socket_mode;
+    char socket_group[256];
     char controller_bin[PATH_MAX];
     cubicle_auth_identity_t identity;
 } manager_state_t;
@@ -57,6 +60,7 @@ typedef struct manager_session_record {
     uid_t peer_uid;
     gid_t peer_gid;
     uint64_t manager_generation;
+    char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
 } manager_session_record_t;
 
 typedef struct manager_session_store {
@@ -73,6 +77,7 @@ typedef struct manager_connection {
     int authenticated;
     cubicle_session_info_t session;
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+    char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
     manager_session_store_t *sessions;
 } manager_connection_t;
 
@@ -423,7 +428,8 @@ static int prepare_manager_socket_path(const char *path)
     return unlink(path);
 }
 
-static int open_manager_socket(const char *path)
+static int open_manager_socket(const char *path, mode_t socket_mode,
+                               const char *socket_group)
 {
     if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
         errno = ENAMETOOLONG;
@@ -444,9 +450,18 @@ static int open_manager_socket(const char *path)
     address.sun_family = AF_UNIX;
     snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
 
-    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
-        chmod(path, 0600) < 0 ||
-        listen(fd, 16) < 0) {
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    if (socket_group != NULL && socket_group[0] != '\0') {
+        struct group *group = getgrnam(socket_group);
+        if (group == NULL || chown(path, (uid_t)-1, group->gr_gid) < 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    if (chmod(path, socket_mode) < 0 || listen(fd, 16) < 0) {
         close(fd);
         return -1;
     }
@@ -548,7 +563,8 @@ static int open_manager_tcp_listener(const char *uri)
     return fd;
 }
 
-static int open_manager_listener(const char *uri, int allow_insecure,
+static int open_manager_listener(const manager_state_t *state, const char *uri,
+                                 int allow_insecure,
                                  char cleanup_path[PATH_MAX])
 {
     cleanup_path[0] = '\0';
@@ -562,7 +578,8 @@ static int open_manager_listener(const char *uri, int allow_insecure,
             errno = ENAMETOOLONG;
             return -1;
         }
-        return open_manager_socket(path);
+        return open_manager_socket(path, state->socket_mode,
+                                   state->socket_group);
     }
 
     if (strncmp(uri, "tcp://", 6) == 0) {
@@ -1043,6 +1060,136 @@ static int workspace_key_info_json(const workspace_key_record_t *record,
         errno = ENOSPC;
         return -1;
     }
+    return 0;
+}
+
+static cubicle_capability_mask_t role_owner_capabilities(void)
+{
+    return CUBICLE_CAP_WORKSPACE_READ |
+           CUBICLE_CAP_WORKSPACE_RENAME |
+           CUBICLE_CAP_WORKSPACE_STOP |
+           CUBICLE_CAP_WORKSPACE_DELETE |
+           CUBICLE_CAP_WORKSPACE_MANAGE_KEYS |
+           CUBICLE_CAP_PROCESS_START |
+           CUBICLE_CAP_PROCESS_READ |
+           CUBICLE_CAP_PROCESS_OBSERVE |
+           CUBICLE_CAP_PROCESS_INPUT |
+           CUBICLE_CAP_PROCESS_SIGNAL |
+           CUBICLE_CAP_PROCESS_REMOVE |
+           CUBICLE_CAP_EVENTS_READ;
+}
+
+static int connection_is_same_uid(const manager_connection_t *connection)
+{
+    return connection != NULL && connection->has_peer_credentials &&
+           connection->peer_uid == geteuid();
+}
+
+static int connection_is_manager_owner(const manager_connection_t *connection)
+{
+    return connection_is_same_uid(connection);
+}
+
+static int connection_has_workspace_capability(const manager_state_t *state,
+                                               const char *workspace_id,
+                                               const manager_connection_t *connection,
+                                               cubicle_capability_mask_t required)
+{
+    if (connection_is_manager_owner(connection)) {
+        return 1;
+    }
+    if (state == NULL || workspace_id == NULL || connection == NULL ||
+        !connection->authenticated ||
+        connection->session.client_key_id[0] == '\0') {
+        return 0;
+    }
+    FILE *file = open_state_file_for_read(state, "workspace-keys.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+    char line[1024];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        workspace_key_record_t record;
+        if (parse_workspace_key_record(line, &record) == 0 &&
+            strcmp(record.workspace_id, workspace_id) == 0 &&
+            strcmp(record.key_id, connection->session.client_key_id) == 0 &&
+            record.revoked_at_ms == 0) {
+            int allowed = (record.capabilities & required) == required;
+            fclose(file);
+            return allowed;
+        }
+    }
+    fclose(file);
+    return 0;
+}
+
+static int append_workspace_key_record(const manager_state_t *state,
+                                       const workspace_key_record_t *record)
+{
+    char line[1024];
+    int line_length = snprintf(
+        line, sizeof(line), "%s\t%s\t%s\t%s\t%llu\t%llu\t%llu\t%s\n",
+        record->workspace_id, record->key_id, record->fingerprint,
+        record->label, (unsigned long long)record->capabilities,
+        (unsigned long long)record->created_at_ms,
+        (unsigned long long)record->revoked_at_ms,
+        record->public_key_hex);
+    if (line_length < 0 || (size_t)line_length >= sizeof(line)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return append_line(state, "workspace-keys.tsv", line);
+}
+
+static int build_workspace_key_record_from_public_hex(
+    workspace_key_record_t *record,
+    const char *workspace_id,
+    const char *public_key_hex,
+    const char *label,
+    cubicle_capability_mask_t capabilities,
+    uint64_t created_at_ms)
+{
+    size_t public_key_hex_length = strlen(public_key_hex);
+    if (public_key_hex_length == 0 ||
+        (public_key_hex_length % 2) != 0 ||
+        public_key_hex_length >= sizeof(record->public_key_hex)) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned char public_key[sizeof(record->public_key_hex) / 2];
+    size_t public_key_length = public_key_hex_length / 2;
+    char fingerprint[CUBICLE_AUTH_FINGERPRINT_LENGTH];
+    char key_id[CUBICLE_ID_STRING_LENGTH];
+    for (size_t i = 0; i < public_key_length; ++i) {
+        char byte_hex[3] = {public_key_hex[i * 2], public_key_hex[i * 2 + 1],
+                            '\0'};
+        char *end = NULL;
+        errno = 0;
+        unsigned long value = strtoul(byte_hex, &end, 16);
+        if (errno != 0 || end == byte_hex || *end != '\0' || value > 0xff) {
+            errno = EINVAL;
+            return -1;
+        }
+        public_key[i] = (unsigned char)value;
+    }
+    if (cubicle_auth_key_fingerprint(public_key, public_key_length, key_id,
+                                     fingerprint) < 0) {
+        return -1;
+    }
+
+    memset(record, 0, sizeof(*record));
+    snprintf(record->workspace_id, sizeof(record->workspace_id), "%s",
+             workspace_id);
+    snprintf(record->key_id, sizeof(record->key_id), "%s", key_id);
+    snprintf(record->fingerprint, sizeof(record->fingerprint), "%s",
+             fingerprint);
+    snprintf(record->label, sizeof(record->label), "%s",
+             label == NULL ? "" : label);
+    snprintf(record->public_key_hex, sizeof(record->public_key_hex), "%s",
+             public_key_hex);
+    record->capabilities = capabilities;
+    record->created_at_ms = created_at_ms;
+    record->revoked_at_ms = 0;
     return 0;
 }
 
@@ -2767,6 +2914,8 @@ static int save_session(manager_session_store_t *store,
     record->peer_uid = connection->peer_uid;
     record->peer_gid = connection->peer_gid;
     record->manager_generation = manager_generation;
+    snprintf(record->client_public_key_hex, sizeof(record->client_public_key_hex),
+             "%s", connection->client_public_key_hex);
     return 0;
 }
 
@@ -2798,6 +2947,11 @@ static int create_authenticated_session(const manager_state_t *state,
     connection->session.authenticated_at_ms = now_ms;
     connection->session.expires_at_ms = now_ms + 12ULL * 60ULL * 60ULL * 1000ULL;
     connection->authenticated = 1;
+    if (cubicle_auth_hex_encode(client_public_key, CUBICLE_AUTH_PUBLIC_KEY_BYTES,
+                                connection->client_public_key_hex,
+                                sizeof(connection->client_public_key_hex)) < 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -3095,6 +3249,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         connection->session = record->session;
         memcpy(connection->resume_secret, record->resume_secret,
                sizeof(connection->resume_secret));
+        snprintf(connection->client_public_key_hex,
+                 sizeof(connection->client_public_key_hex), "%s",
+                 record->client_public_key_hex);
 
         unsigned char server_nonce[CUBICLE_AUTH_NONCE_BYTES];
         char server_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
@@ -3216,15 +3373,26 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
     if (strcmp(method, "workspace.create") == 0) {
         char name[128];
+        char initial_owner_label[CUBICLE_KEY_LABEL_MAX] = "owner";
         cubicle_validation_error_t validation_error;
         if (cubicle_json_get_required_string(params, "name", name,
                                              sizeof(name),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "initial_owner_label",
+                                             initial_owner_label,
+                                             sizeof(initial_owner_label), NULL,
                                              &validation_error) < 0 ||
             validate_field(name, "workspace name") < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INVALID_ARGUMENT,
                                              "invalid workspace name", false,
                                              0));
+        }
+        if (!connection_is_manager_owner(connection)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace creation requires local owner access",
+                                             false, 0));
         }
 
         int lock_fd = lock_state(state);
@@ -3266,6 +3434,21 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "failed to persist workspace",
                                              true, saved_errno));
         }
+        if (connection->authenticated &&
+            connection->client_public_key_hex[0] != '\0') {
+            workspace_key_record_t owner_key;
+            if (build_workspace_key_record_from_public_hex(
+                    &owner_key, workspace.id, connection->client_public_key_hex,
+                    initial_owner_label, role_owner_capabilities(), now_ms) < 0 ||
+                append_workspace_key_record(state, &owner_key) < 0) {
+                int saved_errno = errno;
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_IO,
+                                                 "failed to persist workspace owner key",
+                                                 true, saved_errno));
+            }
+        }
         unlock_state(lock_fd);
 
         char result[1024];
@@ -3297,6 +3480,13 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "workspace not found", false,
                                              0));
         }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection, CUBICLE_CAP_WORKSPACE_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace read access is required",
+                                             false, 0));
+        }
         char result[1024];
         if (workspace_info_json(state, id, &workspace, result,
                                 sizeof(result)) < 0) {
@@ -3326,6 +3516,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 cubicle_workspace_record_t workspace;
                 char item[1024];
                 if (cubicle_parse_workspace_record(line, &workspace) != 0 ||
+                    !connection_has_workspace_capability(
+                        state, workspace.id, connection,
+                        CUBICLE_CAP_WORKSPACE_READ) ||
                     workspace_info_json(state, id, &workspace, item,
                                         sizeof(item)) < 0) {
                     continue;
@@ -3388,6 +3581,15 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "workspace not found", false,
                                              0));
         }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_RENAME)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace rename access is required",
+                                             false, 0));
+        }
         cubicle_workspace_record_t existing;
         if (find_workspace(state, new_name, &existing) == 0 &&
             strcmp(existing.id, workspace.id) != 0) {
@@ -3447,6 +3649,18 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "workspace not found", false,
                                              0));
+        }
+        cubicle_capability_mask_t lifecycle_capability =
+            strcmp(method, "workspace.delete") == 0
+                ? CUBICLE_CAP_WORKSPACE_DELETE
+                : CUBICLE_CAP_WORKSPACE_STOP;
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection, lifecycle_capability)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace lifecycle access is required",
+                                             false, 0));
         }
 
         FILE *processes = open_state_file_for_read(state, "processes.tsv");
@@ -3602,6 +3816,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 false, 0));
         }
         refresh_observed_process_state(state, &process);
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process read access is required",
+                                             false, 0));
+        }
 
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
@@ -3659,7 +3881,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 char item[2048];
                 if (cubicle_parse_process_record(line, &process) != 0 ||
                     (workspace_id_ptr != NULL &&
-                     strcmp(process.workspace_id, workspace_id_ptr) != 0)) {
+                     strcmp(process.workspace_id, workspace_id_ptr) != 0) ||
+                    !connection_has_workspace_capability(
+                        state, process.workspace_id, connection,
+                        CUBICLE_CAP_PROCESS_READ)) {
                     continue;
                 }
                 refresh_observed_process_state(state, &process);
@@ -3782,6 +4007,15 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "workspace not found", false,
                                              0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection, CUBICLE_CAP_PROCESS_START)) {
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process start access is required",
+                                             false, 0));
         }
 
         char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
@@ -3932,6 +4166,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "process not found", false, 0));
         }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_SIGNAL)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process signal access is required",
+                                             false, 0));
+        }
 
         int action_result = 0;
         if (strcmp(method, "process.signal") == 0) {
@@ -3987,6 +4229,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "process not found", false, 0));
         }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process wait access is required",
+                                             false, 0));
+        }
 
         uint64_t waited_ms = 0;
         char latest_state[32];
@@ -4019,7 +4269,6 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 unlock_state(lock_fd);
             }
         }
-
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4059,6 +4308,15 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "process not found", false, 0));
+        }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_REMOVE)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process remove access is required",
+                                             false, 0));
         }
 
         char latest_state[32];
@@ -4147,6 +4405,23 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             }
             snprintf(workspace_id, sizeof(workspace_id), "%s",
                      workspace.id);
+            if (!connection_has_workspace_capability(
+                    state, workspace_id, connection,
+                    CUBICLE_CAP_PROCESS_REMOVE)) {
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_PERMISSION_DENIED,
+                                                 "cleanup access is required",
+                                                 false, 0));
+            }
+        }
+        if (workspace_id[0] == '\0' &&
+            !connection_is_manager_owner(connection)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "manager cleanup requires local owner access",
+                                             false, 0));
         }
 
         typedef struct cleanup_candidate {
@@ -4292,38 +4567,27 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "workspace not found", false,
                                              0));
         }
-
-        workspace_key_record_t record;
-        memset(&record, 0, sizeof(record));
-        snprintf(record.workspace_id, sizeof(record.workspace_id), "%s",
-                 workspace.id);
-        if (cubicle_generate_hex_id(record.key_id, sizeof(record.key_id)) < 0) {
-            int saved_errno = errno;
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
             unlock_state(lock_fd);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_INTERNAL,
-                                             "failed to allocate key id",
-                                             false, saved_errno));
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace key management requires owner access",
+                                             false, 0));
         }
-        snprintf(record.public_key_hex, sizeof(record.public_key_hex), "%s",
-                 public_key_hex);
-        snprintf(record.fingerprint, sizeof(record.fingerprint), "%.32s",
-                 public_key_hex);
-        snprintf(record.label, sizeof(record.label), "%s", label);
-        record.capabilities = (cubicle_capability_mask_t)capabilities;
-        record.created_at_ms = now_ms;
-        record.revoked_at_ms = 0;
 
-        char line[1024];
-        int line_length = snprintf(
-            line, sizeof(line), "%s\t%s\t%s\t%s\t%llu\t%llu\t%llu\t%s\n",
-            record.workspace_id, record.key_id, record.fingerprint,
-            record.label, (unsigned long long)record.capabilities,
-            (unsigned long long)record.created_at_ms,
-            (unsigned long long)record.revoked_at_ms,
-            record.public_key_hex);
-        if (line_length < 0 || (size_t)line_length >= sizeof(line) ||
-            append_line(state, "workspace-keys.tsv", line) < 0) {
+        workspace_key_record_t record;
+        if (build_workspace_key_record_from_public_hex(
+                &record, workspace.id, public_key_hex, label,
+                (cubicle_capability_mask_t)capabilities, now_ms) < 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid public key", false, 0));
+        }
+
+        if (append_workspace_key_record(state, &record) < 0) {
             int saved_errno = errno;
             unlock_state(lock_fd);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4361,6 +4625,13 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "workspace not found", false,
                                              0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection, CUBICLE_CAP_WORKSPACE_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace key list requires read access",
+                                             false, 0));
         }
 
         FILE *file = open_state_file_for_read(state, "workspace-keys.tsv");
@@ -4433,6 +4704,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "workspace not found", false,
                                              0));
         }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace key update requires owner access",
+                                             false, 0));
+        }
         int lock_fd = lock_state(state);
         if (lock_fd < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4482,6 +4761,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "workspace not found", false,
                                              0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace key revoke requires owner access",
+                                             false, 0));
         }
         int lock_fd = lock_state(state);
         if (lock_fd < 0) {
@@ -4545,6 +4832,19 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "process not found", false, 0));
         }
+        cubicle_capability_mask_t attachment_capability =
+            strcmp(mode, "interactive") == 0 ||
+                    (channels & CUBICLE_CHANNEL_STDIN) != 0
+                ? (CUBICLE_CAP_PROCESS_OBSERVE | CUBICLE_CAP_PROCESS_INPUT)
+                : CUBICLE_CAP_PROCESS_OBSERVE;
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                attachment_capability)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "attachment access is required",
+                                             false, 0));
+        }
 
         uint64_t granted_channels = channels;
         if (strcmp(process.mode,
@@ -4595,8 +4895,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         char result[2048];
         int length = snprintf(
             result, sizeof(result),
-            "{\"grant_id\":\"%s\",\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"process_id\":\"%s\",\"client_key_id\":\"local-bootstrap\",\"endpoint\":{\"uri\":\"%s\",\"server_identity\":\"local-controller\"},\"token\":\"local:%s:%s\",\"issued_at_ms\":%llu,\"expires_at_ms\":%llu,\"connection_limit\":1,\"granted_channels\":\"%s\",\"mode\":\"%s\"}",
+            "{\"grant_id\":\"%s\",\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"process_id\":\"%s\",\"client_key_id\":\"%s\",\"endpoint\":{\"uri\":\"%s\",\"server_identity\":\"local-controller\"},\"token\":\"local:%s:%s\",\"issued_at_ms\":%llu,\"expires_at_ms\":%llu,\"connection_limit\":1,\"granted_channels\":\"%s\",\"mode\":\"%s\"}",
             grant_id, id, process.workspace_id, process.process_id,
+            connection->authenticated ? connection->session.client_key_id
+                                      : "local-bootstrap",
             endpoint_uri, grant_id, process.process_id,
             (unsigned long long)now_ms,
             (unsigned long long)expires_at_ms, granted_channels_text, mode);
@@ -4652,6 +4954,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             snprintf(workspace_id, sizeof(workspace_id), "%s",
                      workspace.id);
             workspace_id_ptr = workspace_id;
+            if (!connection_has_workspace_capability(
+                    state, workspace_id, connection,
+                    CUBICLE_CAP_EVENTS_READ)) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_PERMISSION_DENIED,
+                                                 "event access is required",
+                                                 false, 0));
+            }
         }
         if (has_process_ref && process_ref[0] != '\0') {
             cubicle_process_record_t process;
@@ -4662,6 +4972,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                                  CUBICLE_ERR_NOT_FOUND,
                                                  "process not found",
+                                                 false, 0));
+            }
+            if (!connection_has_workspace_capability(
+                    state, process.workspace_id, connection,
+                    CUBICLE_CAP_EVENTS_READ)) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_PERMISSION_DENIED,
+                                                 "event access is required",
                                                  false, 0));
             }
         }
@@ -4738,8 +5056,34 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             snprintf(workspace_id, sizeof(workspace_id), "%s",
                      workspace.id);
             workspace_id_ptr = workspace_id;
+            if (!connection_has_workspace_capability(
+                    state, workspace_id, connection,
+                    CUBICLE_CAP_EVENTS_READ)) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_PERMISSION_DENIED,
+                                                 "event access is required",
+                                                 false, 0));
+            }
         }
         if (has_process_ref && process_ref[0] != '\0') {
+            cubicle_process_record_t process;
+            int ambiguous = 0;
+            if (find_process_record(state, process_ref, workspace_id_ptr,
+                                    &process, &ambiguous) < 0) {
+                (void)ambiguous;
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "process not found",
+                                                 false, 0));
+            }
+            if (!connection_has_workspace_capability(
+                    state, process.workspace_id, connection,
+                    CUBICLE_CAP_EVENTS_READ)) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_PERMISSION_DENIED,
+                                                 "event access is required",
+                                                 false, 0));
+            }
             process_id_ptr = process_ref;
         }
 
@@ -4849,6 +5193,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_NOT_FOUND,
                                              "process not found", false, 0));
+        }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process output access is required",
+                                             false, 0));
         }
 
         char path[PATH_MAX];
@@ -5012,7 +5364,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     char cleanup_path[PATH_MAX];
-    int listen_fd = open_manager_listener(listen_uri, allow_insecure,
+    int listen_fd = open_manager_listener(state, listen_uri, allow_insecure,
                                           cleanup_path);
     if (listen_fd < 0) {
         if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
@@ -5172,6 +5524,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "manager configuration error: %s\n", config_error);
         return 2;
     }
+    signal(SIGPIPE, SIG_IGN);
 
     manager_state_t state;
     snprintf(state.dir, sizeof(state.dir), "%s", config.manager_state_dir);
@@ -5183,6 +5536,9 @@ int main(int argc, char **argv)
              config.controller_binary);
     snprintf(state.listen_uri, sizeof(state.listen_uri), "%s",
              config.manager_listen_uri);
+    state.socket_mode = (mode_t)config.manager_socket_mode;
+    snprintf(state.socket_group, sizeof(state.socket_group), "%s",
+             config.manager_socket_group);
 
     int command_index = -1;
     int state_dir_overridden = 0;

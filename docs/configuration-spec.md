@@ -201,6 +201,8 @@ runtime_dir=/run/cubicle
 listen=unix:///run/cubicle/manager.sock
 controller_binary=/usr/libexec/cubicle/cubicle-controller
 log_dir=/var/log/cubicle
+socket_mode=0660
+socket_group=
 ```
 
 Required semantic keys:
@@ -215,6 +217,10 @@ Required semantic keys:
 Optional initial key:
 
 - `log_dir`: persistent log directory when file logging is enabled.
+- `socket_mode`: octal permissions applied to Unix manager sockets after bind.
+  The default is `0660`.
+- `socket_group`: optional group owner applied to Unix manager sockets after
+  bind. Empty means keep the process default group.
 
 Future versions may allow repeated `listen` entries for local and remote
 listeners. Until authenticated remote transport is implemented, TCP listeners

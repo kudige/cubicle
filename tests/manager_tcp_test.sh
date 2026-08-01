@@ -62,12 +62,18 @@ status_response=$(python3 "$CUBICLE_API_CLIENT" "$endpoint" status)
 printf "%s" "$status_response" | grep -q '"success": true'
 printf "%s" "$status_response" | grep -q '"workspace_count": 0'
 
-# CLI regression test for cube RPC over an unauthenticated TCP manager endpoint
-cube_workspace_output=$("$CUBE" --manager-socket "$endpoint" workspace "TCP Workspace")
-printf "%s" "$cube_workspace_output" | grep -q 'Workspace TCP Workspace created and selected'
-workspace_list_response=$(python3 "$CUBICLE_API_CLIENT" "$endpoint" workspace-list)
-printf "%s" "$workspace_list_response" | grep -q '"success": true'
-printf "%s" "$workspace_list_response" | grep -q '"name": "TCP Workspace"'
+# CLI transport coverage for unauthenticated TCP. Protected methods should
+# connect successfully and then fail authorization.
+set +e
+"$CUBE" --manager-socket "$endpoint" workspace "TCP Workspace" \
+    >"$tmpdir/tcp-workspace.out" 2>"$tmpdir/tcp-workspace.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "unauthenticated TCP workspace list should fail authorization, got $status" >&2
+    exit 1
+fi
+grep -q 'workspace creation requires local owner access' "$tmpdir/tcp-workspace.err"
 
 # Endpoint test for unauthenticated TCP manager.shutdown
 shutdown_response=$(python3 "$CUBICLE_API_CLIENT" "$endpoint" shutdown)

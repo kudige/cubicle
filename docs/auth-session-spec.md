@@ -515,11 +515,17 @@ Initial convenience roles:
 ```text
 observer
 operator
-administrator
 owner
 ```
 
 Roles map to explicit capability masks. Capabilities remain the authoritative authorization primitive.
+
+Current v0 role mapping:
+
+- `owner`: all workspace, process, event, and key-management capabilities.
+- `operator`: workspace read/stop, process start/read/observe/input/signal/remove,
+  and event read. Operators cannot manage workspace keys or delete workspaces.
+- `observer`: workspace read, process read/observe, and event read.
 
 ### 11.2 Enrollment processing
 
@@ -748,8 +754,12 @@ Implement:
 - `cube access add`, `list`, `remove`, and `set-role`,
 - public-key parsing and fingerprinting,
 - role-to-capability mappings,
-- audit records,
 - revocation checks.
+
+Deferred:
+
+- audit records,
+- active session invalidation for revoked keys.
 
 Acceptance criteria:
 

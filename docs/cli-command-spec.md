@@ -238,6 +238,29 @@ The selected workspace must apply predictably to later `cube` invocations. Initi
 - a current-workspace file scoped to the terminal/session,
 - a user-wide selected workspace as an early implementation fallback.
 
+## 4A. Workspace Access Commands
+
+Access commands manage public keys for the selected workspace, or for the
+workspace passed through global `--workspace NAME`.
+
+```console
+cube access list
+cube access add PUBLIC_KEY_OR_FILE [--role observer|operator|owner] [--label LABEL]
+cube access set-role KEY_ID observer|operator|owner
+cube access remove KEY_ID
+```
+
+Roles are CLI conveniences over explicit capability masks:
+
+- `owner`: all workspace, process, event, and key-management capabilities.
+- `operator`: can run, observe, attach interactively, signal, stop, and remove
+  processes in the workspace, but cannot manage keys.
+- `observer`: can list/read workspace, process, and event state and request
+  read-only attachments.
+
+When a same-UID local authenticated client creates a workspace, the manager
+automatically records that client's public key as the initial `owner` key.
+
 The preferred long-term approach is shell integration so separate shells can select different workspaces independently.
 
 Commands should also support an explicit workspace override:
