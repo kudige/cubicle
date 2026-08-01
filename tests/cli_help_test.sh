@@ -36,7 +36,8 @@ grep -q 'cube run \[--fg|--bg\] \[--stream|--tty\]' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
 
 set +e
-"$CUBE" ps >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
+env -u CUBICLE_MANAGER_SOCKET "$CUBE" ps \
+    >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
 status=$?
 set -e
 if [ "$status" -ne 2 ]; then
