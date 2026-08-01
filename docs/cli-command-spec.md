@@ -1,6 +1,6 @@
 # Cubicle CLI Command Specification
 
-Status: **Draft for phased implementation**  
+Status: **Draft for phased implementation**
 Command: **`cube`**
 
 This document defines the intended user-facing command-line experience for Cubicle. The goal is an intuitive, highly productive workflow for launching, observing, reconnecting to, and controlling persistent managed processes.
