@@ -161,8 +161,11 @@ int main(int argc, char **argv)
     assert(yyjson_is_obj(challenge));
 
     char manager_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
+    char manager_key_id[CUBICLE_ID_STRING_LENGTH];
     char manager_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
     char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+    get_result_string(challenge, "manager_id", manager_key_id,
+                      sizeof(manager_key_id));
     get_result_string(challenge, "manager_public_key", manager_public_key_hex,
                       sizeof(manager_public_key_hex));
     get_result_string(challenge, "manager_nonce", manager_nonce_hex,
@@ -225,9 +228,15 @@ int main(int argc, char **argv)
     assert(yyjson_is_obj(session));
     char session_id[CUBICLE_ID_STRING_LENGTH];
     char client_key_id[CUBICLE_ID_STRING_LENGTH];
+    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
     get_result_string(session, "session_id", session_id, sizeof(session_id));
     get_result_string(session, "client_key_id", client_key_id,
                       sizeof(client_key_id));
+    get_result_string(session, "resume_secret", resume_secret_hex,
+                      sizeof(resume_secret_hex));
+    assert(cubicle_auth_hex_decode(resume_secret_hex, resume_secret,
+                                   sizeof(resume_secret)) == 0);
     assert(strcmp(session_id, "local-session") != 0);
     assert(strcmp(client_key_id, identity.key_id) == 0);
 
@@ -242,12 +251,93 @@ int main(int argc, char **argv)
                       sizeof(bootstrap_session_id));
     assert(strcmp(bootstrap_session_id, session_id) == 0);
 
+    close(fd);
+    fd = connect_unix_socket(socket_path);
+
+    cubicle_auth_resume_t resume;
+    memset(&resume, 0, sizeof(resume));
+    snprintf(resume.manager_key_id, sizeof(resume.manager_key_id), "%s",
+             manager_key_id);
+    snprintf(resume.session_id, sizeof(resume.session_id), "%s", session_id);
+    assert(cubicle_auth_random_bytes(resume.client_nonce,
+                                     sizeof(resume.client_nonce)) == 0);
+    assert(cubicle_auth_random_bytes(resume.connection_id,
+                                     sizeof(resume.connection_id)) == 0);
+    resume.manager_generation = transcript.manager_generation;
+    resume.peer_uid = transcript.peer_uid;
+    resume.peer_gid = transcript.peer_gid;
+
+    unsigned char resume_bytes[512];
+    size_t resume_length = 0;
+    unsigned char authenticator[CUBICLE_AUTH_SECRET_BYTES];
+    char resume_client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+    char resume_connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+    char authenticator_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    assert(cubicle_auth_encode_resume(&resume, resume_bytes,
+                                      sizeof(resume_bytes),
+                                      &resume_length) == 0);
+    assert(cubicle_auth_hmac_sha256(resume_secret, sizeof(resume_secret),
+                                    resume_bytes, resume_length,
+                                    authenticator) == 0);
+    assert(cubicle_auth_hex_encode(resume.client_nonce,
+                                   sizeof(resume.client_nonce),
+                                   resume_client_nonce_hex,
+                                   sizeof(resume_client_nonce_hex)) == 0);
+    assert(cubicle_auth_hex_encode(resume.connection_id,
+                                   sizeof(resume.connection_id),
+                                   resume_connection_id_hex,
+                                   sizeof(resume_connection_id_hex)) == 0);
+    assert(cubicle_auth_hex_encode(authenticator, sizeof(authenticator),
+                                   authenticator_hex,
+                                   sizeof(authenticator_hex)) == 0);
+
+    length = snprintf(params, sizeof(params),
+                      "{\"session_id\":\"%s\",\"client_nonce\":\"%s\",\"connection_id\":\"%s\",\"authenticator\":\"%s\"}",
+                      session_id, resume_client_nonce_hex,
+                      resume_connection_id_hex, authenticator_hex);
+    assert(length >= 0 && (size_t)length < sizeof(params));
+    char *resume_json = rpc_call(fd, "auth-4", "", "auth.resume", params);
+
+    cubicle_json_doc_t resume_doc;
+    assert(cubicle_json_parse(&resume_doc, resume_json) == 0);
+    yyjson_val *resumed = yyjson_obj_get(resume_doc.root, "result");
+    assert(yyjson_is_obj(resumed));
+    char resumed_session_id[CUBICLE_ID_STRING_LENGTH];
+    char resumed_client_key_id[CUBICLE_ID_STRING_LENGTH];
+    char server_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+    get_result_string(resumed, "session_id", resumed_session_id,
+                      sizeof(resumed_session_id));
+    get_result_string(resumed, "client_key_id", resumed_client_key_id,
+                      sizeof(resumed_client_key_id));
+    get_result_string(resumed, "server_nonce", server_nonce_hex,
+                      sizeof(server_nonce_hex));
+    assert(strcmp(resumed_session_id, session_id) == 0);
+    assert(strcmp(resumed_client_key_id, identity.key_id) == 0);
+
+    char *resumed_bootstrap_json = rpc_call(fd, "auth-5", session_id,
+                                            "session.local_bootstrap", "{}");
+    cubicle_json_doc_t resumed_bootstrap_doc;
+    assert(cubicle_json_parse(&resumed_bootstrap_doc,
+                              resumed_bootstrap_json) == 0);
+    yyjson_val *resumed_bootstrap = yyjson_obj_get(
+        resumed_bootstrap_doc.root, "result");
+    assert(yyjson_is_obj(resumed_bootstrap));
+    char resumed_bootstrap_session_id[CUBICLE_ID_STRING_LENGTH];
+    get_result_string(resumed_bootstrap, "session_id",
+                      resumed_bootstrap_session_id,
+                      sizeof(resumed_bootstrap_session_id));
+    assert(strcmp(resumed_bootstrap_session_id, session_id) == 0);
+
     cubicle_json_cleanup(&challenge_doc);
     cubicle_json_cleanup(&session_doc);
     cubicle_json_cleanup(&bootstrap_doc);
+    cubicle_json_cleanup(&resume_doc);
+    cubicle_json_cleanup(&resumed_bootstrap_doc);
     free(challenge_json);
     free(session_json);
     free(bootstrap_json);
+    free(resume_json);
+    free(resumed_bootstrap_json);
     close(fd);
     return 0;
 }

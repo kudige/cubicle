@@ -48,6 +48,21 @@ typedef struct manager_state {
     cubicle_auth_identity_t identity;
 } manager_state_t;
 
+#define CUBICLE_MANAGER_MAX_SESSIONS 128
+
+typedef struct manager_session_record {
+    int active;
+    cubicle_session_info_t session;
+    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+    uid_t peer_uid;
+    gid_t peer_gid;
+    uint64_t manager_generation;
+} manager_session_record_t;
+
+typedef struct manager_session_store {
+    manager_session_record_t records[CUBICLE_MANAGER_MAX_SESSIONS];
+} manager_session_store_t;
+
 typedef struct manager_connection {
     int has_peer_credentials;
     uid_t peer_uid;
@@ -58,6 +73,7 @@ typedef struct manager_connection {
     int authenticated;
     cubicle_session_info_t session;
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+    manager_session_store_t *sessions;
 } manager_connection_t;
 
 typedef struct workspace_key_record {
@@ -2645,22 +2661,112 @@ static void load_peer_credentials(int client_fd, manager_connection_t *connectio
 
 static int session_info_json(const manager_state_t *state,
                              const cubicle_session_info_t *session,
+                             const unsigned char *resume_secret,
                              char *result,
                              size_t result_size)
 {
+    char resume_secret_field[CUBICLE_AUTH_SECRET_BYTES * 2 + 32] = "";
+    if (resume_secret != NULL) {
+        char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+        if (cubicle_auth_hex_encode(resume_secret,
+                                    CUBICLE_AUTH_SECRET_BYTES,
+                                    resume_secret_hex,
+                                    sizeof(resume_secret_hex)) < 0) {
+            return -1;
+        }
+        int field_length = snprintf(resume_secret_field,
+                                    sizeof(resume_secret_field),
+                                    ",\"resume_secret\":\"%s\"",
+                                    resume_secret_hex);
+        if (field_length < 0 ||
+            (size_t)field_length >= sizeof(resume_secret_field)) {
+            errno = ENOSPC;
+            return -1;
+        }
+    }
+
     int length = snprintf(
         result, result_size,
-        "{\"session_id\":\"%s\",\"manager_id\":\"%s\",\"client_key_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":%llu,\"manager_public_key\":\"%s\"}",
+        "{\"session_id\":\"%s\",\"manager_id\":\"%s\",\"client_key_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":%llu,\"manager_public_key\":\"%s\"%s}",
         session->session_id, session->manager_id, session->client_key_id,
         session->protocol_major, session->protocol_minor,
         (unsigned long long)session->negotiated_capabilities,
         (unsigned long long)session->authenticated_at_ms,
         (unsigned long long)session->expires_at_ms,
-        state->identity.public_key_hex);
+        state->identity.public_key_hex, resume_secret_field);
     if (length < 0 || (size_t)length >= result_size) {
         errno = ENOSPC;
         return -1;
     }
+    return 0;
+}
+
+static manager_session_record_t *find_session(manager_session_store_t *store,
+                                              const char *session_id)
+{
+    if (store == NULL || session_id == NULL || session_id[0] == '\0') {
+        return NULL;
+    }
+    for (size_t i = 0; i < CUBICLE_MANAGER_MAX_SESSIONS; ++i) {
+        if (store->records[i].active &&
+            strcmp(store->records[i].session.session_id, session_id) == 0) {
+            return &store->records[i];
+        }
+    }
+    return NULL;
+}
+
+static size_t active_session_count(const manager_session_store_t *store)
+{
+    size_t count = 0;
+    if (store == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < CUBICLE_MANAGER_MAX_SESSIONS; ++i) {
+        if (store->records[i].active) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int save_session(manager_session_store_t *store,
+                        const manager_connection_t *connection,
+                        uint64_t manager_generation)
+{
+    if (store == NULL || connection == NULL || !connection->authenticated) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    manager_session_record_t *record = find_session(
+        store, connection->session.session_id);
+    if (record == NULL) {
+        for (size_t i = 0; i < CUBICLE_MANAGER_MAX_SESSIONS; ++i) {
+            if (!store->records[i].active) {
+                record = &store->records[i];
+                break;
+            }
+        }
+    }
+    if (record == NULL) {
+        record = &store->records[0];
+        for (size_t i = 1; i < CUBICLE_MANAGER_MAX_SESSIONS; ++i) {
+            if (store->records[i].session.authenticated_at_ms <
+                record->session.authenticated_at_ms) {
+                record = &store->records[i];
+            }
+        }
+    }
+
+    memset(record, 0, sizeof(*record));
+    record->active = 1;
+    record->session = connection->session;
+    memcpy(record->resume_secret, connection->resume_secret,
+           sizeof(record->resume_secret));
+    record->peer_uid = connection->peer_uid;
+    record->peer_gid = connection->peer_gid;
+    record->manager_generation = manager_generation;
     return 0;
 }
 
@@ -2875,10 +2981,17 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "failed to create session",
                                              false, errno));
         }
+        if (save_session(connection->sessions, connection, started_at_ms) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "failed to save session",
+                                             false, errno));
+        }
         connection->has_pending_auth = 0;
 
         char result[2048];
-        if (session_info_json(state, &connection->session, result,
+        if (session_info_json(state, &connection->session,
+                              connection->resume_secret, result,
                               sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -2888,10 +3001,143 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
+    if (strcmp(method, "auth.resume") == 0) {
+        if (!connection->has_peer_credentials) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_UNSUPPORTED,
+                                             "session resume requires Unix peer credentials",
+                                             false, 0));
+        }
+
+        char session_id[CUBICLE_ID_STRING_LENGTH];
+        char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+        char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+        char authenticator_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "session_id",
+                                             session_id,
+                                             sizeof(session_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "client_nonce",
+                                             client_nonce_hex,
+                                             sizeof(client_nonce_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "connection_id",
+                                             connection_id_hex,
+                                             sizeof(connection_id_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "authenticator",
+                                             authenticator_hex,
+                                             sizeof(authenticator_hex),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid session resume request",
+                                             false, 0));
+        }
+
+        manager_session_record_t *record = find_session(connection->sessions,
+                                                        session_id);
+        if (record == NULL ||
+            record->manager_generation != started_at_ms ||
+            record->peer_uid != connection->peer_uid ||
+            record->peer_gid != connection->peer_gid ||
+            (record->session.expires_at_ms > 0 &&
+             record->session.expires_at_ms < now_ms)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_SESSION_EXPIRED,
+                                             "session cannot be resumed",
+                                             false, 0));
+        }
+
+        cubicle_auth_resume_t resume;
+        memset(&resume, 0, sizeof(resume));
+        snprintf(resume.manager_key_id, sizeof(resume.manager_key_id), "%s",
+                 state->identity.key_id);
+        snprintf(resume.session_id, sizeof(resume.session_id), "%s",
+                 session_id);
+        if (cubicle_auth_hex_decode(client_nonce_hex, resume.client_nonce,
+                                    sizeof(resume.client_nonce)) < 0 ||
+            cubicle_auth_hex_decode(connection_id_hex, resume.connection_id,
+                                    sizeof(resume.connection_id)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid session resume material",
+                                             false, 0));
+        }
+        resume.manager_generation = started_at_ms;
+        resume.peer_uid = connection->peer_uid;
+        resume.peer_gid = connection->peer_gid;
+
+        unsigned char resume_bytes[512];
+        size_t resume_length = 0;
+        unsigned char expected_authenticator[CUBICLE_AUTH_SECRET_BYTES];
+        unsigned char received_authenticator[CUBICLE_AUTH_SECRET_BYTES];
+        if (cubicle_auth_encode_resume(&resume, resume_bytes,
+                                       sizeof(resume_bytes),
+                                       &resume_length) < 0 ||
+            cubicle_auth_hmac_sha256(record->resume_secret,
+                                     sizeof(record->resume_secret),
+                                     resume_bytes, resume_length,
+                                     expected_authenticator) < 0 ||
+            cubicle_auth_hex_decode(authenticator_hex,
+                                    received_authenticator,
+                                    sizeof(received_authenticator)) < 0 ||
+            memcmp(expected_authenticator, received_authenticator,
+                   sizeof(expected_authenticator)) != 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_AUTHENTICATION_FAILED,
+                                             "invalid session resume authenticator",
+                                             false, 0));
+        }
+
+        connection->authenticated = 1;
+        connection->session = record->session;
+        memcpy(connection->resume_secret, record->resume_secret,
+               sizeof(connection->resume_secret));
+
+        unsigned char server_nonce[CUBICLE_AUTH_NONCE_BYTES];
+        char server_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+        if (cubicle_auth_random_bytes(server_nonce, sizeof(server_nonce)) < 0 ||
+            cubicle_auth_hex_encode(server_nonce, sizeof(server_nonce),
+                                    server_nonce_hex,
+                                    sizeof(server_nonce_hex)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to create resume response",
+                                             false, errno));
+        }
+
+        char session_json[2048];
+        if (session_info_json(state, &connection->session, NULL,
+                              session_json, sizeof(session_json)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode resumed session",
+                                             false, errno));
+        }
+        char result[2300];
+        size_t prefix = strlen(session_json);
+        if (prefix == 0 || session_json[prefix - 1] != '}') {
+            MANAGER_RETURN(-1);
+        }
+        session_json[prefix - 1] = '\0';
+        int length = snprintf(result, sizeof(result),
+                              "%s,\"server_nonce\":\"%s\"}",
+                              session_json, server_nonce_hex);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "session resume response too large",
+                                             false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
     if (strcmp(method, "session.local_bootstrap") == 0) {
         char result[1024];
         if (connection->authenticated) {
-            if (session_info_json(state, &connection->session, result,
+            if (session_info_json(state, &connection->session, NULL, result,
                                   sizeof(result)) < 0) {
                 MANAGER_RETURN(-1);
             }
@@ -2939,13 +3185,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
         char result[1024];
         int length = snprintf(result, sizeof(result),
-                              "{\"manager_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"capabilities\":%llu,\"started_at_ms\":%llu,\"server_time_ms\":%llu,\"workspace_count\":%zu,\"process_count\":%zu,\"controller_count\":%zu,\"active_client_sessions\":1}",
+                              "{\"manager_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"capabilities\":%llu,\"started_at_ms\":%llu,\"server_time_ms\":%llu,\"workspace_count\":%zu,\"process_count\":%zu,\"controller_count\":%zu,\"active_client_sessions\":%zu}",
                               id, CUBICLE_PROTOCOL_MAJOR,
                               CUBICLE_PROTOCOL_MINOR,
                               (unsigned long long)CUBICLE_API_CAPABILITIES,
                               (unsigned long long)started_at_ms,
                               (unsigned long long)now_ms, workspace_count,
-                              process_count, process_count);
+                              process_count, process_count,
+                              active_session_count(connection->sessions));
         if (length < 0 || (size_t)length >= sizeof(result)) {
             MANAGER_RETURN(-1);
         }
@@ -4701,11 +4948,13 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
 static int handle_manager_connection(const manager_state_t *state,
                                      int client_fd,
+                                     manager_session_store_t *sessions,
                                      int *shutdown_requested,
                                      uint64_t started_at_ms)
 {
     manager_connection_t connection;
     load_peer_credentials(client_fd, &connection);
+    connection.sessions = sessions;
     while (!*shutdown_requested) {
         if (handle_manager_client(state, client_fd, &connection,
                                   shutdown_requested, started_at_ms) == 0) {
@@ -4799,6 +5048,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     int result = 0;
     int shutdown_requested = 0;
     uint64_t started_at_ms = manager_time_ms();
+    manager_session_store_t sessions;
+    memset(&sessions, 0, sizeof(sessions));
     while (!shutdown_requested) {
         if (poll_workspace_events(state, NULL, NULL) != 0) {
             manager_log_error(errno);
@@ -4833,7 +5084,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 break;
             }
 
-            if (handle_manager_connection(state, client_fd,
+            if (handle_manager_connection(state, client_fd, &sessions,
                                           &shutdown_requested,
                                           started_at_ms) < 0) {
                 manager_log_error(errno);

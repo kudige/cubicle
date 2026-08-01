@@ -423,6 +423,7 @@
   - added E2E coverage for signed local session creation over a persistent framed socket
   - libcubicle now generates/loads a client identity and uses signed Unix authentication when supported
   - cube now uses signed Unix manager authentication before issuing manager RPCs
+  - manager daemon now stores authenticated sessions and verifies auth.resume HMACs
 
 ## Next
 
@@ -448,10 +449,10 @@
      - make sanitizer and malformed-message runs mandatory in CI
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
-   - implement session resume
+   - add client-side session cache/resume use
    - enforce workspace capability checks and bootstrap owner keys
 
-3. Expand tests.
+5. Expand tests.
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
