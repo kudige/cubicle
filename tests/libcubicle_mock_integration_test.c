@@ -26,6 +26,11 @@ static const char *transport_name(test_transport_kind_t kind)
     return kind == TEST_TRANSPORT_TCP ? "tcp" : "unix";
 }
 
+static void usage(const char *program)
+{
+    fprintf(stderr, "usage: %s [all|unix|tcp]\n", program);
+}
+
 static void make_endpoint_uri(cubicle_endpoint_t *endpoint, const char *uri)
 {
     memset(endpoint, 0, sizeof(*endpoint));
@@ -557,14 +562,32 @@ static void run_transport_suite(const char *directory,
     run_error_scenario(directory, kind, "mismatch", CUBICLE_ERR_PROTOCOL);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *selector = "all";
+    if (argc > 2) {
+        usage(argv[0]);
+        return 2;
+    }
+    if (argc == 2) {
+        selector = argv[1];
+    }
+    if (strcmp(selector, "all") != 0 && strcmp(selector, "unix") != 0 &&
+        strcmp(selector, "tcp") != 0) {
+        usage(argv[0]);
+        return 2;
+    }
+
     char directory_template[] = "/tmp/libcubicle-mock-test-XXXXXX";
     char *directory = mkdtemp(directory_template);
     assert(directory != NULL);
 
-    run_transport_suite(directory, TEST_TRANSPORT_UNIX);
-    run_transport_suite(directory, TEST_TRANSPORT_TCP);
+    if (strcmp(selector, "all") == 0 || strcmp(selector, "unix") == 0) {
+        run_transport_suite(directory, TEST_TRANSPORT_UNIX);
+    }
+    if (strcmp(selector, "all") == 0 || strcmp(selector, "tcp") == 0) {
+        run_transport_suite(directory, TEST_TRANSPORT_TCP);
+    }
 
     rmdir(directory);
     return 0;

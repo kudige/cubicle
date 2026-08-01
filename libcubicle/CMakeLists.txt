@@ -76,6 +76,18 @@ if(BUILD_TESTING)
         NAME libcubicle-mock-integration-test
         COMMAND ${CMAKE_COMMAND} -E env
                 CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
-                $<TARGET_FILE:libcubicle-mock-integration-test>
+                $<TARGET_FILE:libcubicle-mock-integration-test> all
+    )
+    add_test(
+        NAME libcubicle-mock-integration-unix-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test> unix
+    )
+    add_test(
+        NAME libcubicle-mock-integration-tcp-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test> tcp
     )
 endif()
