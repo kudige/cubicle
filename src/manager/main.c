@@ -3518,6 +3518,86 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
+    if (strcmp(method, "events.subscribe") == 0) {
+        char workspace_ref[128];
+        char process_ref[128];
+        char workspace_id[128];
+        const char *workspace_id_ptr = NULL;
+        uint64_t after_sequence = 0;
+        uint64_t limit = 100;
+        cubicle_validation_error_t validation_error;
+        int has_workspace_ref = 0;
+        int has_process_ref = 0;
+
+        if (cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "process_id",
+                                             process_ref,
+                                             sizeof(process_ref),
+                                             &has_process_ref,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "after_sequence",
+                                          &after_sequence, NULL,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "limit", &limit, NULL,
+                                          &validation_error) < 0 ||
+            limit > 1024) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid events subscribe request",
+                                             false, 0));
+        }
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
+            cubicle_workspace_record_t workspace;
+            if (find_workspace(state, workspace_ref, &workspace) < 0) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
+            }
+            snprintf(workspace_id, sizeof(workspace_id), "%s",
+                     workspace.id);
+            workspace_id_ptr = workspace_id;
+        }
+        if (has_process_ref && process_ref[0] != '\0') {
+            cubicle_process_record_t process;
+            int ambiguous = 0;
+            if (find_process_record(state, process_ref, workspace_id_ptr,
+                                    &process, &ambiguous) < 0) {
+                (void)ambiguous;
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "process not found",
+                                                 false, 0));
+            }
+        }
+
+        char subscription_id[CUBICLE_ID_STRING_LENGTH];
+        if (cubicle_generate_hex_id(subscription_id,
+                                    sizeof(subscription_id)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate subscription",
+                                             false, errno));
+        }
+        char result[512];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"subscription_id\":\"%s\",\"after_sequence\":%llu,\"limit\":%llu}",
+            subscription_id, (unsigned long long)after_sequence,
+            (unsigned long long)(limit == 0 ? 100 : limit));
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "subscription response too large",
+                                             false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
     if (strcmp(method, "events.list") == 0) {
         char workspace_ref[128];
         char process_ref[128];

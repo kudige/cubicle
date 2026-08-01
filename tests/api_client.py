@@ -207,6 +207,16 @@ def params_for_command(args):
         if args.process is not None:
             params["process_id"] = args.process
         return "events.list", params
+    if command == "events-subscribe":
+        params = {
+            "after_sequence": args.after,
+            "limit": args.limit,
+        }
+        if args.workspace is not None:
+            params["workspace_id"] = args.workspace
+        if args.process is not None:
+            params["process_id"] = args.process
+        return "events.subscribe", params
     if command == "read-output":
         return "process.read_output", {
             "process_id": args.process,
@@ -368,6 +378,12 @@ def build_parser():
     events_list.add_argument("--process")
     events_list.add_argument("--after", type=int, default=0)
     events_list.add_argument("--limit", type=int, default=100)
+
+    events_subscribe = subparsers.add_parser("events-subscribe")
+    events_subscribe.add_argument("--workspace")
+    events_subscribe.add_argument("--process")
+    events_subscribe.add_argument("--after", type=int, default=0)
+    events_subscribe.add_argument("--limit", type=int, default=100)
 
     read_output = subparsers.add_parser("read-output")
     read_output.add_argument("process")

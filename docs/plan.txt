@@ -231,6 +231,7 @@
     - process.read_output
     - attachment.request
     - events.list
+    - events.subscribe
     - manager.shutdown
 - Added framed controller API requests over the existing control socket:
   - 4-byte length-prefixed JSON RPC requests
@@ -253,6 +254,10 @@
   - workspace.stop terminates live processes in the workspace
   - workspace.delete removes workspace records and optionally retained process/controller state
   - workspace.key.update rewrites stored key capabilities
+- Added initial events.subscribe support:
+  - manager validates subscription filters and returns a subscription descriptor
+  - libcubicle maintains a polling subscription cursor over events.list
+  - real manager E2E consumes a subscribed event with cubicle_events_next
 - Added the initial persistent manager daemon lifecycle:
   - daemon command runs a long-lived foreground manager process
   - Unix socket lifecycle supports ping, status, and shutdown

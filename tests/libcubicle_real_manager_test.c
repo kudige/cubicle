@@ -477,6 +477,18 @@ int main(void)
     assert(event_count == 3);
     cubicle_events_free(events);
 
+    cubicle_event_subscription_t *subscription = NULL;
+    query.limit = 1;
+    // Endpoint test for events.subscribe
+    assert(cubicle_events_subscribe(client, &query, &subscription) ==
+           CUBICLE_OK);
+    cubicle_event_t event;
+    memset(&event, 0, sizeof(event));
+    assert(cubicle_events_next(subscription, 1000, &event) == CUBICLE_OK);
+    assert(event.global_sequence > 0);
+    assert(strcmp(event.process_id, process_id) == 0);
+    cubicle_events_unsubscribe(subscription);
+
     cubicle_process_info_t waited;
     memset(&waited, 0, sizeof(waited));
     // Endpoint test for process.wait

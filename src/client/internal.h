@@ -38,6 +38,14 @@ struct cubicle_attachment {
 };
 
 struct cubicle_event_subscription {
+    cubicle_client_t *client;
+    char workspace_id[CUBICLE_ID_STRING_LENGTH];
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    uint64_t after_sequence;
+    size_t limit;
+    cubicle_event_t *pending;
+    size_t pending_count;
+    size_t pending_index;
     cubicle_error_t last_error;
 };
 
