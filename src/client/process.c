@@ -11,16 +11,14 @@ static cubicle_error_code_t parse_process_list(cubicle_client_t *client,
 {
     const char *array = json_array_field(result, "processes");
     if (array == NULL) return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing processes array");
-    size_t count = count_array_objects(array);
+    size_t count = json_array_field_count(result, "processes");
     cubicle_process_info_t *items = count == 0 ? NULL : calloc(count, sizeof(*items));
-    const char *cursor = array;
     for (size_t i = 0; i < count; ++i) {
-        size_t length = 0; const char *object = next_array_object(cursor, &length);
-        char *copy = copy_object_slice(object, length);
+        char *copy = json_array_field_object_copy(result, "processes", i);
         if (copy == NULL || parse_process_info(copy, &items[i]) < 0) {
             free(copy); free(items); return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid process item");
         }
-        free(copy); cursor = object + length;
+        free(copy);
     }
     parse_page(result, page_out);
     *processes_out = items; *count_out = count; return CUBICLE_OK;
@@ -161,4 +159,3 @@ cubicle_error_code_t cubicle_process_read_output(cubicle_client_t *client,
 void cubicle_process_list_free(cubicle_process_info_t *processes) { free(processes); }
 
 void cubicle_output_chunk_free(cubicle_output_chunk_t *chunk) { if (chunk != NULL) { free(chunk->data); memset(chunk, 0, sizeof(*chunk)); } }
-

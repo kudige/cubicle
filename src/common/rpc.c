@@ -1,19 +1,12 @@
 #include "cubicle/rpc.h"
 
-#include <ctype.h>
+#include "json.h"
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static const char *skip_ws(const char *cursor)
-{
-    while (*cursor != '\0' && isspace((unsigned char)*cursor)) {
-        ++cursor;
-    }
-    return cursor;
-}
 
 static int append_raw(char *buffer, size_t buffer_size, size_t *used,
                       const char *value)
@@ -268,6 +261,16 @@ static int append_json_string(char *buffer, size_t buffer_size, size_t *used,
                : -1;
 }
 
+static int json_fragment_valid(const char *json)
+{
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0) {
+        return -1;
+    }
+    cubicle_json_cleanup(&parsed);
+    return 0;
+}
+
 int cubicle_rpc_request(char *buffer, size_t buffer_size,
                         const char *request_id,
                         const char *session_id,
@@ -277,6 +280,9 @@ int cubicle_rpc_request(char *buffer, size_t buffer_size,
     if (buffer == NULL || buffer_size == 0 || request_id == NULL ||
         method == NULL || params_json == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (json_fragment_valid(params_json) < 0) {
         return -1;
     }
 
@@ -310,6 +316,9 @@ int cubicle_rpc_success(char *buffer, size_t buffer_size,
     if (buffer == NULL || buffer_size == 0 || request_id == NULL ||
         result_json == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (json_fragment_valid(result_json) < 0) {
         return -1;
     }
 
@@ -357,109 +366,28 @@ int cubicle_rpc_error(char *buffer, size_t buffer_size,
     return 0;
 }
 
-static const char *find_field_value(const char *json, const char *field)
-{
-    if (json == NULL || field == NULL) {
-        return NULL;
-    }
-
-    const char *cursor = json;
-    char pattern[128];
-    int length = snprintf(pattern, sizeof(pattern), "\"%s\"", field);
-    if (length < 0 || (size_t)length >= sizeof(pattern)) {
-        return NULL;
-    }
-
-    while ((cursor = strstr(cursor, pattern)) != NULL) {
-        cursor += strlen(pattern);
-        cursor = skip_ws(cursor);
-        if (*cursor != ':') {
-            continue;
-        }
-        return skip_ws(cursor + 1);
-    }
-    return NULL;
-}
-
-static int read_json_string(const char *cursor, char *value, size_t value_size)
-{
-    if (cursor == NULL || *cursor != '"' || value == NULL ||
-        value_size == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    ++cursor;
-    size_t used = 0;
-    while (*cursor != '\0' && *cursor != '"') {
-        char decoded = *cursor++;
-        if (decoded == '\\') {
-            decoded = *cursor++;
-            switch (decoded) {
-            case '"':
-            case '\\':
-            case '/':
-                break;
-            case 'b':
-                decoded = '\b';
-                break;
-            case 'f':
-                decoded = '\f';
-                break;
-            case 'n':
-                decoded = '\n';
-                break;
-            case 'r':
-                decoded = '\r';
-                break;
-            case 't':
-                decoded = '\t';
-                break;
-            default:
-                errno = EPROTO;
-                return -1;
-            }
-        }
-        if (used + 1 >= value_size) {
-            errno = ENOSPC;
-            return -1;
-        }
-        value[used++] = decoded;
-    }
-    if (*cursor != '"') {
-        errno = EPROTO;
-        return -1;
-    }
-    value[used] = '\0';
-    return 0;
-}
-
 int cubicle_rpc_get_string(const char *json, const char *field,
                            char *value, size_t value_size)
 {
-    return read_json_string(find_field_value(json, field), value, value_size);
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0) {
+        return -1;
+    }
+    int result = cubicle_json_get_string(parsed.root, field, value, value_size);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int cubicle_rpc_get_uint64(const char *json, const char *field,
                            uint64_t *value_out)
 {
-    if (value_out == NULL) {
-        errno = EINVAL;
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0) {
         return -1;
     }
-    const char *value = find_field_value(json, field);
-    if (value == NULL || !isdigit((unsigned char)*value)) {
-        errno = EINVAL;
-        return -1;
-    }
-    char *end = NULL;
-    unsigned long long parsed = strtoull(value, &end, 10);
-    if (end == value) {
-        errno = EINVAL;
-        return -1;
-    }
-    *value_out = (uint64_t)parsed;
-    return 0;
+    int result = cubicle_json_get_u64(parsed.root, field, value_out);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int cubicle_rpc_get_bool(const char *json, const char *field,
@@ -469,71 +397,46 @@ int cubicle_rpc_get_bool(const char *json, const char *field,
         errno = EINVAL;
         return -1;
     }
-    const char *value = find_field_value(json, field);
-    if (value == NULL) {
-        errno = EINVAL;
+    bool value = false;
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0) {
         return -1;
     }
-    if (strncmp(value, "true", 4) == 0) {
-        *value_out = 1;
-        return 0;
+    int result = cubicle_json_get_bool(parsed.root, field, &value);
+    cubicle_json_cleanup(&parsed);
+    if (result == 0) {
+        *value_out = value ? 1 : 0;
     }
-    if (strncmp(value, "false", 5) == 0) {
-        *value_out = 0;
-        return 0;
-    }
-    errno = EINVAL;
-    return -1;
+    return result;
 }
 
 int cubicle_rpc_get_object(const char *json, const char *field,
                            char *object, size_t object_size)
 {
-    const char *value = find_field_value(json, field);
-    if (value == NULL || *value != '{' || object == NULL ||
-        object_size == 0) {
+    if (object == NULL || object_size == 0) {
         errno = EINVAL;
         return -1;
     }
 
-    int depth = 0;
-    int in_string = 0;
-    int escape = 0;
-    size_t used = 0;
-    for (const char *cursor = value; *cursor != '\0'; ++cursor) {
-        if (used + 1 >= object_size) {
-            errno = ENOSPC;
-            return -1;
-        }
-        object[used++] = *cursor;
-
-        if (escape) {
-            escape = 0;
-            continue;
-        }
-        if (*cursor == '\\' && in_string) {
-            escape = 1;
-            continue;
-        }
-        if (*cursor == '"') {
-            in_string = !in_string;
-            continue;
-        }
-        if (in_string) {
-            continue;
-        }
-        if (*cursor == '{') {
-            ++depth;
-        } else if (*cursor == '}') {
-            --depth;
-            if (depth == 0) {
-                object[used] = '\0';
-                return 0;
-            }
-        }
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0) {
+        return -1;
     }
-    errno = EPROTO;
-    return -1;
+    yyjson_val *value = cubicle_json_get_object(parsed.root, field);
+    char *copy = cubicle_json_copy_value(value);
+    cubicle_json_cleanup(&parsed);
+    if (copy == NULL) {
+        return -1;
+    }
+    size_t length = strlen(copy);
+    if (length >= object_size) {
+        free(copy);
+        errno = ENOSPC;
+        return -1;
+    }
+    memcpy(object, copy, length + 1);
+    free(copy);
+    return 0;
 }
 
 int cubicle_rpc_response_ok(const char *json, int *ok_out)

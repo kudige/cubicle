@@ -1,124 +1,98 @@
 #include "internal.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-const char *skip_ws(const char *cursor)
+static int parse_object_root(const char *json, cubicle_json_doc_t *parsed)
 {
-    while (*cursor != '\0' && isspace((unsigned char)*cursor)) {
-        ++cursor;
+    if (cubicle_json_parse(parsed, json) < 0 || !yyjson_is_obj(parsed->root)) {
+        cubicle_json_cleanup(parsed);
+        errno = EINVAL;
+        return -1;
     }
-    return cursor;
-}
-
-const char *find_json_key(const char *json, const char *key)
-{
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *found = strstr(json, pattern);
-    if (found == NULL) {
-        return NULL;
-    }
-    found += strlen(pattern);
-    found = skip_ws(found);
-    if (*found != ':') {
-        return NULL;
-    }
-    return skip_ws(found + 1);
+    return 0;
 }
 
 int json_bool_field(const char *json, const char *key, bool *value_out)
 {
-    const char *value = find_json_key(json, key);
-    if (value == NULL) {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return -1;
     }
-    if (strncmp(value, "true", 4) == 0) {
-        *value_out = true;
-        return 0;
-    }
-    if (strncmp(value, "false", 5) == 0) {
-        *value_out = false;
-        return 0;
-    }
-    return -1;
+    int result = cubicle_json_get_bool(parsed.root, key, value_out);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int json_u64_field(const char *json, const char *key, uint64_t *value_out)
 {
-    const char *value = find_json_key(json, key);
-    char *end = NULL;
-    if (value == NULL || *value == '-') {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return -1;
     }
-    errno = 0;
-    unsigned long long parsed = strtoull(value, &end, 10);
-    if (errno != 0 || end == value) {
-        return -1;
-    }
-    *value_out = (uint64_t)parsed;
-    return 0;
+    int result = cubicle_json_get_u64(parsed.root, key, value_out);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int json_i64_field(const char *json, const char *key, int64_t *value_out)
 {
-    const char *value = find_json_key(json, key);
-    char *end = NULL;
-    if (value == NULL) {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return -1;
     }
-    errno = 0;
-    long long parsed = strtoll(value, &end, 10);
-    if (errno != 0 || end == value) {
-        return -1;
-    }
-    *value_out = (int64_t)parsed;
-    return 0;
+    int result = cubicle_json_get_i64(parsed.root, key, value_out);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int json_string_field(const char *json, const char *key,
                              char *buffer, size_t buffer_size)
 {
-    const char *value = find_json_key(json, key);
-    if (value == NULL || *value != '"' || buffer == NULL || buffer_size == 0) {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return -1;
     }
-    ++value;
-    size_t used = 0;
-    while (*value != '\0' && *value != '"') {
-        char ch = *value++;
-        if (ch == '\\') {
-            ch = *value++;
-            if (ch == 'n') ch = '\n';
-            else if (ch == 'r') ch = '\r';
-            else if (ch == 't') ch = '\t';
-            else if (ch == '\0') return -1;
-        }
-        if (used + 1 >= buffer_size) {
-            return -1;
-        }
-        buffer[used++] = ch;
-    }
-    if (*value != '"') {
-        return -1;
-    }
-    buffer[used] = '\0';
-    return 0;
+    int result = cubicle_json_get_string(parsed.root, key, buffer, buffer_size);
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 const char *json_object_field(const char *json, const char *key)
 {
-    const char *value = find_json_key(json, key);
-    return value != NULL && *value == '{' ? value : NULL;
+    static char *cached;
+    char *source_copy = NULL;
+    const char *source = json;
+    if (json == cached && json != NULL) {
+        size_t length = strlen(json) + 1;
+        source_copy = malloc(length);
+        if (source_copy == NULL) {
+            return NULL;
+        }
+        memcpy(source_copy, json, length);
+        source = source_copy;
+    }
+    free(cached);
+    cached = json_object_field_copy(source, key);
+    free(source_copy);
+    return cached;
 }
 
 const char *json_array_field(const char *json, const char *key)
 {
-    const char *value = find_json_key(json, key);
-    return value != NULL && *value == '[' ? value : NULL;
+    static char *cached;
+    cubicle_json_doc_t parsed;
+    free(cached);
+    cached = NULL;
+    if (parse_object_root(json, &parsed) < 0) {
+        return NULL;
+    }
+    yyjson_val *array = cubicle_json_get_array(parsed.root, key);
+    cached = cubicle_json_copy_value(array);
+    cubicle_json_cleanup(&parsed);
+    return cached;
 }
 
 cubicle_error_code_t error_code_from_name(const char *name)
@@ -305,54 +279,45 @@ int parse_event(const char *json, cubicle_event_t *out)
     return 0;
 }
 
-size_t count_array_objects(const char *array)
+size_t json_array_field_count(const char *json, const char *key)
 {
-    size_t count = 0;
-    int depth = 0;
-    bool in_string = false;
-    for (const char *cursor = array; *cursor != '\0'; ++cursor) {
-        if (*cursor == '"' && (cursor == array || cursor[-1] != '\\')) {
-            in_string = !in_string;
-        } else if (!in_string && *cursor == '{') {
-            if (depth++ == 0) ++count;
-        } else if (!in_string && *cursor == '}') {
-            --depth;
-        } else if (!in_string && *cursor == ']' && depth == 0) {
-            break;
-        }
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return 0;
     }
+    yyjson_val *array = cubicle_json_get_array(parsed.root, key);
+    size_t count = cubicle_json_array_size(array);
+    cubicle_json_cleanup(&parsed);
     return count;
 }
 
-const char *next_array_object(const char *cursor, size_t *length_out)
+char *json_array_field_object_copy(const char *json, const char *key,
+                                   size_t index)
 {
-    cursor = strchr(cursor, '{');
-    if (cursor == NULL) {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return NULL;
     }
-    int depth = 0;
-    bool in_string = false;
-    for (const char *end = cursor; *end != '\0'; ++end) {
-        if (*end == '"' && (end == cursor || end[-1] != '\\')) {
-            in_string = !in_string;
-        } else if (!in_string && *end == '{') {
-            ++depth;
-        } else if (!in_string && *end == '}') {
-            if (--depth == 0) {
-                *length_out = (size_t)(end - cursor + 1);
-                return cursor;
-            }
-        }
+    yyjson_val *array = cubicle_json_get_array(parsed.root, key);
+    yyjson_val *item = cubicle_json_array_get(array, index);
+    if (!yyjson_is_obj(item)) {
+        cubicle_json_cleanup(&parsed);
+        errno = EINVAL;
+        return NULL;
     }
-    return NULL;
-}
-
-char *copy_object_slice(const char *object, size_t length)
-{
-    char *copy = malloc(length + 1);
-    if (copy == NULL) return NULL;
-    memcpy(copy, object, length);
-    copy[length] = '\0';
+    char *copy = cubicle_json_copy_value(item);
+    cubicle_json_cleanup(&parsed);
     return copy;
 }
 
+char *json_object_field_copy(const char *json, const char *key)
+{
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return NULL;
+    }
+    yyjson_val *object = cubicle_json_get_object(parsed.root, key);
+    char *copy = cubicle_json_copy_value(object);
+    cubicle_json_cleanup(&parsed);
+    return copy;
+}

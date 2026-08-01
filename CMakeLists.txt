@@ -18,13 +18,16 @@ endif()
 
 add_library(cubicle_common
     src/client/error.c
+    src/common/json.c
     src/common/log.c
     src/common/process.c
     src/common/rpc.c
     src/common/util.c
+    third_party/yyjson/yyjson.c
 )
 
 target_include_directories(cubicle_common PUBLIC include)
+target_include_directories(cubicle_common PRIVATE third_party/yyjson)
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -96,6 +99,7 @@ add_executable(cubicle-rpc-test
 )
 
 target_link_libraries(cubicle-rpc-test PRIVATE cubicle_common)
+target_include_directories(cubicle-rpc-test PRIVATE third_party/yyjson)
 
 target_compile_options(cubicle-rpc-test PRIVATE
     -Wall
@@ -328,6 +332,7 @@ if(CUBICLE_ENABLE_COVERAGE)
                 --remove ${CMAKE_BINARY_DIR}/coverage.info
                 '/usr/*'
                 '${CMAKE_SOURCE_DIR}/tests/*'
+                '${CMAKE_SOURCE_DIR}/third_party/*'
                 '${CMAKE_BINARY_DIR}/*'
                 --output-file ${CMAKE_BINARY_DIR}/coverage.filtered.info
                 --ignore-errors unused

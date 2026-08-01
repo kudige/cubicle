@@ -79,7 +79,7 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     char *response = NULL;
     if (has_method(mock->last_request, "manager.ping")) {
         response = format_response(response_id,
-            "{\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":100,\"uptime_ms\":7}");
+            "{\"message\":\"invalid manager_id\",\"nested\":{\"manager_id\":\"wrong-value\"},\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":100,\"uptime_ms\":7}");
     } else if (has_method(mock->last_request, "manager.status")) {
         response = format_response(response_id,
             "{\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_major\":0,\"protocol_minor\":1,\"capabilities\":258,\"started_at_ms\":10,\"server_time_ms\":20,\"workspace_count\":2,\"process_count\":3,\"controller_count\":4,\"active_client_sessions\":5}");

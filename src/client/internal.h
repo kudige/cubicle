@@ -10,6 +10,8 @@
 #include "cubicle/rpc.h"
 #include "cubicle/workspace.h"
 
+#include "../common/json.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,9 +71,10 @@ int parse_workspace_info(const char *json, cubicle_workspace_info_t *out);
 int parse_process_info(const char *json, cubicle_process_info_t *out);
 int parse_key_info(const char *json, cubicle_workspace_key_info_t *out);
 int parse_event(const char *json, cubicle_event_t *out);
-size_t count_array_objects(const char *array);
-const char *next_array_object(const char *cursor, size_t *length_out);
-char *copy_object_slice(const char *object, size_t length);
+size_t json_array_field_count(const char *json, const char *key);
+char *json_array_field_object_copy(const char *json, const char *key,
+                                   size_t index);
+char *json_object_field_copy(const char *json, const char *key);
 
 int append_common_options(cubicle_json_builder_t *params,
                           const cubicle_request_options_t *options);

@@ -76,13 +76,21 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     snprintf(request_id, sizeof(request_id), "req-%llu",
              (unsigned long long)++client->next_request_id);
 
+    const char *request_params = params == NULL ? "{}" : params;
+    cubicle_json_doc_t parsed_params;
+    if (cubicle_json_parse(&parsed_params, request_params) < 0) {
+        return set_client_error(client, CUBICLE_ERR_INTERNAL, 0,
+                                "invalid request params JSON");
+    }
+    cubicle_json_cleanup(&parsed_params);
+
     cubicle_json_builder_t request = {0};
     if (cubicle_json_builder_append(&request, "{\"request_id\":") < 0 ||
         cubicle_json_builder_append_string(&request, request_id) < 0 ||
         cubicle_json_builder_append(&request, ",\"method\":") < 0 ||
         cubicle_json_builder_append_string(&request, method) < 0 ||
         cubicle_json_builder_append(&request, ",\"params\":") < 0 ||
-        cubicle_json_builder_append(&request, params == NULL ? "{}" : params) < 0 ||
+        cubicle_json_builder_append(&request, request_params) < 0 ||
         cubicle_json_builder_append(&request, "}") < 0) {
         cubicle_json_builder_cleanup(&request);
         return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
@@ -200,4 +208,3 @@ cubicle_error_code_t simple_string_rpc(cubicle_client_t *client,
     free(response);
     return code;
 }
-

@@ -1,7 +1,9 @@
 #include "cubicle/rpc.h"
+#include "../src/common/json.h"
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures = 0;
@@ -111,8 +113,12 @@ static void test_envelopes(void)
     int ok = 0;
     expect_int(cubicle_rpc_response_ok(response, &ok), 0, "success ok");
     expect_int(ok, 1, "success ok value");
+    char result[128];
+    expect_int(cubicle_rpc_get_object(response, "result", result,
+                                      sizeof(result)),
+               0, "success result");
     uint64_t answer = 0;
-    expect_int(cubicle_rpc_get_uint64(response, "answer", &answer), 0,
+    expect_int(cubicle_rpc_get_uint64(result, "answer", &answer), 0,
                "answer");
     expect_int((int)answer, 42, "answer value");
 }
@@ -152,6 +158,72 @@ static void test_invalid(void)
     expect_int(cubicle_rpc_get_object("{\"o\":{\"a\":1}}", "o", object,
                                       sizeof(object)),
                -1, "object overflow");
+    expect_int(cubicle_rpc_get_string("{\"s\":\"unterminated}", "s", value,
+                                      sizeof(value)),
+               -1, "malformed json");
+    char request[128];
+    expect_int(cubicle_rpc_request(request, sizeof(request), "req-3",
+                                   "sess-1", "manager.ping", "{bad"),
+               -1, "invalid params fragment");
+    expect_int(cubicle_rpc_success(request, sizeof(request), "req-4",
+                                   "{bad"),
+               -1, "invalid result fragment");
+}
+
+static void test_direct_field_lookup(void)
+{
+    const char *json =
+        "{\"message\":\"invalid process_id\","
+        "\"nested\":{\"process_id\":\"wrong-value\"},"
+        "\"process_id\":\"correct-value\"}";
+    char value[32];
+    expect_int(cubicle_rpc_get_string(json, "process_id", value,
+                                      sizeof(value)),
+               0, "direct process id");
+    expect_string(value, "correct-value", "direct process id value");
+
+    uint64_t number = 0;
+    expect_int(cubicle_rpc_get_uint64(
+                   "{\"nested\":{\"answer\":7},\"answer\":42}", "answer",
+                   &number),
+               0, "direct number");
+    expect_int((int)number, 42, "direct number value");
+
+    expect_int(cubicle_rpc_get_string(
+                   "{\"process_id\":\"first\",\"process_id\":\"second\"}",
+                   "process_id", value, sizeof(value)),
+               0, "duplicate field");
+    expect_string(value, "first", "duplicate field first wins");
+}
+
+static void test_json_helpers(void)
+{
+    cubicle_json_doc_t parsed;
+    expect_int(cubicle_json_parse(&parsed,
+                                  "{\"n\":-7,\"items\":[{\"id\":\"a\"}],"
+                                  "\"copy\":{\"ok\":true}}"),
+               0, "json helper parse");
+    int64_t signed_number = 0;
+    expect_int(cubicle_json_get_i64(parsed.root, "n", &signed_number), 0,
+               "json helper i64");
+    expect_int((int)signed_number, -7, "json helper i64 value");
+
+    yyjson_val *items = cubicle_json_get_array(parsed.root, "items");
+    expect_int(items != NULL, 1, "json helper array");
+    expect_int((int)cubicle_json_array_size(items), 1, "json helper array size");
+    yyjson_val *item = cubicle_json_array_get(items, 0);
+    char id[8];
+    expect_int(cubicle_json_get_string(item, "id", id, sizeof(id)), 0,
+               "json helper array item");
+    expect_string(id, "a", "json helper array item value");
+
+    char *copy = cubicle_json_copy_field(parsed.root, "copy");
+    expect_int(copy != NULL, 1, "json helper copy field");
+    if (copy != NULL) {
+        expect_string(copy, "{\"ok\":true}", "json helper copy field value");
+        free(copy);
+    }
+    cubicle_json_cleanup(&parsed);
 }
 
 int main(void)
@@ -161,5 +233,7 @@ int main(void)
     test_envelopes();
     test_error();
     test_invalid();
+    test_direct_field_lookup();
+    test_json_helpers();
     return failures == 0 ? 0 : 1;
 }

@@ -59,20 +59,16 @@ static cubicle_error_code_t parse_workspace_list(cubicle_client_t *client,
 {
     const char *array = json_array_field(result, "workspaces");
     if (array == NULL) return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing workspaces array");
-    size_t count = count_array_objects(array);
+    size_t count = json_array_field_count(result, "workspaces");
     cubicle_workspace_info_t *items = count == 0 ? NULL : calloc(count, sizeof(*items));
     if (count > 0 && items == NULL) return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM, "failed to allocate workspaces");
-    const char *cursor = array;
     for (size_t i = 0; i < count; ++i) {
-        size_t length = 0;
-        const char *object = next_array_object(cursor, &length);
-        char *copy = copy_object_slice(object, length);
+        char *copy = json_array_field_object_copy(result, "workspaces", i);
         if (copy == NULL || parse_workspace_info(copy, &items[i]) < 0) {
             free(copy); free(items);
             return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid workspace item");
         }
         free(copy);
-        cursor = object + length;
     }
     parse_page(result, page_out);
     *workspaces_out = items;
@@ -198,19 +194,18 @@ cubicle_error_code_t cubicle_workspace_key_list(cubicle_client_t *client,
     cubicle_error_code_t code = rpc_object(client, "workspace.key.list", params.data, &response);
     cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
-    const char *array = json_array_field(result_object(client, response), "keys");
+    const char *result = result_object(client, response);
+    const char *array = json_array_field(result, "keys");
     if (array == NULL) { free(response); return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing keys array"); }
-    size_t count = count_array_objects(array);
+    size_t count = json_array_field_count(result, "keys");
     cubicle_workspace_key_info_t *items = count == 0 ? NULL : calloc(count, sizeof(*items));
-    const char *cursor = array;
     for (size_t i = 0; i < count; ++i) {
-        size_t length = 0; const char *object = next_array_object(cursor, &length);
-        char *copy = copy_object_slice(object, length);
+        char *copy = json_array_field_object_copy(result, "keys", i);
         if (copy == NULL || parse_key_info(copy, &items[i]) < 0) {
             free(copy); free(items); free(response);
             return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid key item");
         }
-        free(copy); cursor = object + length;
+        free(copy);
     }
     *keys_out = items; *count_out = count; free(response); return CUBICLE_OK;
 }
@@ -244,4 +239,3 @@ cubicle_error_code_t cubicle_workspace_key_revoke(cubicle_client_t *client,
 void cubicle_workspace_list_free(cubicle_workspace_info_t *workspaces) { free(workspaces); }
 
 void cubicle_workspace_key_list_free(cubicle_workspace_key_info_t *keys) { free(keys); }
-

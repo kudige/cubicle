@@ -17,16 +17,15 @@ cubicle_error_code_t cubicle_events_list(cubicle_client_t *client,
     cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "events.list", params.data, &response);
     cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
-    const char *array = json_array_field(result_object(client, response), "events");
+    const char *result = result_object(client, response);
+    const char *array = json_array_field(result, "events");
     if (array == NULL) { free(response); return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing events array"); }
-    size_t count = count_array_objects(array);
+    size_t count = json_array_field_count(result, "events");
     cubicle_event_t *items = count == 0 ? NULL : calloc(count, sizeof(*items));
-    const char *cursor = array;
     for (size_t i = 0; i < count; ++i) {
-        size_t length = 0; const char *object = next_array_object(cursor, &length);
-        char *copy = copy_object_slice(object, length);
+        char *copy = json_array_field_object_copy(result, "events", i);
         if (copy == NULL) { free(items); free(response); return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM, "failed to parse events"); }
-        parse_event(copy, &items[i]); free(copy); cursor = object + length;
+        parse_event(copy, &items[i]); free(copy);
     }
     *events_out = items; *count_out = count; free(response); return CUBICLE_OK;
 }
@@ -61,4 +60,3 @@ void cubicle_events_unsubscribe(cubicle_event_subscription_t *subscription)
 }
 
 void cubicle_events_free(cubicle_event_t *events) { free(events); }
-

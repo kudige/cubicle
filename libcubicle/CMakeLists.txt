@@ -17,13 +17,16 @@ add_library(cubicle_client STATIC
     ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
     ../src/client/workspace.c
+    ../src/common/json.c
     ../src/common/process.c
     ../src/common/rpc.c
+    ../third_party/yyjson/yyjson.c
 )
 
 add_library(Cubicle::Client ALIAS cubicle_client)
 
 target_include_directories(cubicle_client PUBLIC ../include)
+target_include_directories(cubicle_client PRIVATE ../third_party/yyjson)
 target_compile_options(cubicle_client PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
@@ -61,6 +64,7 @@ if(BUILD_TESTING)
         ../tests/rpc_test.c
     )
     target_link_libraries(libcubicle-rpc-test PRIVATE Cubicle::Client)
+    target_include_directories(libcubicle-rpc-test PRIVATE ../third_party/yyjson)
     target_compile_options(libcubicle-rpc-test PRIVATE
         -Wall -Wextra -Wpedantic
     )
@@ -70,10 +74,12 @@ if(BUILD_TESTING)
         ../tests/manager_api_compat_test.c
         ../tests/compat_manager_api_client.c
         ../src/client/error.c
+        ../src/common/json.c
         ../src/common/rpc.c
+        ../third_party/yyjson/yyjson.c
     )
     target_include_directories(libcubicle-manager-api-compat-test
-        PRIVATE ../include
+        PRIVATE ../include ../third_party/yyjson
     )
     target_compile_options(libcubicle-manager-api-compat-test PRIVATE
         -Wall -Wextra -Wpedantic
