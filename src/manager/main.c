@@ -1686,13 +1686,20 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
     snprintf(request_id, sizeof(request_id), "%s", envelope.request_id);
     snprintf(method, sizeof(method), "%s", envelope.method);
-    cubicle_rpc_request_envelope_cleanup(&envelope);
+    yyjson_val *params = envelope.params;
+
+#define MANAGER_RETURN(expression) do { \
+        int cubicle_manager_result__ = (expression); \
+        cubicle_rpc_request_envelope_cleanup(&envelope); \
+        return cubicle_manager_result__; \
+    } while (0)
 
     char id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (manager_id(state, id) < 0) {
-        return manager_api_error(client_fd, request_id,
-                                 CUBICLE_ERR_INTERNAL,
-                                 "failed to read manager id", false, errno);
+        MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                         CUBICLE_ERR_INTERNAL,
+                                         "failed to read manager id", false,
+                                         errno));
     }
 
     uint64_t now_ms = manager_time_ms();
@@ -1705,9 +1712,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                               (unsigned long long)CUBICLE_API_CAPABILITIES,
                               (unsigned long long)now_ms);
         if (length < 0 || (size_t)length >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "manager.ping") == 0) {
@@ -1719,9 +1726,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                               (unsigned long long)now_ms,
                               (unsigned long long)(now_ms - started_at_ms));
         if (length < 0 || (size_t)length >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "manager.status") == 0) {
@@ -1729,10 +1736,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         size_t process_count = 0;
         if (count_workspaces(state, &workspace_count) < 0 ||
             count_processes(state, &process_count) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INTERNAL,
-                                     "failed to count manager state", false,
-                                     errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to count manager state",
+                                             false, errno));
         }
 
         char result[1024];
@@ -1745,51 +1752,53 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                               (unsigned long long)now_ms, workspace_count,
                               process_count, process_count);
         if (length < 0 || (size_t)length >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "manager.shutdown") == 0) {
         *shutdown_requested = 1;
-        return manager_api_success(client_fd, request_id, "{}");
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
     if (strcmp(method, "workspace.create") == 0) {
-        char params[1024];
         char name[128];
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "name", name, sizeof(name)) < 0 ||
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "name", name,
+                                             sizeof(name),
+                                             &validation_error) < 0 ||
             validate_field(name, "workspace name") < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "invalid workspace name", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace name", false,
+                                             0));
         }
 
         int lock_fd = lock_state(state);
         if (lock_fd < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_IO,
-                                     "failed to lock manager state", true,
-                                     errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
         }
 
         if (workspace_name_exists(state, name)) {
             unlock_state(lock_fd);
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_ALREADY_EXISTS,
-                                     "workspace already exists", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_ALREADY_EXISTS,
+                                             "workspace already exists",
+                                             false, 0));
         }
 
         cubicle_workspace_record_t workspace;
         if (cubicle_generate_hex_id(workspace.id, sizeof(workspace.id)) < 0) {
             int saved_errno = errno;
             unlock_state(lock_fd);
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INTERNAL,
-                                     "failed to allocate workspace id",
-                                     false, saved_errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate workspace id",
+                                             false, saved_errno));
         }
         snprintf(workspace.name, sizeof(workspace.name), "%s", name);
 
@@ -1800,50 +1809,51 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             append_line(state, "workspaces.tsv", line) < 0) {
             int saved_errno = errno;
             unlock_state(lock_fd);
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_IO,
-                                     "failed to persist workspace", true,
-                                     saved_errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to persist workspace",
+                                             true, saved_errno));
         }
         unlock_state(lock_fd);
 
         char result[1024];
         if (workspace_info_json(state, id, &workspace, result,
                                 sizeof(result)) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INTERNAL,
-                                     "failed to encode workspace", false,
-                                     errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode workspace",
+                                             false, errno));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "workspace.get") == 0) {
-        char params[1024];
         char name_or_id[128];
         cubicle_workspace_record_t workspace;
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "workspace", name_or_id,
-                                   sizeof(name_or_id)) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "missing workspace reference", false, 0);
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace", name_or_id,
+                                             sizeof(name_or_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing workspace reference",
+                                             false, 0));
         }
         if (find_workspace(state, name_or_id, &workspace) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_NOT_FOUND,
-                                     "workspace not found", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
         }
         char result[1024];
         if (workspace_info_json(state, id, &workspace, result,
                                 sizeof(result)) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INTERNAL,
-                                     "failed to encode workspace", false,
-                                     errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode workspace",
+                                             false, errno));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "workspace.list") == 0) {
@@ -1853,7 +1863,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         int written = snprintf(result, sizeof(result),
                                "{\"workspaces\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
         used = (size_t)written;
 
@@ -1873,10 +1883,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 if (written < 0 ||
                     (size_t)written >= sizeof(result) - used) {
                     fclose(file);
-                    return manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_RESOURCE_LIMIT,
-                                             "workspace list response too large",
-                                             false, 0);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "workspace list response too large", false, 0));
                 }
                 used += (size_t)written;
                 ++count;
@@ -1887,36 +1896,45 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         written = snprintf(result + used, sizeof(result) - used,
                            "],\"count\":%zu,\"has_more\":false}", count);
         if (written < 0 || (size_t)written >= sizeof(result) - used) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "workspace list response too large",
-                                     false, 0);
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "workspace list response too large", false, 0));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "process.get") == 0) {
-        char params[1024];
         char process_ref[128];
         char workspace_ref[128];
         char workspace_id[128];
         const char *workspace_id_ptr = NULL;
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "process", process_ref,
-                                   sizeof(process_ref)) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "missing process reference", false, 0);
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process", process_ref,
+                                             sizeof(process_ref),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing process reference",
+                                             false, 0));
         }
-        if (cubicle_rpc_get_string(params, "workspace_id", workspace_ref,
-                                   sizeof(workspace_ref)) == 0 &&
-            workspace_ref[0] != '\0') {
+        int has_workspace_ref = 0;
+        if (cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace reference",
+                                             false, 0));
+        }
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
             cubicle_workspace_record_t workspace;
             if (find_workspace(state, workspace_ref, &workspace) < 0) {
-                return manager_api_error(client_fd, request_id,
-                                         CUBICLE_ERR_NOT_FOUND,
-                                         "workspace not found", false, 0);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
             }
             snprintf(workspace_id, sizeof(workspace_id), "%s",
                      workspace.id);
@@ -1927,39 +1945,47 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         int ambiguous = 0;
         if (find_process_record(state, process_ref, workspace_id_ptr,
                                 &process, &ambiguous) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     ambiguous ? CUBICLE_ERR_AMBIGUOUS_NAME
-                                               : CUBICLE_ERR_NOT_FOUND,
-                                     ambiguous ? "ambiguous process name"
-                                               : "process not found",
-                                     false, 0);
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id,
+                ambiguous ? CUBICLE_ERR_AMBIGUOUS_NAME
+                          : CUBICLE_ERR_NOT_FOUND,
+                ambiguous ? "ambiguous process name" : "process not found",
+                false, 0));
         }
 
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INTERNAL,
-                                     "failed to encode process", false,
-                                     errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode process",
+                                             false, errno));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "process.list") == 0) {
-        char params[1024];
         char workspace_ref[128];
         char workspace_id[128];
         const char *workspace_id_ptr = NULL;
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) == 0 &&
-            cubicle_rpc_get_string(params, "workspace_id", workspace_ref,
-                                   sizeof(workspace_ref)) == 0 &&
-            workspace_ref[0] != '\0') {
+        cubicle_validation_error_t validation_error;
+        int has_workspace_ref = 0;
+        if (cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace reference",
+                                             false, 0));
+        }
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
             cubicle_workspace_record_t workspace;
             if (find_workspace(state, workspace_ref, &workspace) < 0) {
-                return manager_api_error(client_fd, request_id,
-                                         CUBICLE_ERR_NOT_FOUND,
-                                         "workspace not found", false, 0);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
             }
             snprintf(workspace_id, sizeof(workspace_id), "%s",
                      workspace.id);
@@ -1971,7 +1997,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         size_t used = 0;
         int written = snprintf(result, sizeof(result), "{\"processes\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
         used = (size_t)written;
 
@@ -1992,10 +2018,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 if (written < 0 ||
                     (size_t)written >= sizeof(result) - used) {
                     fclose(file);
-                    return manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_RESOURCE_LIMIT,
-                                             "process list response too large",
-                                             false, 0);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "process list response too large", false, 0));
                 }
                 used += (size_t)written;
                 ++count;
@@ -2006,16 +2031,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         written = snprintf(result + used, sizeof(result) - used,
                            "],\"count\":%zu,\"has_more\":false}", count);
         if (written < 0 || (size_t)written >= sizeof(result) - used) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "process list response too large",
-                                     false, 0);
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "process list response too large", false, 0));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "events.list") == 0) {
-        char params[1024];
         char workspace_ref[128];
         char process_ref[128];
         char workspace_id[128];
@@ -2023,31 +2046,50 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         const char *process_id_ptr = NULL;
         uint64_t after_sequence = 0;
         uint64_t limit = 100;
+        cubicle_validation_error_t validation_error;
+        int has_workspace_ref = 0;
+        int has_process_ref = 0;
+        int has_after_sequence = 0;
+        int has_limit = 0;
 
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) == 0) {
-            if (cubicle_rpc_get_string(params, "workspace_id",
-                                       workspace_ref,
-                                       sizeof(workspace_ref)) == 0 &&
-                workspace_ref[0] != '\0') {
-                cubicle_workspace_record_t workspace;
-                if (find_workspace(state, workspace_ref, &workspace) < 0) {
-                    return manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_NOT_FOUND,
-                                             "workspace not found", false, 0);
-                }
-                snprintf(workspace_id, sizeof(workspace_id), "%s",
-                         workspace.id);
-                workspace_id_ptr = workspace_id;
+        if (cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "process_id",
+                                             process_ref,
+                                             sizeof(process_ref),
+                                             &has_process_ref,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "after_sequence",
+                                          &after_sequence,
+                                          &has_after_sequence,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "limit", &limit,
+                                          &has_limit,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid events list request",
+                                             false, 0));
+        }
+        (void)has_after_sequence;
+        (void)has_limit;
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
+            cubicle_workspace_record_t workspace;
+            if (find_workspace(state, workspace_ref, &workspace) < 0) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
             }
-            if (cubicle_rpc_get_string(params, "process_id", process_ref,
-                                       sizeof(process_ref)) == 0 &&
-                process_ref[0] != '\0') {
-                process_id_ptr = process_ref;
-            }
-            (void)cubicle_rpc_get_uint64(params, "after_sequence",
-                                         &after_sequence);
-            (void)cubicle_rpc_get_uint64(params, "limit", &limit);
+            snprintf(workspace_id, sizeof(workspace_id), "%s",
+                     workspace.id);
+            workspace_id_ptr = workspace_id;
+        }
+        if (has_process_ref && process_ref[0] != '\0') {
+            process_id_ptr = process_ref;
         }
 
         FILE *file = open_state_file_for_read(state, "workspace-events.log");
@@ -2055,7 +2097,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         size_t used = 0;
         int written = snprintf(result, sizeof(result), "{\"events\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
-            return -1;
+            MANAGER_RETURN(-1);
         }
         used = (size_t)written;
 
@@ -2096,10 +2138,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 if (written < 0 ||
                     (size_t)written >= sizeof(result) - used) {
                     fclose(file);
-                    return manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_RESOURCE_LIMIT,
-                                             "events response too large",
-                                             false, 0);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "events response too large", false, 0));
                 }
                 used += (size_t)written;
                 ++count;
@@ -2110,39 +2151,43 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         written = snprintf(result + used, sizeof(result) - used,
                            "],\"count\":%zu,\"has_more\":false}", count);
         if (written < 0 || (size_t)written >= sizeof(result) - used) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "events response too large", false, 0);
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "events response too large", false, 0));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "process.read_output") == 0) {
-        char params[1024];
         char process_id[128];
         char stream[32];
         uint64_t offset = 0;
         uint64_t maximum_length = 0;
-        if (cubicle_rpc_get_object(request, "params", params,
-                                   sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "process_id", process_id,
-                                   sizeof(process_id)) < 0 ||
-            cubicle_rpc_get_string(params, "stream", stream,
-                                   sizeof(stream)) < 0 ||
-            cubicle_rpc_get_uint64(params, "offset", &offset) < 0 ||
-            cubicle_rpc_get_uint64(params, "maximum_length",
-                                   &maximum_length) < 0 ||
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id", process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "stream", stream,
+                                             sizeof(stream),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "offset", &offset,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "maximum_length",
+                                          &maximum_length,
+                                          &validation_error) < 0 ||
             maximum_length > 8192) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "invalid read_output request", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid read_output request",
+                                             false, 0));
         }
 
         const char *file_name = api_stream_file_name(stream);
         if (file_name == NULL) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "unknown output stream", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "unknown output stream", false,
+                                             0));
         }
 
         cubicle_process_record_t process;
@@ -2150,9 +2195,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         if (find_process_record(state, process_id, NULL, &process,
                                 &ambiguous) < 0) {
             (void)ambiguous;
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_NOT_FOUND,
-                                     "process not found", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
         }
 
         char path[PATH_MAX];
@@ -2160,33 +2205,35 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                    "%s/controllers/%s/%s", state->dir,
                                    process.process_id, file_name);
         if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "output path too long", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "output path too long", false,
+                                             0));
         }
 
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_IO,
-                                     "failed to open output", true, errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to open output", true,
+                                             errno));
         }
 
         struct stat status;
         if (fstat(fd, &status) < 0) {
             int saved_errno = errno;
             close(fd);
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_IO,
-                                     "failed to stat output", true,
-                                     saved_errno);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to stat output", true,
+                                             saved_errno));
         }
         if (offset > (uint64_t)status.st_size) {
             close(fd);
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_INVALID_ARGUMENT,
-                                     "offset is past end of output", false,
-                                     0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "offset is past end of output",
+                                             false, 0));
         }
 
         size_t available = (size_t)((uint64_t)status.st_size - offset);
@@ -2203,10 +2250,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 }
                 int saved_errno = errno;
                 close(fd);
-                return manager_api_error(client_fd, request_id,
-                                         CUBICLE_ERR_IO,
-                                         "failed to read output", true,
-                                         saved_errno);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_IO,
+                                                 "failed to read output",
+                                                 true, saved_errno));
             }
             if (nread == 0) {
                 break;
@@ -2219,9 +2266,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         char escaped_data[65536];
         if (cubicle_json_escape(escaped_data, sizeof(escaped_data),
                                 data) < 0) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "output chunk is too large", false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "output chunk is too large",
+                                             false, 0));
         }
 
         char result[131072];
@@ -2235,16 +2283,18 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                          : "false",
                                      escaped_data, total);
         if (result_length < 0 || (size_t)result_length >= sizeof(result)) {
-            return manager_api_error(client_fd, request_id,
-                                     CUBICLE_ERR_RESOURCE_LIMIT,
-                                     "read_output response too large",
-                                     false, 0);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "read_output response too large",
+                                             false, 0));
         }
-        return manager_api_success(client_fd, request_id, result);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
-    return manager_api_error(client_fd, request_id, CUBICLE_ERR_UNSUPPORTED,
-                             "method is not implemented", false, 0);
+    MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                     CUBICLE_ERR_UNSUPPORTED,
+                                     "method is not implemented", false, 0));
+#undef MANAGER_RETURN
 }
 
 static int handle_manager_connection(const manager_state_t *state,

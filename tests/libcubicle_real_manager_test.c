@@ -3,6 +3,7 @@
 #include "cubicle/cubicle.h"
 #include "cubicle/transport_unix.h"
 
+#include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -136,6 +137,78 @@ static cubicle_client_t *connect_client(const char *socket_path)
     cubicle_client_t *client = NULL;
     assert(cubicle_client_connect(&options, &client) == CUBICLE_OK);
     return client;
+}
+
+static void write_all(int fd, const void *buffer, size_t length)
+{
+    const char *cursor = buffer;
+    while (length > 0) {
+        ssize_t written = write(fd, cursor, length);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            assert(!"failed to write socket");
+        }
+        assert(written > 0);
+        cursor += written;
+        length -= (size_t)written;
+    }
+}
+
+static void read_all(int fd, void *buffer, size_t length)
+{
+    char *cursor = buffer;
+    while (length > 0) {
+        ssize_t nread = read(fd, cursor, length);
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            assert(!"failed to read socket");
+        }
+        assert(nread > 0);
+        cursor += nread;
+        length -= (size_t)nread;
+    }
+}
+
+static void raw_api_request(const char *socket_path, const char *json,
+                            char *response, size_t response_size)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    assert(fd >= 0);
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    int length = snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+                          socket_path);
+    assert(length > 0 && (size_t)length < sizeof(address.sun_path));
+    assert(connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
+
+    size_t request_length = strlen(json);
+    assert(request_length < UINT32_MAX);
+    uint32_t frame_length = htonl((uint32_t)request_length);
+    write_all(fd, &frame_length, sizeof(frame_length));
+    write_all(fd, json, request_length);
+
+    uint32_t response_length_network = 0;
+    read_all(fd, &response_length_network, sizeof(response_length_network));
+    uint32_t response_length = ntohl(response_length_network);
+    assert(response_length > 0 && response_length < response_size);
+    read_all(fd, response, response_length);
+    response[response_length] = '\0';
+    close(fd);
+}
+
+static void expect_invalid_argument_response(const char *socket_path,
+                                             const char *json)
+{
+    char response[4096];
+    raw_api_request(socket_path, json, response, sizeof(response));
+    assert(strstr(response, "\"success\":false") != NULL);
+    assert(strstr(response, "\"code\":\"invalid_argument\"") != NULL);
 }
 
 static void cleanup(void)
@@ -320,6 +393,39 @@ int main(void)
     }
     assert(event_count == 3);
     cubicle_events_free(events);
+
+    cubicle_client_disconnect(client);
+
+    // Endpoint test for process.list invalid typed params
+    expect_invalid_argument_response(
+        socket_path,
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-1\","
+        "\"session_id\":\"local-session\",\"method\":\"process.list\","
+        "\"params\":{\"workspace_id\":7}}");
+
+    // Endpoint test for events.list invalid typed params
+    expect_invalid_argument_response(
+        socket_path,
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-2\","
+        "\"session_id\":\"local-session\",\"method\":\"events.list\","
+        "\"params\":{\"limit\":\"many\"}}");
+
+    // Endpoint test for process.read_output invalid typed params
+    expect_invalid_argument_response(
+        socket_path,
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-3\","
+        "\"session_id\":\"local-session\",\"method\":\"process.read_output\","
+        "\"params\":{\"process_id\":\"x\",\"stream\":\"stdout\","
+        "\"offset\":0,\"maximum_length\":\"16\"}}");
+
+    // Endpoint test for workspace.create invalid typed params
+    expect_invalid_argument_response(
+        socket_path,
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"bad-4\","
+        "\"session_id\":\"local-session\",\"method\":\"workspace.create\","
+        "\"params\":{\"name\":null}}");
+
+    client = connect_client(socket_path);
 
     // Endpoint test for manager.shutdown
     assert(cubicle_manager_shutdown(client, false) == CUBICLE_OK);
