@@ -4,20 +4,14 @@
 #include "cubicle/events.h"
 #include "cubicle/manager.h"
 #include "cubicle/process.h"
+#include "cubicle/rpc.h"
 #include "cubicle/workspace.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <string.h>
-
-typedef struct json_buffer {
-    char *data;
-    size_t length;
-    size_t capacity;
-} json_buffer_t;
 
 struct cubicle_client {
     cubicle_endpoint_t endpoint;
@@ -71,97 +65,6 @@ static cubicle_error_code_t unsupported_client(cubicle_client_t *client,
                                                const char *message)
 {
     return set_client_error(client, CUBICLE_ERR_UNSUPPORTED, 0, message);
-}
-
-static int buffer_reserve(json_buffer_t *buffer, size_t extra)
-{
-    if (buffer->length + extra + 1 <= buffer->capacity) {
-        return 0;
-    }
-    size_t capacity = buffer->capacity == 0 ? 256 : buffer->capacity;
-    while (buffer->length + extra + 1 > capacity) {
-        if (capacity > ((size_t)-1) / 2) {
-            return -1;
-        }
-        capacity *= 2;
-    }
-    char *data = realloc(buffer->data, capacity);
-    if (data == NULL) {
-        return -1;
-    }
-    buffer->data = data;
-    buffer->capacity = capacity;
-    return 0;
-}
-
-static int buffer_append(json_buffer_t *buffer, const char *text)
-{
-    size_t length = strlen(text);
-    if (buffer_reserve(buffer, length) < 0) {
-        return -1;
-    }
-    memcpy(buffer->data + buffer->length, text, length + 1);
-    buffer->length += length;
-    return 0;
-}
-
-static int buffer_appendf(json_buffer_t *buffer, const char *format, ...)
-{
-    va_list args;
-    va_start(args, format);
-    va_list copy;
-    va_copy(copy, args);
-    int needed = vsnprintf(NULL, 0, format, copy);
-    va_end(copy);
-    if (needed < 0 || buffer_reserve(buffer, (size_t)needed) < 0) {
-        va_end(args);
-        return -1;
-    }
-    vsnprintf(buffer->data + buffer->length, buffer->capacity - buffer->length,
-              format, args);
-    va_end(args);
-    buffer->length += (size_t)needed;
-    return 0;
-}
-
-static int buffer_append_json_string(json_buffer_t *buffer, const char *value)
-{
-    if (buffer_append(buffer, "\"") < 0) {
-        return -1;
-    }
-    if (value != NULL) {
-        for (const unsigned char *cursor = (const unsigned char *)value;
-             *cursor != '\0'; ++cursor) {
-            char escape[8];
-            switch (*cursor) {
-            case '"':
-                if (buffer_append(buffer, "\\\"") < 0) return -1;
-                break;
-            case '\\':
-                if (buffer_append(buffer, "\\\\") < 0) return -1;
-                break;
-            case '\n':
-                if (buffer_append(buffer, "\\n") < 0) return -1;
-                break;
-            case '\r':
-                if (buffer_append(buffer, "\\r") < 0) return -1;
-                break;
-            case '\t':
-                if (buffer_append(buffer, "\\t") < 0) return -1;
-                break;
-            default:
-                if (*cursor < 0x20) {
-                    snprintf(escape, sizeof(escape), "\\u%04x", *cursor);
-                    if (buffer_append(buffer, escape) < 0) return -1;
-                } else {
-                    if (buffer_reserve(buffer, 1) < 0) return -1;
-                    buffer->data[buffer->length++] = (char)*cursor;
-                    buffer->data[buffer->length] = '\0';
-                }
-            }
-        }
-    }
-    return buffer_append(buffer, "\"");
 }
 
 static const char *skip_ws(const char *cursor)
@@ -367,24 +270,24 @@ static int channel_mask_from_string(const char *text, cubicle_channel_mask_t *ou
     return 0;
 }
 
-static int append_common_options(json_buffer_t *params,
+static int append_common_options(cubicle_json_builder_t *params,
                                  const cubicle_request_options_t *options)
 {
     if (options == NULL) {
         return 0;
     }
     if (options->idempotency_key != NULL) {
-        if (buffer_append(params, ",\"idempotency_key\":") < 0 ||
-            buffer_append_json_string(params, options->idempotency_key) < 0) {
+        if (cubicle_json_builder_append(params, ",\"idempotency_key\":") < 0 ||
+            cubicle_json_builder_append_string(params, options->idempotency_key) < 0) {
             return -1;
         }
     }
     if (options->timeout_ms > 0 &&
-        buffer_appendf(params, ",\"timeout_ms\":%d", options->timeout_ms) < 0) {
+        cubicle_json_builder_appendf(params, ",\"timeout_ms\":%d", options->timeout_ms) < 0) {
         return -1;
     }
     if (options->deadline_ms > 0 &&
-        buffer_appendf(params, ",\"deadline_ms\":%llu",
+        cubicle_json_builder_appendf(params, ",\"deadline_ms\":%llu",
                        (unsigned long long)options->deadline_ms) < 0) {
         return -1;
     }
@@ -407,15 +310,15 @@ static cubicle_error_code_t rpc_call(cubicle_client_t *client,
     snprintf(request_id, sizeof(request_id), "req-%llu",
              (unsigned long long)++client->next_request_id);
 
-    json_buffer_t request = {0};
-    if (buffer_append(&request, "{\"request_id\":") < 0 ||
-        buffer_append_json_string(&request, request_id) < 0 ||
-        buffer_append(&request, ",\"method\":") < 0 ||
-        buffer_append_json_string(&request, method) < 0 ||
-        buffer_append(&request, ",\"params\":") < 0 ||
-        buffer_append(&request, params == NULL ? "{}" : params) < 0 ||
-        buffer_append(&request, "}") < 0) {
-        free(request.data);
+    cubicle_json_builder_t request = {0};
+    if (cubicle_json_builder_append(&request, "{\"request_id\":") < 0 ||
+        cubicle_json_builder_append_string(&request, request_id) < 0 ||
+        cubicle_json_builder_append(&request, ",\"method\":") < 0 ||
+        cubicle_json_builder_append_string(&request, method) < 0 ||
+        cubicle_json_builder_append(&request, ",\"params\":") < 0 ||
+        cubicle_json_builder_append(&request, params == NULL ? "{}" : params) < 0 ||
+        cubicle_json_builder_append(&request, "}") < 0) {
+        cubicle_json_builder_cleanup(&request);
         return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
                                 "failed to build request");
     }
@@ -425,7 +328,7 @@ static cubicle_error_code_t rpc_call(cubicle_client_t *client,
     cubicle_error_code_t result = client->transport->vtable->request(
         client->transport, request.data, request.length, &response_data,
         &response_length, &client->last_error);
-    free(request.data);
+    cubicle_json_builder_cleanup(&request);
     if (result != CUBICLE_OK) {
         return result;
     }
@@ -791,20 +694,20 @@ cubicle_error_code_t cubicle_workspace_create(cubicle_client_t *client,
 {
     if (client == NULL || options == NULL || options->name == NULL ||
         options->name[0] == '\0' || workspace_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    if (buffer_append(&params, "{\"name\":") < 0 ||
-        buffer_append_json_string(&params, options->name) < 0 ||
+    cubicle_json_builder_t params = {0};
+    if (cubicle_json_builder_append(&params, "{\"name\":") < 0 ||
+        cubicle_json_builder_append_string(&params, options->name) < 0 ||
         (options->initial_owner_label != NULL &&
-         (buffer_append(&params, ",\"initial_owner_label\":") < 0 ||
-          buffer_append_json_string(&params, options->initial_owner_label) < 0)) ||
+         (cubicle_json_builder_append(&params, ",\"initial_owner_label\":") < 0 ||
+          cubicle_json_builder_append_string(&params, options->initial_owner_label) < 0)) ||
         append_common_options(&params, &options->request) < 0 ||
-        buffer_append(&params, "}") < 0) {
-        free(params.data);
+        cubicle_json_builder_append(&params, "}") < 0) {
+        cubicle_json_builder_cleanup(&params);
         return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM, "failed to build request");
     }
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.create", params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
     const char *result = result_object(client, response);
     code = parse_workspace_info(result, workspace_out) == 0 ? CUBICLE_OK :
@@ -818,13 +721,13 @@ cubicle_error_code_t cubicle_workspace_get(cubicle_client_t *client,
 {
     if (client == NULL || workspace_id_or_name == NULL ||
         workspace_id_or_name[0] == '\0' || workspace_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace\":");
-    buffer_append_json_string(&params, workspace_id_or_name);
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace\":");
+    cubicle_json_builder_append_string(&params, workspace_id_or_name);
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.get", params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
     const char *result = result_object(client, response);
     code = parse_workspace_info(result, workspace_out) == 0 ? CUBICLE_OK :
@@ -866,26 +769,26 @@ cubicle_error_code_t cubicle_workspace_list(cubicle_client_t *client,
     cubicle_page_info_t *page_out)
 {
     if (client == NULL || workspaces_out == NULL || count_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{");
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{");
     bool comma = false;
     if (options != NULL && options->name_prefix != NULL) {
-        buffer_append(&params, "\"name_prefix\":");
-        buffer_append_json_string(&params, options->name_prefix);
+        cubicle_json_builder_append(&params, "\"name_prefix\":");
+        cubicle_json_builder_append_string(&params, options->name_prefix);
         comma = true;
     }
     if (options != NULL && options->page.limit > 0) {
-        buffer_appendf(&params, "%s\"limit\":%zu", comma ? "," : "", options->page.limit);
+        cubicle_json_builder_appendf(&params, "%s\"limit\":%zu", comma ? "," : "", options->page.limit);
         comma = true;
     }
     if (options != NULL && options->page.continuation_token != NULL) {
-        buffer_append(&params, comma ? ",\"continuation_token\":" : "\"continuation_token\":");
-        buffer_append_json_string(&params, options->page.continuation_token);
+        cubicle_json_builder_append(&params, comma ? ",\"continuation_token\":" : "\"continuation_token\":");
+        cubicle_json_builder_append_string(&params, options->page.continuation_token);
     }
-    buffer_append(&params, "}");
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.list", params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
     code = parse_workspace_list(client, result_object(client, response), workspaces_out, count_out, page_out);
     free(response);
@@ -897,16 +800,16 @@ static cubicle_error_code_t simple_string_rpc(cubicle_client_t *client,
     const cubicle_request_options_t *request_options)
 {
     if (client == NULL || value == NULL || value[0] == '\0') return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{");
-    buffer_append_json_string(&params, key);
-    buffer_append(&params, ":");
-    buffer_append_json_string(&params, value);
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{");
+    cubicle_json_builder_append_string(&params, key);
+    cubicle_json_builder_append(&params, ":");
+    cubicle_json_builder_append_string(&params, value);
     append_common_options(&params, request_options);
-    buffer_append(&params, "}");
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, method, params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     free(response);
     return code;
 }
@@ -917,16 +820,16 @@ cubicle_error_code_t cubicle_workspace_rename(cubicle_client_t *client,
 {
     if (client == NULL || workspace_id == NULL || new_name == NULL ||
         workspace_id[0] == '\0' || new_name[0] == '\0') return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":");
-    buffer_append_json_string(&params, workspace_id);
-    buffer_append(&params, ",\"new_name\":");
-    buffer_append_json_string(&params, new_name);
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, ",\"new_name\":");
+    cubicle_json_builder_append_string(&params, new_name);
     append_common_options(&params, request_options);
-    buffer_append(&params, "}");
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.rename", params.data, &response);
-    free(params.data); free(response);
+    cubicle_json_builder_cleanup(&params); free(response);
     return code;
 }
 
@@ -965,17 +868,17 @@ cubicle_error_code_t cubicle_workspace_key_add(cubicle_client_t *client,
 {
     if (client == NULL || workspace_id == NULL || workspace_id[0] == '\0' ||
         public_key == NULL || public_key_length == 0 || key_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":");
-    buffer_append_json_string(&params, workspace_id);
-    buffer_append(&params, ",\"public_key\":\"");
-    for (size_t i = 0; i < public_key_length; ++i) buffer_appendf(&params, "%02x", public_key[i]);
-    buffer_append(&params, "\",\"label\":");
-    buffer_append_json_string(&params, label == NULL ? "" : label);
-    buffer_appendf(&params, ",\"capabilities\":%llu}", (unsigned long long)capabilities);
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, ",\"public_key\":\"");
+    for (size_t i = 0; i < public_key_length; ++i) cubicle_json_builder_appendf(&params, "%02x", public_key[i]);
+    cubicle_json_builder_append(&params, "\",\"label\":");
+    cubicle_json_builder_append_string(&params, label == NULL ? "" : label);
+    cubicle_json_builder_appendf(&params, ",\"capabilities\":%llu}", (unsigned long long)capabilities);
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.key.add", params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
     code = parse_key_info(result_object(client, response), key_out) == 0 ? CUBICLE_OK :
            set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid key result");
@@ -989,13 +892,13 @@ cubicle_error_code_t cubicle_workspace_key_list(cubicle_client_t *client,
 {
     if (client == NULL || workspace_id == NULL || workspace_id[0] == '\0' ||
         keys_out == NULL || count_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":");
-    buffer_append_json_string(&params, workspace_id);
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL;
     cubicle_error_code_t code = rpc_object(client, "workspace.key.list", params.data, &response);
-    free(params.data);
+    cubicle_json_builder_cleanup(&params);
     if (code != CUBICLE_OK) return code;
     const char *array = json_array_field(result_object(client, response), "keys");
     if (array == NULL) { free(response); return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing keys array"); }
@@ -1019,12 +922,12 @@ cubicle_error_code_t cubicle_workspace_key_set_capabilities(cubicle_client_t *cl
 {
     if (client == NULL || workspace_id == NULL || key_id == NULL ||
         workspace_id[0] == '\0' || key_id[0] == '\0') return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":"); buffer_append_json_string(&params, workspace_id);
-    buffer_append(&params, ",\"key_id\":"); buffer_append_json_string(&params, key_id);
-    buffer_appendf(&params, ",\"capabilities\":%llu}", (unsigned long long)capabilities);
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":"); cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, ",\"key_id\":"); cubicle_json_builder_append_string(&params, key_id);
+    cubicle_json_builder_appendf(&params, ",\"capabilities\":%llu}", (unsigned long long)capabilities);
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "workspace.key.update", params.data, &response);
-    free(params.data); free(response); return code;
+    cubicle_json_builder_cleanup(&params); free(response); return code;
 }
 
 cubicle_error_code_t cubicle_workspace_key_revoke(cubicle_client_t *client,
@@ -1032,12 +935,12 @@ cubicle_error_code_t cubicle_workspace_key_revoke(cubicle_client_t *client,
 {
     if (client == NULL || workspace_id == NULL || key_id == NULL ||
         workspace_id[0] == '\0' || key_id[0] == '\0') return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":"); buffer_append_json_string(&params, workspace_id);
-    buffer_append(&params, ",\"key_id\":"); buffer_append_json_string(&params, key_id);
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":"); cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, ",\"key_id\":"); cubicle_json_builder_append_string(&params, key_id);
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "workspace.key.revoke", params.data, &response);
-    free(params.data); free(response); return code;
+    cubicle_json_builder_cleanup(&params); free(response); return code;
 }
 
 static cubicle_error_code_t parse_process_list(cubicle_client_t *client,
@@ -1068,24 +971,24 @@ cubicle_error_code_t cubicle_process_start(cubicle_client_t *client,
     if (client == NULL || options == NULL || process_out == NULL ||
         options->workspace_id == NULL || options->argv == NULL ||
         options->argc == 0) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0};
-    buffer_append(&params, "{\"workspace_id\":"); buffer_append_json_string(&params, options->workspace_id);
-    if (options->friendly_name != NULL) { buffer_append(&params, ",\"friendly_name\":"); buffer_append_json_string(&params, options->friendly_name); }
-    buffer_append(&params, ",\"mode\":"); buffer_append_json_string(&params, mode_name(options->mode));
-    buffer_append(&params, ",\"stdin_policy\":"); buffer_append_json_string(&params, options->stdin_policy == CUBICLE_STDIN_EOF ? "eof" : "open");
-    if (options->cwd != NULL) { buffer_append(&params, ",\"cwd\":"); buffer_append_json_string(&params, options->cwd); }
-    buffer_append(&params, ",\"argv\":[");
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":"); cubicle_json_builder_append_string(&params, options->workspace_id);
+    if (options->friendly_name != NULL) { cubicle_json_builder_append(&params, ",\"friendly_name\":"); cubicle_json_builder_append_string(&params, options->friendly_name); }
+    cubicle_json_builder_append(&params, ",\"mode\":"); cubicle_json_builder_append_string(&params, mode_name(options->mode));
+    cubicle_json_builder_append(&params, ",\"stdin_policy\":"); cubicle_json_builder_append_string(&params, options->stdin_policy == CUBICLE_STDIN_EOF ? "eof" : "open");
+    if (options->cwd != NULL) { cubicle_json_builder_append(&params, ",\"cwd\":"); cubicle_json_builder_append_string(&params, options->cwd); }
+    cubicle_json_builder_append(&params, ",\"argv\":[");
     for (size_t i = 0; i < options->argc; ++i) {
-        if (i > 0) buffer_append(&params, ",");
-        buffer_append_json_string(&params, options->argv[i]);
+        if (i > 0) cubicle_json_builder_append(&params, ",");
+        cubicle_json_builder_append_string(&params, options->argv[i]);
     }
-    buffer_append(&params, "]");
-    if (options->tty_rows > 0) buffer_appendf(&params, ",\"tty_rows\":%u", options->tty_rows);
-    if (options->tty_cols > 0) buffer_appendf(&params, ",\"tty_cols\":%u", options->tty_cols);
+    cubicle_json_builder_append(&params, "]");
+    if (options->tty_rows > 0) cubicle_json_builder_appendf(&params, ",\"tty_rows\":%u", options->tty_rows);
+    if (options->tty_cols > 0) cubicle_json_builder_appendf(&params, ",\"tty_cols\":%u", options->tty_cols);
     append_common_options(&params, &options->request);
-    buffer_append(&params, "}");
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.start", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     code = parse_process_info(result_object(client, response), process_out) == 0 ? CUBICLE_OK :
            set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid process result");
     free(response); return code;
@@ -1096,11 +999,11 @@ cubicle_error_code_t cubicle_process_get(cubicle_client_t *client,
     cubicle_process_info_t *process_out)
 {
     if (client == NULL || process_id_or_name == NULL || process_id_or_name[0] == '\0' || process_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{\"process\":"); buffer_append_json_string(&params, process_id_or_name);
-    if (workspace_id != NULL) { buffer_append(&params, ",\"workspace_id\":"); buffer_append_json_string(&params, workspace_id); }
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{\"process\":"); cubicle_json_builder_append_string(&params, process_id_or_name);
+    if (workspace_id != NULL) { cubicle_json_builder_append(&params, ",\"workspace_id\":"); cubicle_json_builder_append_string(&params, workspace_id); }
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.get", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     code = parse_process_info(result_object(client, response), process_out) == 0 ? CUBICLE_OK :
            set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid process result");
     free(response); return code;
@@ -1111,13 +1014,13 @@ cubicle_error_code_t cubicle_process_list(cubicle_client_t *client,
     size_t *count_out, cubicle_page_info_t *page_out)
 {
     if (client == NULL || processes_out == NULL || count_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{"); bool comma = false;
-    if (filter != NULL && filter->workspace_id != NULL) { buffer_append(&params, "\"workspace_id\":"); buffer_append_json_string(&params, filter->workspace_id); comma = true; }
-    if (filter != NULL && filter->name_prefix != NULL) { buffer_append(&params, comma ? ",\"name_prefix\":" : "\"name_prefix\":"); buffer_append_json_string(&params, filter->name_prefix); comma = true; }
-    if (filter != NULL && filter->include_completed) { buffer_append(&params, comma ? ",\"include_completed\":true" : "\"include_completed\":true"); }
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{"); bool comma = false;
+    if (filter != NULL && filter->workspace_id != NULL) { cubicle_json_builder_append(&params, "\"workspace_id\":"); cubicle_json_builder_append_string(&params, filter->workspace_id); comma = true; }
+    if (filter != NULL && filter->name_prefix != NULL) { cubicle_json_builder_append(&params, comma ? ",\"name_prefix\":" : "\"name_prefix\":"); cubicle_json_builder_append_string(&params, filter->name_prefix); comma = true; }
+    if (filter != NULL && filter->include_completed) { cubicle_json_builder_append(&params, comma ? ",\"include_completed\":true" : "\"include_completed\":true"); }
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.list", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     code = parse_process_list(client, result_object(client, response), processes_out, count_out, page_out);
     free(response); return code;
 }
@@ -1126,10 +1029,10 @@ cubicle_error_code_t cubicle_process_signal(cubicle_client_t *client,
     const char *process_id, int signal_number)
 {
     if (client == NULL || process_id == NULL || process_id[0] == '\0' || signal_number <= 0) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{\"process_id\":"); buffer_append_json_string(&params, process_id);
-    buffer_appendf(&params, ",\"signal_number\":%d}", signal_number);
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{\"process_id\":"); cubicle_json_builder_append_string(&params, process_id);
+    cubicle_json_builder_appendf(&params, ",\"signal_number\":%d}", signal_number);
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.signal", params.data, &response);
-    free(params.data); free(response); return code;
+    cubicle_json_builder_cleanup(&params); free(response); return code;
 }
 
 cubicle_error_code_t cubicle_process_terminate(cubicle_client_t *client,
@@ -1153,10 +1056,10 @@ cubicle_error_code_t cubicle_process_wait(cubicle_client_t *client,
     const char *process_id, int timeout_ms, cubicle_process_info_t *process_out)
 {
     if (client == NULL || process_id == NULL || process_id[0] == '\0' || process_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{\"process_id\":"); buffer_append_json_string(&params, process_id);
-    buffer_appendf(&params, ",\"timeout_ms\":%d}", timeout_ms);
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{\"process_id\":"); cubicle_json_builder_append_string(&params, process_id);
+    cubicle_json_builder_appendf(&params, ",\"timeout_ms\":%d}", timeout_ms);
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.wait", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     code = parse_process_info(result_object(client, response), process_out) == 0 ? CUBICLE_OK :
            set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid process result");
     free(response); return code;
@@ -1173,11 +1076,11 @@ cubicle_error_code_t cubicle_process_read_output(cubicle_client_t *client,
     size_t maximum_length, cubicle_output_chunk_t *chunk_out)
 {
     if (client == NULL || process_id == NULL || process_id[0] == '\0' || chunk_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{\"process_id\":"); buffer_append_json_string(&params, process_id);
-    buffer_append(&params, ",\"stream\":"); buffer_append_json_string(&params, stream_name(stream));
-    buffer_appendf(&params, ",\"offset\":%llu,\"maximum_length\":%zu}", (unsigned long long)offset, maximum_length);
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{\"process_id\":"); cubicle_json_builder_append_string(&params, process_id);
+    cubicle_json_builder_append(&params, ",\"stream\":"); cubicle_json_builder_append_string(&params, stream_name(stream));
+    cubicle_json_builder_appendf(&params, ",\"offset\":%llu,\"maximum_length\":%zu}", (unsigned long long)offset, maximum_length);
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "process.read_output", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     const char *result = result_object(client, response);
     memset(chunk_out, 0, sizeof(*chunk_out));
     json_u64_field(result, "start_offset", &chunk_out->start_offset);
@@ -1199,14 +1102,14 @@ cubicle_error_code_t cubicle_attachment_request(cubicle_client_t *client,
 {
     if (client == NULL || request == NULL || request->process_id == NULL ||
         request->process_id[0] == '\0' || grant_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{\"process_id\":"); buffer_append_json_string(&params, request->process_id);
-    buffer_appendf(&params, ",\"channels\":%u,\"mode\":", (unsigned)request->channels);
-    buffer_append_json_string(&params, attachment_mode_name(request->mode));
-    buffer_appendf(&params, ",\"stdout_offset\":%llu,\"stderr_offset\":%llu,\"tty_offset\":%llu,\"rows\":%u,\"cols\":%u}",
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{\"process_id\":"); cubicle_json_builder_append_string(&params, request->process_id);
+    cubicle_json_builder_appendf(&params, ",\"channels\":%u,\"mode\":", (unsigned)request->channels);
+    cubicle_json_builder_append_string(&params, attachment_mode_name(request->mode));
+    cubicle_json_builder_appendf(&params, ",\"stdout_offset\":%llu,\"stderr_offset\":%llu,\"tty_offset\":%llu,\"rows\":%u,\"cols\":%u}",
                    (unsigned long long)request->stdout_offset, (unsigned long long)request->stderr_offset,
                    (unsigned long long)request->tty_offset, request->rows, request->cols);
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "attachment.request", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     const char *result = result_object(client, response);
     memset(grant_out, 0, sizeof(*grant_out));
     json_string_field(result, "grant_id", grant_out->grant_id, sizeof(grant_out->grant_id));
@@ -1229,13 +1132,13 @@ cubicle_error_code_t cubicle_events_list(cubicle_client_t *client,
     size_t *count_out)
 {
     if (client == NULL || events_out == NULL || count_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    json_buffer_t params = {0}; buffer_append(&params, "{"); bool comma = false;
-    if (query != NULL && query->workspace_id != NULL) { buffer_append(&params, "\"workspace_id\":"); buffer_append_json_string(&params, query->workspace_id); comma = true; }
-    if (query != NULL && query->process_id != NULL) { buffer_append(&params, comma ? ",\"process_id\":" : "\"process_id\":"); buffer_append_json_string(&params, query->process_id); comma = true; }
-    if (query != NULL) buffer_appendf(&params, "%s\"after_sequence\":%llu,\"limit\":%zu", comma ? "," : "", (unsigned long long)query->after_sequence, query->limit);
-    buffer_append(&params, "}");
+    cubicle_json_builder_t params = {0}; cubicle_json_builder_append(&params, "{"); bool comma = false;
+    if (query != NULL && query->workspace_id != NULL) { cubicle_json_builder_append(&params, "\"workspace_id\":"); cubicle_json_builder_append_string(&params, query->workspace_id); comma = true; }
+    if (query != NULL && query->process_id != NULL) { cubicle_json_builder_append(&params, comma ? ",\"process_id\":" : "\"process_id\":"); cubicle_json_builder_append_string(&params, query->process_id); comma = true; }
+    if (query != NULL) cubicle_json_builder_appendf(&params, "%s\"after_sequence\":%llu,\"limit\":%zu", comma ? "," : "", (unsigned long long)query->after_sequence, query->limit);
+    cubicle_json_builder_append(&params, "}");
     char *response = NULL; cubicle_error_code_t code = rpc_object(client, "events.list", params.data, &response);
-    free(params.data); if (code != CUBICLE_OK) return code;
+    cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     const char *array = json_array_field(result_object(client, response), "events");
     if (array == NULL) { free(response); return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing events array"); }
     size_t count = count_array_objects(array);

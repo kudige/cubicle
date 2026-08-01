@@ -19,6 +19,7 @@ endif()
 add_library(cubicle_common
     src/common/log.c
     src/common/process.c
+    src/common/rpc.c
     src/common/util.c
 )
 
@@ -88,6 +89,20 @@ target_compile_options(cubicle-util-test PRIVATE
 )
 
 add_test(NAME cubicle-util-test COMMAND cubicle-util-test)
+
+add_executable(cubicle-rpc-test
+    tests/rpc_test.c
+)
+
+target_link_libraries(cubicle-rpc-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-rpc-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-rpc-test COMMAND cubicle-rpc-test)
 
 add_executable(cubicle-manager-registry-unit-test
     tests/manager_registry_unit_test.c
@@ -267,6 +282,7 @@ if(CUBICLE_ENABLE_COVERAGE)
             cubicle-manager
             cubicle-controller
             cubicle-process-test
+            cubicle-rpc-test
             cubicle-util-test
             cubicle-manager-registry-unit-test
     )

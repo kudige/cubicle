@@ -11,6 +11,7 @@ add_library(cubicle_client STATIC
     ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
     ../src/common/process.c
+    ../src/common/rpc.c
 )
 
 add_library(Cubicle::Client ALIAS cubicle_client)
@@ -50,13 +51,22 @@ if(BUILD_TESTING)
              COMMAND libcubicle-public-headers-test)
 
     add_executable(libcubicle-rpc-test
-        ../tests/libcubicle_rpc_test.c
+        ../tests/rpc_test.c
     )
     target_link_libraries(libcubicle-rpc-test PRIVATE Cubicle::Client)
     target_compile_options(libcubicle-rpc-test PRIVATE
         -Wall -Wextra -Wpedantic
     )
     add_test(NAME libcubicle-rpc-test COMMAND libcubicle-rpc-test)
+
+    add_executable(libcubicle-client-rpc-test
+        ../tests/libcubicle_rpc_test.c
+    )
+    target_link_libraries(libcubicle-client-rpc-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-client-rpc-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-client-rpc-test COMMAND libcubicle-client-rpc-test)
 
     add_executable(cubicle-mock-api-server
         ../tests/mock_api_server.c
