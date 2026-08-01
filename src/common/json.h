@@ -7,6 +7,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define CUBICLE_JSON_MAX_DOCUMENT_BYTES (16U * 1024U * 1024U)
+#define CUBICLE_JSON_MAX_DEPTH 32U
+#define CUBICLE_JSON_MAX_OBJECT_MEMBERS 256U
+#define CUBICLE_JSON_MAX_ARRAY_ELEMENTS 4096U
+#define CUBICLE_JSON_MAX_STRING_BYTES (1024U * 1024U)
+#define CUBICLE_JSON_MAX_METHOD_BYTES 128U
+#define CUBICLE_JSON_MAX_ERROR_MESSAGE_BYTES 4096U
+#define CUBICLE_JSON_MAX_ARGC 4096U
+#define CUBICLE_JSON_MAX_ENV_COUNT 4096U
+
 typedef struct cubicle_json_doc {
     yyjson_doc *doc;
     yyjson_val *root;

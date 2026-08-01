@@ -192,8 +192,7 @@ static void test_direct_field_lookup(void)
     expect_int(cubicle_rpc_get_string(
                    "{\"process_id\":\"first\",\"process_id\":\"second\"}",
                    "process_id", value, sizeof(value)),
-               0, "duplicate field");
-    expect_string(value, "first", "duplicate field first wins");
+               -1, "duplicate field");
 }
 
 static void test_json_helpers(void)
@@ -226,6 +225,60 @@ static void test_json_helpers(void)
     cubicle_json_cleanup(&parsed);
 }
 
+static void test_json_hardening(void)
+{
+    cubicle_json_doc_t parsed;
+    expect_int(cubicle_json_parse(&parsed,
+                                  "{\"outer\":{\"id\":\"a\",\"id\":\"b\"}}"),
+               -1, "nested duplicate field");
+
+    uint64_t number = 0;
+    expect_int(cubicle_rpc_get_uint64("{\"n\":-1}", "n", &number), -1,
+               "negative unsigned");
+    expect_int(cubicle_rpc_get_uint64("{\"n\":1.5}", "n", &number), -1,
+               "fraction unsigned");
+    expect_int(cubicle_rpc_get_uint64("{\"n\":1e2}", "n", &number), -1,
+               "exponent unsigned");
+    expect_int(cubicle_rpc_get_uint64("{\"n\":18446744073709551616}", "n",
+                                      &number),
+               -1, "overflow unsigned");
+
+    char nested[256];
+    size_t used = 0;
+    nested[used++] = '{';
+    for (unsigned i = 0; i < CUBICLE_JSON_MAX_DEPTH + 1; ++i) {
+        nested[used++] = '"';
+        nested[used++] = 'a';
+        nested[used++] = '"';
+        nested[used++] = ':';
+        nested[used++] = '{';
+    }
+    nested[used++] = '}';
+    for (unsigned i = 0; i < CUBICLE_JSON_MAX_DEPTH + 1; ++i) {
+        nested[used++] = '}';
+    }
+    nested[used] = '\0';
+    expect_int(cubicle_json_parse(&parsed, nested), -1,
+               "maximum depth");
+
+    cubicle_json_builder_t builder = {0};
+    expect_int(cubicle_json_builder_append(&builder, "{\"s\":\""), 0,
+               "oversized string prefix");
+    int append_failed = 0;
+    for (size_t i = 0; i < CUBICLE_JSON_MAX_STRING_BYTES + 1; ++i) {
+        if (cubicle_json_builder_append(&builder, "x") < 0) {
+            append_failed = 1;
+            break;
+        }
+    }
+    expect_int(append_failed, 0, "oversized string append");
+    expect_int(cubicle_json_builder_append(&builder, "\"}"), 0,
+               "oversized string suffix");
+    expect_int(cubicle_json_parse(&parsed, builder.data), -1,
+               "oversized string");
+    cubicle_json_builder_cleanup(&builder);
+}
+
 int main(void)
 {
     test_escape();
@@ -235,5 +288,6 @@ int main(void)
     test_invalid();
     test_direct_field_lookup();
     test_json_helpers();
+    test_json_hardening();
     return failures == 0 ? 0 : 1;
 }
