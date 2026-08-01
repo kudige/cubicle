@@ -227,7 +227,9 @@ static void cleanup(void)
 int main(void)
 {
     const char *manager = getenv("CUBICLE_MANAGER");
+    const char *controller = getenv("CUBICLE_CONTROLLER");
     assert(manager != NULL && manager[0] != '\0');
+    assert(controller != NULL && controller[0] != '\0');
     atexit(cleanup);
 
     snprintf(temp_dir, sizeof(temp_dir), "/tmp/libcubicle-real-manager-XXXXXX");
@@ -290,9 +292,9 @@ int main(void)
     manager_pid = fork();
     assert(manager_pid >= 0);
     if (manager_pid == 0) {
-        execl(manager, manager, "--state-dir", state_dir, "daemon",
-              "--control-socket", socket_path, "--event-interval-ms", "50",
-              (char *)NULL);
+        execl(manager, manager, "--state-dir", state_dir,
+              "--controller-bin", controller, "daemon", "--control-socket",
+              socket_path, "--event-interval-ms", "50", (char *)NULL);
         _exit(127);
     }
     wait_for_socket(socket_path);
@@ -336,6 +338,57 @@ int main(void)
     assert(workspace_count == 2);
     cubicle_workspace_list_free(workspaces);
 
+    unsigned char owner_key[] = { 0xab, 0xcd, 0xef };
+    cubicle_workspace_key_info_t key;
+    memset(&key, 0, sizeof(key));
+    // Endpoint test for workspace.key.add
+    assert(cubicle_workspace_key_add(client, workspace_id, owner_key,
+                                     sizeof(owner_key), "owner",
+                                     CUBICLE_CAP_WORKSPACE_READ |
+                                         CUBICLE_CAP_PROCESS_READ,
+                                     &key) == CUBICLE_OK);
+    assert(strcmp(key.label, "owner") == 0);
+
+    cubicle_workspace_key_info_t *keys = NULL;
+    size_t key_count = 0;
+    // Endpoint test for workspace.key.list
+    assert(cubicle_workspace_key_list(client, workspace_id, &keys,
+                                      &key_count) == CUBICLE_OK);
+    assert(key_count == 1);
+    cubicle_workspace_key_list_free(keys);
+
+    // Endpoint test for workspace.key.revoke
+    assert(cubicle_workspace_key_revoke(client, workspace_id, key.key_id) ==
+           CUBICLE_OK);
+
+    const char *started_argv[] = {
+        "sh",
+        "-c",
+        "trap 'echo gotusr1' USR1; while true; do sleep 1; done",
+    };
+    cubicle_process_start_options_t start_options;
+    memset(&start_options, 0, sizeof(start_options));
+    start_options.workspace_id = workspace_id;
+    start_options.friendly_name = "api-started";
+    start_options.mode = CUBICLE_PROCESS_STREAM;
+    start_options.stdin_policy = CUBICLE_STDIN_EOF;
+    start_options.argv = started_argv;
+    start_options.argc = sizeof(started_argv) / sizeof(started_argv[0]);
+    cubicle_process_info_t started;
+    memset(&started, 0, sizeof(started));
+    // Endpoint test for process.start
+    assert(cubicle_process_start(client, &start_options, &started) ==
+           CUBICLE_OK);
+    assert(strcmp(started.friendly_name, "api-started") == 0);
+
+    // Endpoint test for process.signal
+    assert(cubicle_process_signal(client, started.id, SIGUSR1) ==
+           CUBICLE_OK);
+
+    // Endpoint test for process.terminate
+    assert(cubicle_process_terminate(client, started.id, NULL) ==
+           CUBICLE_OK);
+
     cubicle_process_info_t process;
     memset(&process, 0, sizeof(process));
     // Endpoint test for process.get by process ID
@@ -357,7 +410,7 @@ int main(void)
     // Endpoint test for process.list
     assert(cubicle_process_list(client, &filter, &processes,
                                 &process_count, NULL) == CUBICLE_OK);
-    assert(process_count == 1);
+    assert(process_count == 2);
     cubicle_process_list_free(processes);
 
     cubicle_output_chunk_t chunk;

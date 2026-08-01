@@ -221,6 +221,7 @@ add_test(
     NAME cubicle-libcubicle-real-manager-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/libcubicle_real_manager_test.sh
 )

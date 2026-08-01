@@ -2,9 +2,11 @@
 
 #include "cubicle/log.h"
 #include "cubicle/manager_registry.h"
+#include "cubicle/attachment.h"
 #include "cubicle/process.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
+#include "cubicle/workspace.h"
 
 #include "../common/rpc_internal.h"
 
@@ -35,7 +37,19 @@ typedef struct manager_state {
     char controller_bin[PATH_MAX];
 } manager_state_t;
 
+typedef struct workspace_key_record {
+    char workspace_id[CUBICLE_ID_STRING_LENGTH];
+    char key_id[CUBICLE_ID_STRING_LENGTH];
+    char fingerprint[CUBICLE_NAME_MAX];
+    char label[CUBICLE_KEY_LABEL_MAX];
+    cubicle_capability_mask_t capabilities;
+    uint64_t created_at_ms;
+    uint64_t revoked_at_ms;
+    char public_key_hex[512];
+} workspace_key_record_t;
+
 #define CUBICLE_API_MAX_FRAME 65536
+#define CUBICLE_MANAGER_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_API_CAPABILITIES \
     (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
      CUBICLE_PROTOCOL_CAP_PROCESS_TTY | CUBICLE_PROTOCOL_CAP_ATTACHMENT_DIRECT)
@@ -622,6 +636,212 @@ static int process_conflict_exists(const manager_state_t *state,
 
     fclose(file);
     return 0;
+}
+
+static int parse_workspace_key_record(const char *line,
+                                      workspace_key_record_t *record)
+{
+    char copy[1024];
+    int length = snprintf(copy, sizeof(copy), "%s", line);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        return -1;
+    }
+
+    char *fields[8];
+    char *cursor = copy;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        fields[i] = cursor;
+        char *separator = strpbrk(cursor, "\t\n");
+        if (separator == NULL && i + 1 < sizeof(fields) / sizeof(fields[0])) {
+            return -1;
+        }
+        if (separator != NULL) {
+            *separator = '\0';
+            cursor = separator + 1;
+        }
+    }
+
+    memset(record, 0, sizeof(*record));
+    snprintf(record->workspace_id, sizeof(record->workspace_id), "%s",
+             fields[0]);
+    snprintf(record->key_id, sizeof(record->key_id), "%s", fields[1]);
+    snprintf(record->fingerprint, sizeof(record->fingerprint), "%s",
+             fields[2]);
+    snprintf(record->label, sizeof(record->label), "%s", fields[3]);
+    record->capabilities = (cubicle_capability_mask_t)strtoull(fields[4],
+                                                               NULL, 10);
+    record->created_at_ms = strtoull(fields[5], NULL, 10);
+    record->revoked_at_ms = strtoull(fields[6], NULL, 10);
+    snprintf(record->public_key_hex, sizeof(record->public_key_hex), "%s",
+             fields[7]);
+    return record->workspace_id[0] != '\0' && record->key_id[0] != '\0'
+               ? 0
+               : -1;
+}
+
+static int write_workspace_key_record(FILE *file,
+                                      const workspace_key_record_t *record)
+{
+    return fprintf(file, "%s\t%s\t%s\t%s\t%llu\t%llu\t%llu\t%s\n",
+                   record->workspace_id, record->key_id, record->fingerprint,
+                   record->label, (unsigned long long)record->capabilities,
+                   (unsigned long long)record->created_at_ms,
+                   (unsigned long long)record->revoked_at_ms,
+                   record->public_key_hex) < 0
+               ? -1
+               : 0;
+}
+
+static int workspace_key_info_json(const workspace_key_record_t *record,
+                                   char *buffer,
+                                   size_t buffer_size)
+{
+    char escaped_fingerprint[CUBICLE_NAME_MAX * 2];
+    char escaped_label[CUBICLE_KEY_LABEL_MAX * 2];
+    if (cubicle_json_escape(escaped_fingerprint, sizeof(escaped_fingerprint),
+                            record->fingerprint) < 0 ||
+        cubicle_json_escape(escaped_label, sizeof(escaped_label),
+                            record->label) < 0) {
+        return -1;
+    }
+
+    int length = snprintf(buffer, buffer_size,
+                          "{\"key_id\":\"%s\",\"fingerprint\":\"%s\",\"label\":\"%s\",\"capabilities\":%llu,\"created_at_ms\":%llu,\"revoked_at_ms\":%llu}",
+                          record->key_id, escaped_fingerprint, escaped_label,
+                          (unsigned long long)record->capabilities,
+                          (unsigned long long)record->created_at_ms,
+                          (unsigned long long)record->revoked_at_ms);
+    if (length < 0 || (size_t)length >= buffer_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+static int update_workspace_key_revocation(const manager_state_t *state,
+                                           const char *workspace_id,
+                                           const char *key_id,
+                                           uint64_t revoked_at_ms,
+                                           int *found)
+{
+    *found = 0;
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "workspace-keys.tsv") < 0) {
+        return -1;
+    }
+    int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *input = fopen(path, "r");
+    FILE *output = fopen(temp_path, "w");
+    if (output == NULL) {
+        if (input != NULL) {
+            fclose(input);
+        }
+        return -1;
+    }
+    if (input != NULL) {
+        char line[1024];
+        while (fgets(line, sizeof(line), input) != NULL) {
+            workspace_key_record_t record;
+            if (parse_workspace_key_record(line, &record) == 0) {
+                if (strcmp(record.workspace_id, workspace_id) == 0 &&
+                    strcmp(record.key_id, key_id) == 0) {
+                    record.revoked_at_ms = revoked_at_ms;
+                    *found = 1;
+                }
+                if (write_workspace_key_record(output, &record) < 0) {
+                    fclose(input);
+                    fclose(output);
+                    return -1;
+                }
+            }
+        }
+        fclose(input);
+    }
+    if (fclose(output) != 0) {
+        return -1;
+    }
+    return rename(temp_path, path);
+}
+
+static int controller_line_request(const char *socket_path,
+                                   const char *command,
+                                   char *response,
+                                   size_t response_size)
+{
+    if (response == NULL || response_size == 0 ||
+        strlen(socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    response[0] = '\0';
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (cubicle_write_all(fd, command, strlen(command)) < 0 ||
+        cubicle_write_all(fd, "\n", 1) < 0 ||
+        shutdown(fd, SHUT_WR) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    size_t used = 0;
+    while (used + 1 < response_size) {
+        ssize_t nread = read(fd, response + used, response_size - used - 1);
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        used += (size_t)nread;
+    }
+    response[used] = '\0';
+    close(fd);
+    return strncmp(response, "ok", 2) == 0 ? 0 : -1;
+}
+
+static int signal_controller(const cubicle_process_record_t *process,
+                             int signal_number)
+{
+    char command[64];
+    int length = snprintf(command, sizeof(command), "signal %d",
+                          signal_number);
+    if (length < 0 || (size_t)length >= sizeof(command)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char response[256];
+    return controller_line_request(process->control_socket, command, response,
+                                   sizeof(response));
+}
+
+static int terminate_controller(const cubicle_process_record_t *process)
+{
+    char response[256];
+    return controller_line_request(process->control_socket, "terminate",
+                                   response, sizeof(response));
 }
 
 static int command_workspace_create(const manager_state_t *state, const char *name)
@@ -2036,6 +2256,458 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 "process list response too large", false, 0));
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "process.start") == 0) {
+        char workspace_ref[128];
+        char friendly_name[128];
+        char mode[32];
+        char stdin_policy[32] = "open";
+        yyjson_val *argv_array = NULL;
+        cubicle_validation_error_t validation_error;
+        int has_friendly_name = 0;
+        int has_stdin_policy = 0;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "friendly_name",
+                                             friendly_name,
+                                             sizeof(friendly_name),
+                                             &has_friendly_name,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "mode", mode,
+                                             sizeof(mode),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "stdin_policy",
+                                             stdin_policy,
+                                             sizeof(stdin_policy),
+                                             &has_stdin_policy,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_array(params, "argv", &argv_array,
+                                            &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid process start request",
+                                             false, 0));
+        }
+        (void)has_stdin_policy;
+        size_t argc = cubicle_json_array_size(argv_array);
+        if (argc == 0 || argc > CUBICLE_JSON_MAX_ARGC ||
+            validate_field(workspace_ref, "workspace") < 0 ||
+            validate_field(mode, "mode") < 0 ||
+            (!has_friendly_name &&
+             cubicle_generate_hex_id(friendly_name, sizeof(friendly_name)) < 0) ||
+            validate_field(friendly_name, "friendly name") < 0 ||
+            (strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_STREAM)) != 0 &&
+             strcmp(mode, cubicle_process_mode_name(CUBICLE_PROCESS_TTY)) != 0) ||
+            (strcmp(stdin_policy, "open") != 0 &&
+             strcmp(stdin_policy, "eof") != 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid process start request",
+                                             false, 0));
+        }
+
+        char **command_argv = calloc(argc + 1, sizeof(*command_argv));
+        if (command_argv == NULL) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate argv",
+                                             false, ENOMEM));
+        }
+        for (size_t i = 0; i < argc; ++i) {
+            yyjson_val *item = cubicle_json_array_get(argv_array, i);
+            if (!yyjson_is_str(item) ||
+                yyjson_get_len(item) == 0 ||
+                yyjson_get_len(item) >= PATH_MAX) {
+                free(command_argv);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_INVALID_ARGUMENT,
+                                                 "invalid process argv",
+                                                 false, 0));
+            }
+            command_argv[i] = (char *)(void *)yyjson_get_str(item);
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+
+        char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
+        if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate process id",
+                                             false, saved_errno));
+        }
+
+        int process_id_conflict = 0;
+        int friendly_name_conflict = 0;
+        if (process_conflict_exists(state, workspace.id, process_id,
+                                    friendly_name, &process_id_conflict,
+                                    &friendly_name_conflict) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to check process conflicts",
+                                             true, saved_errno));
+        }
+        if (friendly_name_conflict) {
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_ALREADY_EXISTS,
+                                             "process friendly name already exists",
+                                             false, 0));
+        }
+
+        char controller_state[PATH_MAX];
+        char control_socket[PATH_MAX];
+        char metadata_path[PATH_MAX];
+        int path_result = snprintf(metadata_path, sizeof(metadata_path),
+                                   "%s/controllers/%s/metadata",
+                                   state->dir, process_id);
+        if (controller_state_path(controller_state, state, process_id) < 0 ||
+            controller_socket_path(control_socket, state, process_id) < 0 ||
+            path_result < 0 ||
+            (size_t)path_result >= sizeof(metadata_path)) {
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "controller path too long",
+                                             false, 0));
+        }
+
+        char process_state[32];
+        if (launch_controller(state, controller_state, control_socket, mode,
+                              stdin_policy, command_argv) < 0 ||
+            wait_for_controller_ready(control_socket, metadata_path,
+                                      process_state,
+                                      sizeof(process_state)) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to start controller",
+                                             false, saved_errno));
+        }
+        free(command_argv);
+
+        char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
+        if (read_metadata_field(metadata_path, "controller_id",
+                                controller_id,
+                                sizeof(controller_id)) < 0 ||
+            append_process_record(state, process_id, workspace.id,
+                                  friendly_name, mode, process_state,
+                                  controller_id, control_socket) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to persist process",
+                                             true, saved_errno));
+        }
+        unlock_state(lock_fd);
+
+        cubicle_process_record_t process;
+        snprintf(process.process_id, sizeof(process.process_id), "%s",
+                 process_id);
+        snprintf(process.workspace_id, sizeof(process.workspace_id), "%s",
+                 workspace.id);
+        snprintf(process.friendly_name, sizeof(process.friendly_name), "%s",
+                 friendly_name);
+        snprintf(process.mode, sizeof(process.mode), "%s", mode);
+        snprintf(process.state, sizeof(process.state), "%s", process_state);
+        snprintf(process.controller_id, sizeof(process.controller_id), "%s",
+                 controller_id);
+        snprintf(process.control_socket, sizeof(process.control_socket), "%s",
+                 control_socket);
+
+        char result[2048];
+        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode process",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "process.signal") == 0 ||
+        strcmp(method, "process.terminate") == 0) {
+        char process_id[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id", process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing process id", false,
+                                             0));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        int action_result = 0;
+        if (strcmp(method, "process.signal") == 0) {
+            uint64_t signal_number = 0;
+            if (cubicle_json_get_required_u64(params, "signal_number",
+                                              &signal_number,
+                                              &validation_error) < 0 ||
+                signal_number == 0 ||
+                signal_number >= CUBICLE_MANAGER_MAX_SIGNAL_NUMBER) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_INVALID_ARGUMENT,
+                                                 "invalid signal number",
+                                                 false, 0));
+            }
+            action_result = signal_controller(&process, (int)signal_number);
+        } else {
+            action_result = terminate_controller(&process);
+        }
+
+        if (action_result < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_CONTROLLER_UNAVAILABLE,
+                                             "controller request failed",
+                                             true, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "workspace.key.add") == 0) {
+        char workspace_ref[128];
+        char public_key_hex[512];
+        char label[CUBICLE_KEY_LABEL_MAX] = "";
+        uint64_t capabilities = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "public_key",
+                                             public_key_hex,
+                                             sizeof(public_key_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "label", label,
+                                             sizeof(label), NULL,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "capabilities",
+                                          &capabilities,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key add request",
+                                             false, 0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+
+        workspace_key_record_t record;
+        memset(&record, 0, sizeof(record));
+        snprintf(record.workspace_id, sizeof(record.workspace_id), "%s",
+                 workspace.id);
+        if (cubicle_generate_hex_id(record.key_id, sizeof(record.key_id)) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate key id",
+                                             false, saved_errno));
+        }
+        snprintf(record.public_key_hex, sizeof(record.public_key_hex), "%s",
+                 public_key_hex);
+        snprintf(record.fingerprint, sizeof(record.fingerprint), "%.32s",
+                 public_key_hex);
+        snprintf(record.label, sizeof(record.label), "%s", label);
+        record.capabilities = (cubicle_capability_mask_t)capabilities;
+        record.created_at_ms = now_ms;
+        record.revoked_at_ms = 0;
+
+        char line[1024];
+        int line_length = snprintf(
+            line, sizeof(line), "%s\t%s\t%s\t%s\t%llu\t%llu\t%llu\t%s\n",
+            record.workspace_id, record.key_id, record.fingerprint,
+            record.label, (unsigned long long)record.capabilities,
+            (unsigned long long)record.created_at_ms,
+            (unsigned long long)record.revoked_at_ms,
+            record.public_key_hex);
+        if (line_length < 0 || (size_t)line_length >= sizeof(line) ||
+            append_line(state, "workspace-keys.tsv", line) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to persist key",
+                                             true, saved_errno));
+        }
+        unlock_state(lock_fd);
+
+        char result[1024];
+        if (workspace_key_info_json(&record, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode key",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.key.list") == 0) {
+        char workspace_ref[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing workspace id", false,
+                                             0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+
+        FILE *file = open_state_file_for_read(state, "workspace-keys.tsv");
+        char result[8192];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result), "{\"keys\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            MANAGER_RETURN(-1);
+        }
+        used = (size_t)written;
+        size_t count = 0;
+        if (file != NULL) {
+            char line[1024];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                workspace_key_record_t record;
+                char item[1024];
+                if (parse_workspace_key_record(line, &record) != 0 ||
+                    strcmp(record.workspace_id, workspace.id) != 0 ||
+                    workspace_key_info_json(&record, item,
+                                            sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "key list response too large", false, 0));
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+        written = snprintf(result + used, sizeof(result) - used, "]}");
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "key list response too large", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.key.revoke") == 0) {
+        char workspace_ref[128];
+        char key_id[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "key_id", key_id,
+                                             sizeof(key_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key revoke request",
+                                             false, 0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        if (update_workspace_key_revocation(state, workspace.id, key_id,
+                                            now_ms, &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to revoke key", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        if (!found) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "key not found", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
     if (strcmp(method, "events.list") == 0) {
