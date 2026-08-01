@@ -6,10 +6,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 add_library(cubicle_client STATIC
+    ../src/client/attachment.c
+    ../src/client/auth.c
     ../src/client/client.c
+    ../src/client/decode.c
     ../src/client/error.c
+    ../src/client/events.c
+    ../src/client/process.c
+    ../src/client/rpc_client.c
     ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
+    ../src/client/workspace.c
     ../src/common/process.c
     ../src/common/rpc.c
 )
