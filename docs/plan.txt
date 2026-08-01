@@ -205,6 +205,19 @@
   - added endpoint parsing for initial Unix socket endpoints
   - added a reusable Python API test client for framed JSON RPC over Unix sockets
   - refactored the manager daemon E2E test to use the shared API client
+  - added a production libcubicle-to-real-manager Unix socket E2E test
+  - real manager E2E currently tests:
+    - manager.ping
+    - manager.status
+    - workspace.create
+    - workspace.get
+    - workspace.list
+    - process.get by process ID
+    - process.get by workspace-local friendly name
+    - process.list
+    - process.read_output
+    - events.list
+    - manager.shutdown
 - Added the initial persistent manager daemon lifecycle:
   - daemon command runs a long-lived foreground manager process
   - Unix socket lifecycle supports ping, status, and shutdown

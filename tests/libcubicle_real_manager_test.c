@@ -228,11 +228,13 @@ int main(void)
 
     cubicle_manager_ping_result_t ping;
     memset(&ping, 0, sizeof(ping));
+    // Endpoint test for manager.ping
     assert(cubicle_manager_ping(client, &ping) == CUBICLE_OK);
     assert(strcmp(ping.manager_id, "") != 0);
 
     cubicle_manager_status_t status;
     memset(&status, 0, sizeof(status));
+    // Endpoint test for manager.status
     assert(cubicle_manager_status(client, &status) == CUBICLE_OK);
     assert(status.workspace_count == 1);
     assert(status.process_count == 1);
@@ -242,17 +244,20 @@ int main(void)
     create.name = "Project B";
     cubicle_workspace_info_t workspace;
     memset(&workspace, 0, sizeof(workspace));
+    // Endpoint test for workspace.create
     assert(cubicle_workspace_create(client, &create, &workspace) ==
            CUBICLE_OK);
     assert(strcmp(workspace.name, "Project B") == 0);
 
     memset(&workspace, 0, sizeof(workspace));
+    // Endpoint test for workspace.get
     assert(cubicle_workspace_get(client, "Project B", &workspace) ==
            CUBICLE_OK);
     assert(strcmp(workspace.name, "Project B") == 0);
 
     cubicle_workspace_info_t *workspaces = NULL;
     size_t workspace_count = 0;
+    // Endpoint test for workspace.list
     assert(cubicle_workspace_list(client, NULL, &workspaces,
                                   &workspace_count, NULL) == CUBICLE_OK);
     assert(workspace_count == 2);
@@ -260,11 +265,13 @@ int main(void)
 
     cubicle_process_info_t process;
     memset(&process, 0, sizeof(process));
+    // Endpoint test for process.get by process ID
     assert(cubicle_process_get(client, process_id, NULL, &process) ==
            CUBICLE_OK);
     assert(strcmp(process.id, process_id) == 0);
 
     memset(&process, 0, sizeof(process));
+    // Endpoint test for process.get by workspace-local friendly name
     assert(cubicle_process_get(client, "daemon-1", workspace_id, &process) ==
            CUBICLE_OK);
     assert(strcmp(process.id, process_id) == 0);
@@ -274,6 +281,7 @@ int main(void)
     cubicle_process_filter_t filter;
     memset(&filter, 0, sizeof(filter));
     filter.workspace_id = workspace_id;
+    // Endpoint test for process.list
     assert(cubicle_process_list(client, &filter, &processes,
                                 &process_count, NULL) == CUBICLE_OK);
     assert(process_count == 1);
@@ -281,6 +289,7 @@ int main(void)
 
     cubicle_output_chunk_t chunk;
     memset(&chunk, 0, sizeof(chunk));
+    // Endpoint test for process.read_output
     assert(cubicle_process_read_output(client, process_id,
                                        CUBICLE_STREAM_STDOUT, 0, 16,
                                        &chunk) == CUBICLE_OK);
@@ -297,6 +306,7 @@ int main(void)
     cubicle_event_t *events = NULL;
     size_t event_count = 0;
     for (int i = 0; i < 100; ++i) {
+        // Endpoint test for events.list
         if (cubicle_events_list(client, &query, &events, &event_count) ==
                 CUBICLE_OK &&
             event_count == 3) {
@@ -311,6 +321,7 @@ int main(void)
     assert(event_count == 3);
     cubicle_events_free(events);
 
+    // Endpoint test for manager.shutdown
     assert(cubicle_manager_shutdown(client, false) == CUBICLE_OK);
     cubicle_client_disconnect(client);
 
