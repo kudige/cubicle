@@ -391,6 +391,10 @@
   - unreachable controllers without exit evidence are persisted as lost
   - responsive controllers remain live
   - manager.reconcile exposes the same persistence pass through the API
+- Added cube follow modes:
+  - cube logs --follow tails retained stdout/stderr or TTY output until process completion
+  - cube events --follow polls manager events until interrupted
+  - cube events --follow --iterations N provides bounded follow mode for tests and scripts
 
 ## Next
 
@@ -398,7 +402,6 @@
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
    - Add foreground cube run attach behavior through manager-issued attachment grants.
    - Harden post-exit connect draining through manager-retained output fallback.
-   - Add follow mode for logs and events through manager APIs.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.
 

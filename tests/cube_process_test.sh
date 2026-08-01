@@ -333,25 +333,41 @@ if [ "$status" -ne 2 ]; then
 fi
 grep -q 'term mode is not implemented yet' "$tmpdir/run-term.err"
 
-set +e
-cube logs --follow build >"$tmpdir/logs-follow.out" 2>"$tmpdir/logs-follow.err"
-status=$?
-set -e
-if [ "$status" -ne 2 ]; then
-    echo "cube logs --follow should exit 2, got $status" >&2
-    exit 1
-fi
-grep -q 'logs --follow is not implemented yet' "$tmpdir/logs-follow.err"
+follow_logs_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name follow-logs -- sh -c \
+    'printf "follow-out-1\n"; printf "follow-err-1\n" >&2; sleep 0.2; printf "follow-out-2\n"; printf "follow-err-2\n" >&2' |
+    json_id)
+cube logs --follow follow-logs \
+    >"$tmpdir/logs-follow.out" 2>"$tmpdir/logs-follow.err"
+grep -q '^follow-out-1$' "$tmpdir/logs-follow.out"
+grep -q '^follow-out-2$' "$tmpdir/logs-follow.out"
+grep -q '^follow-err-1$' "$tmpdir/logs-follow.err"
+grep -q '^follow-err-2$' "$tmpdir/logs-follow.err"
+api process-wait "$follow_logs_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove follow-logs >/dev/null
 
-set +e
-cube events --follow >"$tmpdir/events-follow.out" 2>"$tmpdir/events-follow.err"
-status=$?
-set -e
-if [ "$status" -ne 2 ]; then
-    echo "cube events --follow should exit 2, got $status" >&2
+follow_workspace_id=$(api workspace-create "Follow Workspace" | json_id)
+cube --workspace "Follow Workspace" events --follow --iterations 200 \
+    >"$tmpdir/events-follow.out" 2>"$tmpdir/events-follow.err" &
+events_follow_pid=$!
+for _ in $(seq 1 100); do
+    if grep -q '^SEQ	PROCESS	TYPE	PAYLOAD$' "$tmpdir/events-follow.out"; then
+        break
+    fi
+    sleep 0.05
+done
+follow_events_process_id=$(api process-start --workspace "$follow_workspace_id" \
+    --friendly-name follow-events /bin/true | json_id)
+api process-wait "$follow_events_process_id" --timeout-ms 2000 | grep -q '"success":true'
+wait "$events_follow_pid"
+if ! grep -q "$follow_events_process_id" "$tmpdir/events-follow.out" ||
+    ! grep -q 'process_exited' "$tmpdir/events-follow.out"; then
+    echo "cube events --follow did not observe the test process" >&2
+    cat "$tmpdir/events-follow.out" >&2
     exit 1
 fi
-grep -q 'events --follow is not implemented yet' "$tmpdir/events-follow.err"
+cube --workspace "Follow Workspace" remove follow-events >/dev/null
+cube workspace delete "Follow Workspace" >/dev/null
 
 set +e
 cube run >"$tmpdir/run-missing.out" 2>"$tmpdir/run-missing.err"
