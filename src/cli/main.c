@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
@@ -174,10 +175,10 @@ static int command_requires_manager(const char *command)
            strcmp(command, "defaults") == 0;
 }
 
-static const char *resolve_manager_socket(const cube_options_t *options,
-                                          const cubicle_config_t *config,
-                                          char *configured_socket,
-                                          size_t configured_socket_size)
+static const char *resolve_manager_endpoint(const cube_options_t *options,
+                                            const cubicle_config_t *config,
+                                            char *configured_endpoint,
+                                            size_t configured_endpoint_size)
 {
     if (options->manager_socket != NULL &&
         options->manager_socket[0] != '\0') {
@@ -187,12 +188,12 @@ static const char *resolve_manager_socket(const cube_options_t *options,
     if (environment != NULL && environment[0] != '\0') {
         return environment;
     }
-    if (cubicle_config_unix_uri_path(config->client_manager_uri,
-                                     configured_socket,
-                                     configured_socket_size) < 0) {
+    int result = snprintf(configured_endpoint, configured_endpoint_size, "%s",
+                          config->client_manager_uri);
+    if (result < 0 || (size_t)result >= configured_endpoint_size) {
         return NULL;
     }
-    return configured_socket;
+    return configured_endpoint;
 }
 
 static int command_config(const cubicle_config_t *config,
@@ -292,8 +293,161 @@ static int read_all(int fd, void *buffer, size_t length)
     return 0;
 }
 
+static int split_tcp_endpoint(const char *endpoint, char *host,
+                              size_t host_size, char *port,
+                              size_t port_size)
+{
+    const char prefix[] = "tcp://";
+    if (strncmp(endpoint, prefix, strlen(prefix)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *authority = endpoint + strlen(prefix);
+    const char *port_start = NULL;
+    size_t host_length = 0;
+    if (authority[0] == '[') {
+        const char *end = strchr(authority, ']');
+        if (end == NULL || end[1] != ':') {
+            errno = EINVAL;
+            return -1;
+        }
+        host_length = (size_t)(end - authority - 1);
+        authority += 1;
+        port_start = end + 2;
+    } else {
+        const char *colon = strrchr(authority, ':');
+        if (colon == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        host_length = (size_t)(colon - authority);
+        port_start = colon + 1;
+    }
+    if (host_length == 0 || port_start == NULL || port_start[0] == '\0' ||
+        host_length >= host_size || strlen(port_start) >= port_size) {
+        errno = EINVAL;
+        return -1;
+    }
+    memcpy(host, authority, host_length);
+    host[host_length] = '\0';
+    snprintf(port, port_size, "%s", port_start);
+    return 0;
+}
+
+static int connect_unix_endpoint(const char *peer_name,
+                                 const char *endpoint,
+                                 cube_rpc_response_t *response)
+{
+    const char *socket_path = endpoint;
+    if (strncmp(endpoint, "unix://", 7) == 0) {
+        socket_path = endpoint + 7;
+    }
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    if (strlen(socket_path) >= sizeof(address.sun_path)) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "%s socket path is too long", peer_name);
+        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
+        return -1;
+    }
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to create socket");
+        response->code = CUBICLE_ERR_IO;
+        return -1;
+    }
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to connect to %s", peer_name);
+        response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
+        return -1;
+    }
+    return fd;
+}
+
+static int connect_tcp_endpoint(const char *endpoint,
+                                cube_rpc_response_t *response)
+{
+    char host[256];
+    char port[32];
+    if (split_tcp_endpoint(endpoint, host, sizeof(host), port,
+                           sizeof(port)) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "invalid manager TCP endpoint");
+        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
+        return -1;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = AF_UNSPEC;
+
+    struct addrinfo *addresses = NULL;
+    int gai_result = getaddrinfo(host, port, &hints, &addresses);
+    if (gai_result != 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to resolve manager TCP endpoint");
+        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
+        return -1;
+    }
+
+    int fd = -1;
+    int saved_errno = ECONNREFUSED;
+    for (struct addrinfo *address = addresses; address != NULL;
+         address = address->ai_next) {
+        fd = socket(address->ai_family, address->ai_socktype,
+                    address->ai_protocol);
+        if (fd < 0) {
+            saved_errno = errno;
+            continue;
+        }
+        if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
+            break;
+        }
+        saved_errno = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(addresses);
+
+    if (fd < 0) {
+        errno = saved_errno;
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to connect to manager");
+        response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
+    }
+    return fd;
+}
+
+static int connect_rpc_endpoint(const char *peer_name,
+                                const char *endpoint,
+                                cube_rpc_response_t *response)
+{
+    if (strncmp(endpoint, "tcp://", 6) == 0) {
+        return connect_tcp_endpoint(endpoint, response);
+    }
+    if (strncmp(endpoint, "unix://", 7) == 0 || endpoint[0] == '/') {
+        return connect_unix_endpoint(peer_name, endpoint, response);
+    }
+
+    snprintf(response->error_message, sizeof(response->error_message),
+             "%s endpoint must be a Unix path, unix:// URI, or tcp:// URI",
+             peer_name);
+    response->code = CUBICLE_ERR_INVALID_ARGUMENT;
+    return -1;
+}
+
 static int call_rpc_peer(const char *peer_name,
-                         const char *socket_path,
+                         const char *endpoint,
                          const char *method,
                          const char *params,
                          cube_rpc_response_t *response)
@@ -309,32 +463,8 @@ static int call_rpc_peer(const char *peer_name,
         return -1;
     }
 
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = connect_rpc_endpoint(peer_name, endpoint, response);
     if (fd < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to create socket");
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    if (strlen(socket_path) >= sizeof(address.sun_path)) {
-        close(fd);
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "%s socket path is too long", peer_name);
-        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
-        return -1;
-    }
-    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to connect to %s", peer_name);
-        response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
         return -1;
     }
 
@@ -358,7 +488,7 @@ static int call_rpc_peer(const char *peer_name,
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to read %s response from %s: %s",
-                 peer_name, socket_path, strerror(saved_errno));
+                 peer_name, endpoint, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -384,7 +514,7 @@ static int call_rpc_peer(const char *peer_name,
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to read %s response from %s: %s",
-                 peer_name, socket_path, strerror(saved_errno));
+                 peer_name, endpoint, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -2464,29 +2594,28 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    char configured_socket[PATH_MAX];
-    const char *manager_socket = resolve_manager_socket(&options, &config,
-                                                        configured_socket,
-                                                        sizeof(configured_socket));
-    if (manager_socket == NULL) {
-        fprintf(stderr, "cube: manager socket is not configured\n");
+    char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
+    const char *manager_endpoint = resolve_manager_endpoint(
+        &options, &config, configured_endpoint, sizeof(configured_endpoint));
+    if (manager_endpoint == NULL) {
+        fprintf(stderr, "cube: manager endpoint is not configured\n");
         fprintf(stderr,
                 "hint: pass --manager-socket PATH, set CUBICLE_MANAGER_SOCKET, or configure client.manager\n");
         return 2;
     }
 
     if (strcmp(command, "workspace") == 0) {
-        return command_workspace(manager_socket, &options, argc, argv,
+        return command_workspace(manager_endpoint, &options, argc, argv,
                                  command_index);
     }
 
     if (strcmp(command, "run") == 0) {
-        return process_run(manager_socket, &options, &config, argc, argv,
+        return process_run(manager_endpoint, &options, &config, argc, argv,
                            command_index);
     }
 
     if (strcmp(command, "ps") == 0) {
-        return process_list(manager_socket, &options);
+        return process_list(manager_endpoint, &options);
     }
 
     if (strcmp(command, "cleanup") == 0) {
@@ -2494,7 +2623,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: cleanup does not take arguments\n");
             return 2;
         }
-        return process_cleanup(manager_socket, &options);
+        return process_cleanup(manager_endpoint, &options);
     }
 
     if (strcmp(command, "inspect") == 0) {
@@ -2502,22 +2631,22 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: inspect requires a process name\n");
             return 2;
         }
-        return process_inspect(manager_socket, &options,
+        return process_inspect(manager_endpoint, &options,
                                argv[command_index + 1]);
     }
 
     if (strcmp(command, "logs") == 0) {
-        return process_logs(manager_socket, &options, argc, argv,
+        return process_logs(manager_endpoint, &options, argc, argv,
                             command_index);
     }
 
     if (strcmp(command, "connect") == 0) {
-        return process_connect(manager_socket, &options, argc, argv,
+        return process_connect(manager_endpoint, &options, argc, argv,
                                command_index);
     }
 
     if (strcmp(command, "events") == 0) {
-        return process_events(manager_socket, &options, argc, argv,
+        return process_events(manager_endpoint, &options, argc, argv,
                               command_index);
     }
 
@@ -2532,7 +2661,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: invalid signal\n");
             return 2;
         }
-        return process_lifecycle_action(manager_socket, &options,
+        return process_lifecycle_action(manager_endpoint, &options,
                                         argv[command_index + 1],
                                         "process.signal", "signaled",
                                         signal_number);
@@ -2543,7 +2672,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: stop requires a process name\n");
             return 2;
         }
-        return process_lifecycle_action(manager_socket, &options,
+        return process_lifecycle_action(manager_endpoint, &options,
                                         argv[command_index + 1],
                                         "process.terminate", "stopped", 0);
     }
@@ -2553,7 +2682,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: kill requires a process name\n");
             return 2;
         }
-        return process_lifecycle_action(manager_socket, &options,
+        return process_lifecycle_action(manager_endpoint, &options,
                                         argv[command_index + 1],
                                         "process.kill", "killed", 0);
     }
@@ -2563,7 +2692,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: remove requires a process name\n");
             return 2;
         }
-        return process_lifecycle_action(manager_socket, &options,
+        return process_lifecycle_action(manager_endpoint, &options,
                                         argv[command_index + 1],
                                         "process.remove", "removed", 0);
     }

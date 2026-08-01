@@ -22,11 +22,34 @@ def read_exact(sock, byte_count):
     return data
 
 
-def send_request(socket_path, request, timeout):
-    payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+def connect_endpoint(endpoint, timeout):
+    if endpoint.startswith("tcp://"):
+        authority = endpoint[len("tcp://"):]
+        if authority.startswith("["):
+            host, separator, port_text = authority[1:].partition("]:")
+            if separator == "":
+                raise ValueError("tcp endpoint must use tcp://host:port")
+        else:
+            host, separator, port_text = authority.rpartition(":")
+            if separator == "":
+                raise ValueError("tcp endpoint must use tcp://host:port")
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client.settimeout(timeout)
-        client.connect(socket_path)
+        client.connect((host, int(port_text)))
+        return client
+
+    socket_path = endpoint
+    if endpoint.startswith("unix://"):
+        socket_path = endpoint[len("unix://"):]
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout)
+    client.connect(socket_path)
+    return client
+
+
+def send_request(endpoint, request, timeout):
+    payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
+    with connect_endpoint(endpoint, timeout) as client:
         client.sendall(struct.pack("!I", len(payload)) + payload)
         header = read_exact(client, 4)
         length = struct.unpack("!I", header)[0]
@@ -53,7 +76,7 @@ def call_api(args, method, params):
         "method": method,
         "params": params,
     }
-    response = send_request(args.socket_path, request, args.timeout)
+    response = send_request(args.endpoint, request, args.timeout)
     if args.raw:
         print(json.dumps(response, separators=(",", ":"), sort_keys=True))
     else:
@@ -234,8 +257,9 @@ def params_for_command(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Send Cubicle API requests over a Unix socket.")
-    parser.add_argument("socket_path")
+        description="Send Cubicle API requests over a Unix or TCP endpoint.")
+    parser.add_argument("endpoint",
+                        help="Unix socket path, unix:///path, or tcp://host:port")
     parser.add_argument("--allow-error", action="store_true",
                         help="exit successfully for API error responses")
     parser.add_argument("--raw", action="store_true",

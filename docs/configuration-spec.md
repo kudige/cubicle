@@ -207,14 +207,19 @@ Required semantic keys:
 
 - `state_dir`: persistent manager and process state.
 - `runtime_dir`: ephemeral sockets and runtime files.
-- `listen`: manager listener endpoint URI.
+- `listen`: manager listener endpoint URI. Initial production deployments should
+  use `unix://`; `tcp://host:port` is supported only when the daemon is started
+  with an explicit insecure opt-in.
 - `controller_binary`: absolute path to the controller executable.
 
 Optional initial key:
 
 - `log_dir`: persistent log directory when file logging is enabled.
 
-Future versions may allow repeated `listen` entries for local and remote listeners.
+Future versions may allow repeated `listen` entries for local and remote
+listeners. Until authenticated remote transport is implemented, TCP listeners
+are unauthenticated and must require an explicit `--allow-insecure` daemon
+option.
 
 ### 5.3 `[client]`
 
@@ -227,6 +232,8 @@ server_identity=
 Keys:
 
 - `manager`: default manager endpoint URI used by `cube` and `libcubicle` clients.
+  `tcp://host:port` endpoints are valid only for explicitly insecure
+  deployments until authenticated transport is implemented.
 - `server_identity`: expected remote manager identity or certificate/key reference.
 
 For local Unix endpoints, `server_identity` may be empty only when trust is established through an approved local trust policy.

@@ -110,9 +110,35 @@ static void test_invalid_values(void)
 
     write_file(path,
                "[client]\n"
-               "manager=tcp://127.0.0.1:1234\n");
+               "manager=relative.sock\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "client.manager") != NULL);
+
+    write_file(path,
+               "[manager]\n"
+               "listen=tcp://127.0.0.1\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "manager.listen") != NULL);
+    assert(unsetenv("CUBICLE_CONFIG") == 0);
+}
+
+static void test_tcp_endpoints(void)
+{
+    char path[CUBICLE_PATH_MAX];
+    temp_path(path, sizeof(path), "tcp.cfg");
+    write_file(path,
+               "[manager]\n"
+               "listen=tcp://127.0.0.1:7777\n"
+               "\n"
+               "[client]\n"
+               "manager=tcp://127.0.0.1:7777\n");
+
+    assert(setenv("CUBICLE_CONFIG", path, 1) == 0);
+    cubicle_config_t config;
+    char error[256];
+    assert(cubicle_config_load(&config, error, sizeof(error)) == 0);
+    assert(strcmp(config.manager_listen_uri, "tcp://127.0.0.1:7777") == 0);
+    assert(strcmp(config.client_manager_uri, "tcp://127.0.0.1:7777") == 0);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 
@@ -137,6 +163,7 @@ int main(void)
                   "background") == 0);
     test_override_file();
     test_invalid_values();
+    test_tcp_endpoints();
     test_unix_uri_path();
     return 0;
 }

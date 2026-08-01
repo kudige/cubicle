@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,7 +39,7 @@ typedef struct manager_state {
     char dir[PATH_MAX];
     char runtime_dir[PATH_MAX];
     char log_dir[PATH_MAX];
-    char listen_socket[PATH_MAX];
+    char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
     char controller_bin[PATH_MAX];
 } manager_state_t;
 
@@ -99,7 +100,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--control-socket PATH] [--event-interval-ms N]\n"
+            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
@@ -314,20 +315,37 @@ static FILE *open_state_file_for_read(const manager_state_t *state,
     return file;
 }
 
-static int manager_socket_path(char path[PATH_MAX], const manager_state_t *state,
-                               const char *requested_socket)
+static int manager_listen_uri(char uri[CUBICLE_ENDPOINT_URI_MAX],
+                              const manager_state_t *state,
+                              const char *requested_socket,
+                              const char *requested_uri)
 {
+    if (requested_socket != NULL && requested_uri != NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (requested_uri != NULL) {
+        int result = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "%s",
+                              requested_uri);
+        if (result < 0 || (size_t)result >= CUBICLE_ENDPOINT_URI_MAX) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return 0;
+    }
     if (requested_socket != NULL) {
-        int result = snprintf(path, PATH_MAX, "%s", requested_socket);
-        if (result < 0 || result >= PATH_MAX) {
+        int result = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "unix://%s",
+                              requested_socket);
+        if (result < 0 || (size_t)result >= CUBICLE_ENDPOINT_URI_MAX) {
             errno = ENAMETOOLONG;
             return -1;
         }
         return 0;
     }
 
-    int result = snprintf(path, PATH_MAX, "%s", state->listen_socket);
-    if (result < 0 || result >= PATH_MAX) {
+    int result = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "%s",
+                          state->listen_uri);
+    if (result < 0 || (size_t)result >= CUBICLE_ENDPOINT_URI_MAX) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -401,6 +419,129 @@ static int open_manager_socket(const char *path)
     }
 
     return fd;
+}
+
+static int split_tcp_uri(const char *uri, char *host, size_t host_size,
+                         char *port, size_t port_size)
+{
+    const char prefix[] = "tcp://";
+    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *authority = uri + strlen(prefix);
+    const char *port_start = NULL;
+    size_t host_length = 0;
+    if (authority[0] == '[') {
+        const char *end = strchr(authority, ']');
+        if (end == NULL || end[1] != ':') {
+            errno = EINVAL;
+            return -1;
+        }
+        host_length = (size_t)(end - authority - 1);
+        authority += 1;
+        port_start = end + 2;
+    } else {
+        const char *colon = strrchr(authority, ':');
+        if (colon == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        host_length = (size_t)(colon - authority);
+        port_start = colon + 1;
+    }
+
+    if (host_length == 0 || port_start == NULL || port_start[0] == '\0' ||
+        host_length >= host_size || strlen(port_start) >= port_size) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memcpy(host, authority, host_length);
+    host[host_length] = '\0';
+    snprintf(port, port_size, "%s", port_start);
+    return 0;
+}
+
+static int open_manager_tcp_listener(const char *uri)
+{
+    char host[256];
+    char port[32];
+    if (split_tcp_uri(uri, host, sizeof(host), port, sizeof(port)) < 0) {
+        return -1;
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    struct addrinfo *addresses = NULL;
+    int gai_result = getaddrinfo(host, port, &hints, &addresses);
+    if (gai_result != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = -1;
+    int saved_errno = EADDRNOTAVAIL;
+    for (struct addrinfo *address = addresses; address != NULL;
+         address = address->ai_next) {
+        fd = socket(address->ai_family, address->ai_socktype,
+                    address->ai_protocol);
+        if (fd < 0) {
+            saved_errno = errno;
+            continue;
+        }
+
+        int reuse = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        if (bind(fd, address->ai_addr, address->ai_addrlen) == 0 &&
+            listen(fd, 16) == 0) {
+            break;
+        }
+
+        saved_errno = errno;
+        close(fd);
+        fd = -1;
+    }
+
+    freeaddrinfo(addresses);
+    if (fd < 0) {
+        errno = saved_errno;
+    }
+    return fd;
+}
+
+static int open_manager_listener(const char *uri, int allow_insecure,
+                                 char cleanup_path[PATH_MAX])
+{
+    cleanup_path[0] = '\0';
+    if (strncmp(uri, "unix://", 7) == 0) {
+        char path[PATH_MAX];
+        if (cubicle_config_unix_uri_path(uri, path, sizeof(path)) < 0) {
+            return -1;
+        }
+        int result = snprintf(cleanup_path, PATH_MAX, "%s", path);
+        if (result < 0 || result >= PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return open_manager_socket(path);
+    }
+
+    if (strncmp(uri, "tcp://", 6) == 0) {
+        if (!allow_insecure) {
+            errno = EACCES;
+            return -1;
+        }
+        return open_manager_tcp_listener(uri);
+    }
+
+    errno = EINVAL;
+    return -1;
 }
 
 static int manager_id(const manager_state_t *state, char id[CUBICLE_MANAGER_ID_LENGTH + 1])
@@ -4322,11 +4463,17 @@ static int handle_manager_connection(const manager_state_t *state,
 static int command_daemon(const manager_state_t *state, int argc, char **argv)
 {
     const char *requested_socket = NULL;
+    const char *requested_uri = NULL;
+    int allow_insecure = 0;
     int poll_interval_ms = 250;
 
     for (int i = 0; i < argc; ++i) {
         if (strcmp(argv[i], "--control-socket") == 0 && i + 1 < argc) {
             requested_socket = argv[++i];
+        } else if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
+            requested_uri = argv[++i];
+        } else if (strcmp(argv[i], "--allow-insecure") == 0) {
+            allow_insecure = 1;
         } else if (strcmp(argv[i], "--event-interval-ms") == 0 && i + 1 < argc) {
             poll_interval_ms = atoi(argv[++i]);
         } else {
@@ -4339,6 +4486,11 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
         fprintf(stderr, "daemon requires nonnegative --event-interval-ms\n");
         return 2;
     }
+    if (requested_socket != NULL && requested_uri != NULL) {
+        fprintf(stderr,
+                "daemon accepts only one of --control-socket or --listen\n");
+        return 2;
+    }
 
     int daemon_lock_fd = lock_daemon(state);
     if (daemon_lock_fd < 0) {
@@ -4346,15 +4498,23 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
         return 1;
     }
 
-    char socket_path[PATH_MAX];
-    if (manager_socket_path(socket_path, state, requested_socket) < 0) {
+    char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
+    if (manager_listen_uri(listen_uri, state, requested_socket,
+                           requested_uri) < 0) {
         manager_log_error(errno);
         unlock_state(daemon_lock_fd);
         return 1;
     }
 
-    int listen_fd = open_manager_socket(socket_path);
+    char cleanup_path[PATH_MAX];
+    int listen_fd = open_manager_listener(listen_uri, allow_insecure,
+                                          cleanup_path);
     if (listen_fd < 0) {
+        if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
+            fprintf(stderr,
+                    "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
+                    listen_uri);
+        }
         manager_log_error(errno);
         unlock_state(daemon_lock_fd);
         return 1;
@@ -4363,7 +4523,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     if (set_fd_nonblocking(listen_fd) < 0) {
         manager_log_error(errno);
         close(listen_fd);
-        unlink(socket_path);
+        if (cleanup_path[0] != '\0') {
+            unlink(cleanup_path);
+        }
         unlock_state(daemon_lock_fd);
         return 1;
     }
@@ -4371,7 +4533,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     if (reconcile_process_records(state) < 0) {
         manager_log_error(errno);
         close(listen_fd);
-        unlink(socket_path);
+        if (cleanup_path[0] != '\0') {
+            unlink(cleanup_path);
+        }
         unlock_state(daemon_lock_fd);
         return 1;
     }
@@ -4424,7 +4588,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     close(listen_fd);
-    unlink(socket_path);
+    if (cleanup_path[0] != '\0') {
+        unlink(cleanup_path);
+    }
     unlock_state(daemon_lock_fd);
     return result;
 }
@@ -4508,12 +4674,8 @@ int main(int argc, char **argv)
              config.manager_log_dir);
     snprintf(state.controller_bin, sizeof(state.controller_bin), "%s",
              config.controller_binary);
-    if (cubicle_config_unix_uri_path(config.manager_listen_uri,
-                                     state.listen_socket,
-                                     sizeof(state.listen_socket)) < 0) {
-        fprintf(stderr, "manager configuration error: invalid manager.listen\n");
-        return 2;
-    }
+    snprintf(state.listen_uri, sizeof(state.listen_uri), "%s",
+             config.manager_listen_uri);
 
     int command_index = -1;
     int state_dir_overridden = 0;
@@ -4583,9 +4745,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "Runtime directory path is too long\n");
             return 2;
         }
-        result = snprintf(state.listen_socket, sizeof(state.listen_socket),
-                          "%s/manager.sock", state.runtime_dir);
-        if (result < 0 || (size_t)result >= sizeof(state.listen_socket)) {
+        result = snprintf(state.listen_uri, sizeof(state.listen_uri),
+                          "unix://%s/manager.sock", state.runtime_dir);
+        if (result < 0 || (size_t)result >= sizeof(state.listen_uri)) {
             fprintf(stderr, "Manager socket path is too long\n");
             return 2;
         }

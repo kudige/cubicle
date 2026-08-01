@@ -327,11 +327,59 @@ int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
     return 0;
 }
 
+static int validate_tcp_uri(const char *uri)
+{
+    const char prefix[] = "tcp://";
+    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *authority = uri + strlen(prefix);
+    const char *port = NULL;
+    if (authority[0] == '[') {
+        const char *end = strchr(authority, ']');
+        if (end == NULL || end[1] != ':' || end == authority + 1) {
+            errno = EINVAL;
+            return -1;
+        }
+        port = end + 2;
+    } else {
+        const char *colon = strrchr(authority, ':');
+        if (colon == NULL || colon == authority) {
+            errno = EINVAL;
+            return -1;
+        }
+        port = colon + 1;
+    }
+
+    if (port == NULL || port[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    for (const char *cursor = port; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int validate_endpoint_uri(const char *uri)
+{
+    char endpoint_path[CUBICLE_PATH_MAX];
+    if (cubicle_config_unix_uri_path(uri, endpoint_path,
+                                     sizeof(endpoint_path)) == 0) {
+        return 0;
+    }
+    return validate_tcp_uri(uri);
+}
+
 int cubicle_config_validate(const cubicle_config_t *config,
                             char *error,
                             size_t error_size)
 {
-    char endpoint_path[CUBICLE_PATH_MAX];
     if (validate_absolute_path(config->bindir, "installation.bindir",
                                error, error_size) < 0 ||
         validate_absolute_path(config->libexecdir, "installation.libexecdir",
@@ -346,21 +394,17 @@ int cubicle_config_validate(const cubicle_config_t *config,
         validate_absolute_path(config->controller_binary,
                                "manager.controller_binary",
                                error, error_size) < 0 ||
-        cubicle_config_unix_uri_path(config->manager_listen_uri,
-                                     endpoint_path,
-                                     sizeof(endpoint_path)) < 0) {
+        validate_endpoint_uri(config->manager_listen_uri) < 0) {
         if (error != NULL && error_size > 0 && error[0] == '\0') {
             snprintf(error, error_size,
-                     "manager.listen must be an absolute unix:// endpoint");
+                     "manager.listen must be an absolute unix:// endpoint or tcp://host:port endpoint");
         }
         return -1;
     }
 
-    if (cubicle_config_unix_uri_path(config->client_manager_uri,
-                                     endpoint_path,
-                                     sizeof(endpoint_path)) < 0) {
+    if (validate_endpoint_uri(config->client_manager_uri) < 0) {
         set_error(error, error_size,
-                  "client.manager must be an absolute unix:// endpoint");
+                  "client.manager must be an absolute unix:// endpoint or tcp://host:port endpoint");
         return -1;
     }
 

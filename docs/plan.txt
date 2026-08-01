@@ -410,6 +410,10 @@
   - cube config show, paths, and validate expose read-only diagnostics
   - non-root defaults use per-user XDG state/runtime/log paths and socket
   - root and explicit system configuration still support shared system-manager paths
+- Added explicit insecure TCP manager listener support:
+  - manager daemon accepts tcp://host:port endpoints only with --allow-insecure
+  - tests/api_client.py can exercise Unix paths, unix:// endpoints, and tcp:// endpoints
+  - CTest covers TCP refusal without --allow-insecure and ping/status/shutdown with it enabled
 
 ## Next
 

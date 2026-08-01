@@ -81,6 +81,18 @@ the system defaults under `/var/lib/cubicle`, `/run/cubicle`, and
 `/var/log/cubicle`. Administrators can force shared system paths through
 `/etc/cubicle/config.cfg`.
 
+For local-LAN testing, the manager can listen on unauthenticated TCP only when
+explicitly allowed:
+
+```console
+cubicle-manager daemon --listen tcp://127.0.0.1:7777 --allow-insecure
+python3 tests/api_client.py tcp://127.0.0.1:7777 ping
+cube --manager-socket tcp://127.0.0.1:7777 workspace LAN
+```
+
+Do not expose this mode to untrusted networks. It provides no authentication or
+transport encryption.
+
 ## Pacman package
 
 On Arch-style systems with `makepkg` available, the same CMake install rules can
