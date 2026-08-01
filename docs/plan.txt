@@ -414,6 +414,10 @@
   - manager daemon accepts tcp://host:port endpoints only with --allow-insecure
   - tests/api_client.py can exercise Unix paths, unix:// endpoints, and tcp:// endpoints
   - CTest covers TCP refusal without --allow-insecure and ping/status/shutdown with it enabled
+- Started authentication/session implementation from docs/auth-session-spec.md:
+  - added OpenSSL-backed Ed25519 identity primitives and HMAC helper
+  - manager now creates and preserves a strict-permission identity under state/keys
+  - tests cover key generation, persistence, signatures, HMAC, and unsafe key permissions
 
 ## Next
 
@@ -437,6 +441,12 @@
      - add additional fuzz targets for process.start, process info, attachment grants, events, and RPC errors
      - define deterministic non-JSON signed transcript/grant encoding before authentication grants are implemented
      - make sanitizer and malformed-message runs mandatory in CI
+
+4. Continue authentication/session implementation from docs/auth-session-spec.md.
+   - add deterministic Unix auth transcript encoding and fixtures
+   - add client identity generation/loading in cube and libcubicle
+   - implement authenticated Unix session creation and session resume
+   - enforce workspace capability checks and bootstrap owner keys
 
 3. Expand tests.
    - Large output tests.

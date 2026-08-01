@@ -4,6 +4,7 @@ project(cubicle VERSION 0.1.0 LANGUAGES C)
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
+pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -33,6 +34,7 @@ endif()
 
 add_library(cubicle_common
     src/client/error.c
+    src/common/auth_crypto.c
     src/common/config.c
     src/common/json.c
     src/common/log.c
@@ -44,7 +46,7 @@ add_library(cubicle_common
 
 target_include_directories(cubicle_common PUBLIC include)
 target_include_directories(cubicle_common PRIVATE third_party/yyjson)
-target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF)
+target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO)
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -155,6 +157,20 @@ target_compile_options(cubicle-config-test PRIVATE
 )
 
 add_test(NAME cubicle-config-test COMMAND cubicle-config-test)
+
+add_executable(cubicle-auth-crypto-test
+    tests/auth_crypto_test.c
+)
+
+target_link_libraries(cubicle-auth-crypto-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-auth-crypto-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-auth-crypto-test COMMAND cubicle-auth-crypto-test)
 
 add_executable(cubicle-rpc-test
     tests/rpc_test.c
@@ -337,6 +353,13 @@ add_test(
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_registry_test.sh
+)
+
+add_test(
+    NAME cubicle-manager-identity-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_identity_test.sh
 )
 
 add_test(
@@ -581,6 +604,7 @@ if(CUBICLE_ENABLE_COVERAGE)
             cube
             cubicle-process-test
             cubicle-config-test
+            cubicle-auth-crypto-test
             cubicle-rpc-test
             cubicle-util-test
             cubicle-rpc-test

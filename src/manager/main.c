@@ -9,6 +9,7 @@
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
 
+#include "../common/auth_crypto.h"
 #include "../common/rpc_internal.h"
 
 #include <arpa/inet.h>
@@ -41,6 +42,7 @@ typedef struct manager_state {
     char log_dir[PATH_MAX];
     char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
     char controller_bin[PATH_MAX];
+    cubicle_auth_identity_t identity;
 } manager_state_t;
 
 typedef struct workspace_key_record {
@@ -4773,6 +4775,19 @@ int main(int argc, char **argv)
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         return 1;
     }
+
+    char manager_key_dir[PATH_MAX];
+    int key_dir_length = snprintf(manager_key_dir, sizeof(manager_key_dir),
+                                  "%s/keys", state.dir);
+    if (key_dir_length < 0 ||
+        (size_t)key_dir_length >= sizeof(manager_key_dir) ||
+        cubicle_auth_ensure_identity(manager_key_dir, "manager.key",
+                                     "manager.pub", &state.identity) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager",
+                    "failed to initialize manager identity");
+        return 1;
+    }
+    cubicle_log(CUBICLE_LOG_INFO, "manager", state.identity.fingerprint);
 
     int result = dispatch_command(&state, argc - command_index, &argv[command_index]);
     if (result == 2) {
