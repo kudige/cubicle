@@ -6,6 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(CUBICLE_ENABLE_COVERAGE "Build with gcov/lcov coverage instrumentation" OFF)
+option(CUBICLE_ENABLE_SANITIZERS "Build with ASan/UBSan instrumentation" OFF)
+option(CUBICLE_ENABLE_FUZZERS "Build libFuzzer fuzz targets" OFF)
+option(CUBICLE_LINK_LIBFUZZER "Link fuzz targets with Clang libFuzzer" OFF)
 
 if(CUBICLE_ENABLE_COVERAGE)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -14,6 +17,14 @@ if(CUBICLE_ENABLE_COVERAGE)
 
     add_compile_options(-O0 -g --coverage)
     add_link_options(--coverage)
+endif()
+
+if(CUBICLE_ENABLE_SANITIZERS)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "CUBICLE_ENABLE_SANITIZERS requires GCC or Clang")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
 endif()
 
 add_library(cubicle_common
@@ -124,6 +135,46 @@ target_compile_options(cubicle-manager-registry-unit-test PRIVATE
 )
 
 add_test(NAME cubicle-manager-registry-unit-test COMMAND cubicle-manager-registry-unit-test)
+
+if(CUBICLE_ENABLE_FUZZERS)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "CUBICLE_ENABLE_FUZZERS requires Clang")
+    endif()
+
+    add_executable(fuzz-json-parser
+        tests/fuzz_json_parser.c
+    )
+    target_link_libraries(fuzz-json-parser PRIVATE cubicle_common)
+    target_include_directories(fuzz-json-parser PRIVATE third_party/yyjson)
+    target_compile_options(fuzz-json-parser PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    if(CUBICLE_LINK_LIBFUZZER)
+        target_compile_options(fuzz-json-parser PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_options(fuzz-json-parser PRIVATE -fsanitize=fuzzer,address,undefined)
+    else()
+        target_compile_definitions(fuzz-json-parser PRIVATE CUBICLE_FUZZ_STANDALONE=1)
+    endif()
+
+    add_executable(fuzz-rpc-envelope
+        tests/fuzz_rpc_envelope.c
+    )
+    target_link_libraries(fuzz-rpc-envelope PRIVATE cubicle_common)
+    target_include_directories(fuzz-rpc-envelope PRIVATE third_party/yyjson)
+    target_compile_options(fuzz-rpc-envelope PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    if(CUBICLE_LINK_LIBFUZZER)
+        target_compile_options(fuzz-rpc-envelope PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_options(fuzz-rpc-envelope PRIVATE -fsanitize=fuzzer,address,undefined)
+    else()
+        target_compile_definitions(fuzz-rpc-envelope PRIVATE CUBICLE_FUZZ_STANDALONE=1)
+    endif()
+endif()
 
 add_test(
     NAME cubicle-cli-help-test
