@@ -17,9 +17,12 @@ add_library(cubicle_client STATIC
     ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
     ../src/client/workspace.c
+    ../src/common/auth_crypto.c
+    ../src/common/auth_protocol.c
     ../src/common/json.c
     ../src/common/process.c
     ../src/common/rpc.c
+    ../src/common/util.c
     ../third_party/yyjson/yyjson.c
 )
 
@@ -27,6 +30,9 @@ add_library(Cubicle::Client ALIAS cubicle_client)
 
 target_include_directories(cubicle_client PUBLIC ../include)
 target_include_directories(cubicle_client PRIVATE ../third_party/yyjson)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+target_link_libraries(cubicle_client PUBLIC PkgConfig::LIBCRYPTO)
 target_compile_options(cubicle_client PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)

@@ -421,6 +421,7 @@
   - added deterministic binary auth transcript and resume-authenticator encoders
   - added Unix-socket auth.challenge/auth.authenticate flow with signed transcript verification
   - added E2E coverage for signed local session creation over a persistent framed socket
+  - libcubicle now generates/loads a client identity and uses signed Unix authentication when supported
 
 ## Next
 
@@ -446,8 +447,7 @@
      - make sanitizer and malformed-message runs mandatory in CI
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
-   - add client identity generation/loading in cube and libcubicle
-   - add client-side use of authenticated Unix session creation
+   - add client identity generation/loading in cube
    - implement session resume
    - enforce workspace capability checks and bootstrap owner keys
 

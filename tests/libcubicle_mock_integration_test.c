@@ -246,9 +246,11 @@ static void run_manager_integration(const char *directory,
                  transport_name(kind));
     }
 
+    int manager_request_count = 26 + (kind == TEST_TRANSPORT_TCP ? 1 : 2);
     pid_t manager_pid = start_server(kind, directory, "manager", manager_log,
-                                     "manager", "normal", controller_uri, 26,
-                                     manager_uri, sizeof(manager_uri));
+                                     "manager", "normal", controller_uri,
+                                     manager_request_count, manager_uri,
+                                     sizeof(manager_uri));
     cubicle_client_t *client = connect_client(kind, manager_uri);
 
     cubicle_manager_ping_result_t ping;
@@ -423,6 +425,7 @@ static void run_manager_integration(const char *directory,
     expect_server_exit(manager_pid);
 
     const char *const expected_methods[] = {
+        "\"method\":\"session.local_bootstrap\"",
         "\"method\":\"manager.ping\"",
         "\"method\":\"manager.status\"",
         "\"method\":\"manager.reconcile\"",
@@ -453,6 +456,9 @@ static void run_manager_integration(const char *directory,
     assert_log_contains_all(manager_log, expected_methods,
                             sizeof(expected_methods) /
                                 sizeof(expected_methods[0]));
+    if (kind == TEST_TRANSPORT_UNIX) {
+        assert_log_contains(manager_log, "\"method\":\"auth.challenge\"");
+    }
     assert_log_contains(manager_log, "\"idempotency_key\":\"idem-1\"");
     assert_log_contains(manager_log, "\"argv\":[\"echo\",\"ok\"]");
     assert_log_contains(manager_log, "\"signal_number\":15");
@@ -545,10 +551,11 @@ static void run_error_scenario(const char *directory, test_transport_kind_t kind
     snprintf(log_path, sizeof(log_path), "%s/%s-%s.log", directory, scenario,
              transport_name(kind));
 
+    int request_count = 1 + (kind == TEST_TRANSPORT_TCP ? 1 : 2);
     pid_t server_pid = start_server(kind, directory, label, log_path,
                                     "manager", scenario,
-                                    "unix:///unused.sock", 1, manager_uri,
-                                    sizeof(manager_uri));
+                                    "unix:///unused.sock", request_count,
+                                    manager_uri, sizeof(manager_uri));
     cubicle_client_t *client = connect_client(kind, manager_uri);
     cubicle_manager_ping_result_t ping;
     // Endpoint test for manager.ping error handling
@@ -558,6 +565,10 @@ static void run_error_scenario(const char *directory, test_transport_kind_t kind
     cubicle_client_disconnect(client);
     expect_server_exit(server_pid);
     assert_log_contains(log_path, "\"method\":\"manager.ping\"");
+    assert_log_contains(log_path, "\"method\":\"session.local_bootstrap\"");
+    if (kind == TEST_TRANSPORT_UNIX) {
+        assert_log_contains(log_path, "\"method\":\"auth.challenge\"");
+    }
 }
 
 static void run_transport_suite(const char *directory,

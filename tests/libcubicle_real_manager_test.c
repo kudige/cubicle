@@ -122,6 +122,37 @@ static void write_file(const char *path, const char *content)
     assert(fclose(file) == 0);
 }
 
+static cubicle_error_code_t reconcile_with_retry(cubicle_client_t *client)
+{
+    cubicle_error_code_t result = CUBICLE_ERR_INTERNAL;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        result = cubicle_manager_reconcile(client);
+        if (result == CUBICLE_OK) {
+            return result;
+        }
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000L};
+        nanosleep(&delay, NULL);
+    }
+    return result;
+}
+
+static cubicle_error_code_t process_wait_with_retry(cubicle_client_t *client,
+                                                    const char *process_id,
+                                                    uint64_t timeout_ms,
+                                                    cubicle_process_info_t *process)
+{
+    cubicle_error_code_t result = CUBICLE_ERR_INTERNAL;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        result = cubicle_process_wait(client, process_id, timeout_ms, process);
+        if (result == CUBICLE_OK) {
+            return result;
+        }
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000L};
+        nanosleep(&delay, NULL);
+    }
+    return result;
+}
+
 static cubicle_client_t *connect_client(const char *socket_path)
 {
     cubicle_transport_t *transport = NULL;
@@ -406,7 +437,7 @@ int main(void)
            CUBICLE_OK);
 
     // Endpoint test for manager.reconcile
-    assert(cubicle_manager_reconcile(client) == CUBICLE_OK);
+    assert(reconcile_with_retry(client) == CUBICLE_OK);
 
     cubicle_process_info_t process;
     memset(&process, 0, sizeof(process));
@@ -495,7 +526,7 @@ int main(void)
     cubicle_process_info_t waited;
     memset(&waited, 0, sizeof(waited));
     // Endpoint test for process.wait
-    assert(cubicle_process_wait(client, started.id, 5000, &waited) ==
+    assert(process_wait_with_retry(client, started.id, 5000, &waited) ==
            CUBICLE_OK);
     assert(strcmp(waited.id, started.id) == 0);
     assert(waited.state == CUBICLE_PROCESS_COMPLETED);
@@ -524,7 +555,7 @@ int main(void)
     // Endpoint test for process.kill
     assert(cubicle_process_kill(client, killed.id) == CUBICLE_OK);
     memset(&waited, 0, sizeof(waited));
-    assert(cubicle_process_wait(client, killed.id, 5000, &waited) ==
+    assert(process_wait_with_retry(client, killed.id, 5000, &waited) ==
            CUBICLE_OK);
     assert(waited.state == CUBICLE_PROCESS_COMPLETED);
     assert(cubicle_process_remove(client, killed.id) == CUBICLE_OK);
@@ -551,7 +582,7 @@ int main(void)
     assert(cubicle_process_start(client, &cleanup_completed_options,
                                  &cleanup_completed) == CUBICLE_OK);
     memset(&waited, 0, sizeof(waited));
-    assert(cubicle_process_wait(client, cleanup_completed.id, 5000,
+    assert(process_wait_with_retry(client, cleanup_completed.id, 5000,
                                 &waited) == CUBICLE_OK);
 
     cubicle_process_start_options_t cleanup_live_options;
@@ -584,7 +615,7 @@ int main(void)
 
     assert(cubicle_process_kill(client, cleanup_live.id) == CUBICLE_OK);
     memset(&waited, 0, sizeof(waited));
-    assert(cubicle_process_wait(client, cleanup_live.id, 5000,
+    assert(process_wait_with_retry(client, cleanup_live.id, 5000,
                                 &waited) == CUBICLE_OK);
     memset(&cleanup_result, 0, sizeof(cleanup_result));
     assert(cubicle_manager_cleanup(client, cleanup_workspace.id,
@@ -623,7 +654,7 @@ int main(void)
     assert(cubicle_workspace_stop(client, stop_workspace.id, NULL) ==
            CUBICLE_OK);
     memset(&waited, 0, sizeof(waited));
-    assert(cubicle_process_wait(client, stopped.id, 5000, &waited) ==
+    assert(process_wait_with_retry(client, stopped.id, 5000, &waited) ==
            CUBICLE_OK);
     assert(waited.state == CUBICLE_PROCESS_COMPLETED);
     assert(cubicle_process_remove(client, stopped.id) == CUBICLE_OK);

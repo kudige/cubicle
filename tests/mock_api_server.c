@@ -96,6 +96,10 @@ static char *format_error(const char *request_id, const char *code,
 static char *manager_response(const char *request, const char *request_id,
                               const char *controller_uri)
 {
+    if (has_method(request, "session.local_bootstrap")) {
+        return format_success(request_id,
+            "{\"session_id\":\"session-1\",\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"client_key_id\":\"local-key\",\"protocol_major\":0,\"protocol_minor\":1,\"negotiated_capabilities\":258,\"authenticated_at_ms\":10,\"expires_at_ms\":0}");
+    }
     if (has_method(request, "manager.ping")) {
         return format_success(request_id,
             "{\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":100,\"uptime_ms\":7}");
@@ -226,7 +230,12 @@ static int serve_loop(int listen_fd, const char *log_path,
             }
 
             char *response = NULL;
-            if (strcmp(scenario, "malformed") == 0) {
+            if (has_method(request, "auth.challenge")) {
+                response = format_error(request_id, "unsupported",
+                                        "auth challenge unsupported");
+            } else if (has_method(request, "session.local_bootstrap")) {
+                response = manager_response(request, request_id, controller_uri);
+            } else if (strcmp(scenario, "malformed") == 0) {
                 response = strdup("{not-json");
             } else if (strcmp(scenario, "mismatch") == 0) {
                 response = manager_response(request, "wrong", controller_uri);
