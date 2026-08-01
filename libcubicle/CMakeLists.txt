@@ -56,4 +56,25 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic
     )
     add_test(NAME libcubicle-rpc-test COMMAND libcubicle-rpc-test)
+
+    add_executable(cubicle-mock-api-server
+        ../tests/mock_api_server.c
+    )
+    target_compile_options(cubicle-mock-api-server PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+
+    add_executable(libcubicle-mock-integration-test
+        ../tests/libcubicle_mock_integration_test.c
+    )
+    target_link_libraries(libcubicle-mock-integration-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-mock-integration-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(
+        NAME libcubicle-mock-integration-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test>
+    )
 endif()
