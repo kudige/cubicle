@@ -342,6 +342,10 @@
   - background launch returns startup metadata or human-readable status
   - generated process names from command basenames
   - daemon-backed E2E coverage for foreground, background, JSON, and TTY launch
+- Fixed cube run launch edge cases:
+  - generated friendly-name collisions retry with numeric suffixes like name-1
+  - foreground TTY launch fails fast until attachment is implemented
+  - regression coverage ensures a foreground TTY launch attempt does not wedge later cube commands
 
 ## Next
 

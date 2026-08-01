@@ -35,6 +35,7 @@ typedef struct cube_run_options {
     const char *name;
     const char *mode;
     int background;
+    int generated_name;
 } cube_run_options_t;
 
 typedef struct cube_rpc_response {
@@ -933,6 +934,20 @@ static int generated_process_name(char *buffer,
     return 0;
 }
 
+static int generated_process_name_with_suffix(char *buffer,
+                                              size_t buffer_size,
+                                              const char *base_name,
+                                              int suffix)
+{
+    int length = 0;
+    if (suffix == 0) {
+        length = snprintf(buffer, buffer_size, "%s", base_name);
+    } else {
+        length = snprintf(buffer, buffer_size, "%s-%d", base_name, suffix);
+    }
+    return length < 0 || (size_t)length >= buffer_size ? -1 : 0;
+}
+
 static int build_process_start_params(cubicle_json_builder_t *params,
                                       const char *workspace,
                                       const cube_run_options_t *run_options,
@@ -1037,6 +1052,7 @@ static int process_run(const char *manager_socket,
         .name = NULL,
         .mode = "stream",
         .background = 0,
+        .generated_name = 0,
     };
 
     int argument_index = command_index + 1;
@@ -1099,9 +1115,15 @@ static int process_run(const char *manager_socket,
             return 2;
         }
         run_options.name = generated_name;
+        run_options.generated_name = 1;
     }
     if (!valid_name(run_options.name)) {
         fprintf(stderr, "cube: invalid process name\n");
+        return 2;
+    }
+    if (!run_options.background && strcmp(run_options.mode, "tty") == 0) {
+        fprintf(stderr,
+                "cube: foreground tty attach is not implemented yet; use --bg --tty or --stream\n");
         return 2;
     }
 
@@ -1111,22 +1133,56 @@ static int process_run(const char *manager_socket,
         return 1;
     }
 
-    cubicle_json_builder_t params = {0};
     int command_argc = argc - argument_index;
-    if (build_process_start_params(&params, workspace, &run_options,
-                                   command_argc, &argv[argument_index]) < 0) {
-        cubicle_json_builder_cleanup(&params);
-        fprintf(stderr, "cube: failed to encode process start request\n");
-        return 2;
-    }
 
     cube_rpc_response_t start_response;
-    if (call_manager(manager_socket, "process.start", params.data,
-                     &start_response) < 0) {
-        cubicle_json_builder_cleanup(&params);
-        return print_rpc_error(&start_response);
+    memset(&start_response, 0, sizeof(start_response));
+    char base_name[CUBICLE_NAME_MAX];
+    int base_name_length = snprintf(base_name, sizeof(base_name), "%s",
+                                    run_options.name);
+    if (base_name_length < 0 ||
+        (size_t)base_name_length >= sizeof(base_name)) {
+        fprintf(stderr, "cube: process name is too long\n");
+        return 2;
     }
-    cubicle_json_builder_cleanup(&params);
+    int started = 0;
+    for (int suffix = 0; suffix < 1000; ++suffix) {
+        char candidate_name[CUBICLE_NAME_MAX];
+        if (run_options.generated_name &&
+            generated_process_name_with_suffix(candidate_name,
+                                               sizeof(candidate_name),
+                                               base_name, suffix) < 0) {
+            continue;
+        }
+        if (run_options.generated_name) {
+            run_options.name = candidate_name;
+        }
+
+        cubicle_json_builder_t params = {0};
+        if (build_process_start_params(&params, workspace, &run_options,
+                                       command_argc,
+                                       &argv[argument_index]) < 0) {
+            cubicle_json_builder_cleanup(&params);
+            fprintf(stderr, "cube: failed to encode process start request\n");
+            return 2;
+        }
+
+        if (call_manager(manager_socket, "process.start", params.data,
+                         &start_response) == 0) {
+            cubicle_json_builder_cleanup(&params);
+            started = 1;
+            break;
+        }
+        cubicle_json_builder_cleanup(&params);
+        if (!run_options.generated_name ||
+            start_response.code != CUBICLE_ERR_ALREADY_EXISTS) {
+            return print_rpc_error(&start_response);
+        }
+    }
+    if (!started) {
+        fprintf(stderr, "cube: failed to allocate a unique process name\n");
+        return 2;
+    }
 
     cubicle_json_doc_t start_document;
     if (cubicle_json_parse(&start_document, start_response.result_json) < 0) {

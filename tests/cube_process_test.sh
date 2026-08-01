@@ -97,6 +97,9 @@ fi
 json_bg_output=$(cube --json run --bg --stream /bin/sleep 30)
 printf "%s" "$json_bg_output" | grep -q '"friendly_name":"sleep"'
 printf "%s" "$json_bg_output" | grep -q '"mode":"stream"'
+json_bg_suffix_output=$(cube --json run --bg --stream /bin/sleep 30)
+printf "%s" "$json_bg_suffix_output" | grep -q '"friendly_name":"sleep-1"'
+printf "%s" "$json_bg_suffix_output" | grep -q '"mode":"stream"'
 tty_output=$(cube run --bg --tty --name tty-run sleep 30)
 if [ "$tty_output" != "[tty-run] started in tty mode" ]; then
     echo "unexpected tty run output: $tty_output" >&2
@@ -104,6 +107,7 @@ if [ "$tty_output" != "[tty-run] started in tty mode" ]; then
 fi
 cube stop bg-run >/dev/null
 cube stop sleep >/dev/null
+cube stop sleep-1 >/dev/null
 cube stop tty-run >/dev/null
 
 api() {
@@ -199,6 +203,21 @@ if [ "$status" -ne 2 ]; then
     exit 1
 fi
 grep -q 'term mode is not implemented yet' "$tmpdir/run-term.err"
+
+set +e
+timeout 2 env XDG_STATE_HOME="$xdg_state_home" \
+    CUBICLE_MANAGER_SOCKET="$socket_path" \
+    "$CUBE" run --tty sleep 30 \
+    >"$tmpdir/run-tty-fg.out" 2>"$tmpdir/run-tty-fg.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube foreground tty run should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'foreground tty attach is not implemented yet' "$tmpdir/run-tty-fg.err"
+cube ps >"$tmpdir/after-tty-fg-ps.out"
+grep -q '^Workspace Project A$' "$tmpdir/after-tty-fg-ps.out"
 
 set +e
 cube run >"$tmpdir/run-missing.out" 2>"$tmpdir/run-missing.err"
