@@ -1,0 +1,323 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include "cubicle/cubicle.h"
+#include "cubicle/transport_unix.h"
+
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static char temp_dir[256];
+static pid_t manager_pid = -1;
+
+static void join_path(char *buffer, size_t size, const char *a, const char *b)
+{
+    int length = snprintf(buffer, size, "%s/%s", a, b);
+    assert(length > 0 && (size_t)length < size);
+}
+
+static void wait_for_socket(const char *path)
+{
+    for (int i = 0; i < 100; ++i) {
+        struct stat status;
+        if (stat(path, &status) == 0 && S_ISSOCK(status.st_mode)) {
+            return;
+        }
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 50000000L };
+        nanosleep(&delay, NULL);
+    }
+    assert(!"manager socket was not created");
+}
+
+static void run_manager_capture(const char *manager, const char *state_dir,
+                                char *const extra_args[], char *output,
+                                size_t output_size)
+{
+    int pipe_fds[2];
+    assert(pipe(pipe_fds) == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        close(pipe_fds[0]);
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        close(pipe_fds[1]);
+
+        size_t extra_count = 0;
+        while (extra_args[extra_count] != NULL) {
+            ++extra_count;
+        }
+        char **argv = calloc(extra_count + 4, sizeof(*argv));
+        if (argv == NULL) {
+            _exit(127);
+        }
+        argv[0] = (char *)manager;
+        argv[1] = "--state-dir";
+        argv[2] = (char *)state_dir;
+        for (size_t i = 0; i < extra_count; ++i) {
+            argv[i + 3] = extra_args[i];
+        }
+        argv[extra_count + 3] = NULL;
+        execv(manager, argv);
+        _exit(127);
+    }
+
+    close(pipe_fds[1]);
+    size_t used = 0;
+    while (used + 1 < output_size) {
+        ssize_t nread = read(pipe_fds[0], output + used,
+                             output_size - used - 1);
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            assert(!"failed to read manager command output");
+        }
+        if (nread == 0) {
+            break;
+        }
+        used += (size_t)nread;
+    }
+    output[used] = '\0';
+    close(pipe_fds[0]);
+
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == 0);
+}
+
+static void parse_between(char *output, const char *prefix,
+                          const char *suffix, char *value, size_t value_size)
+{
+    char *start = strstr(output, prefix);
+    assert(start != NULL);
+    start += strlen(prefix);
+    char *end = suffix == NULL ? strchr(start, '\n') : strstr(start, suffix);
+    if (end == NULL) {
+        end = start + strlen(start);
+    }
+    size_t length = (size_t)(end - start);
+    assert(length > 0 && length < value_size);
+    memcpy(value, start, length);
+    value[length] = '\0';
+}
+
+static void write_file(const char *path, const char *content)
+{
+    FILE *file = fopen(path, "w");
+    assert(file != NULL);
+    assert(fputs(content, file) >= 0);
+    assert(fclose(file) == 0);
+}
+
+static cubicle_client_t *connect_client(const char *socket_path)
+{
+    cubicle_transport_t *transport = NULL;
+    assert(cubicle_transport_unix_create(&transport) == CUBICLE_OK);
+
+    cubicle_client_options_t options;
+    memset(&options, 0, sizeof(options));
+    int length = snprintf(options.endpoint.uri, sizeof(options.endpoint.uri),
+                          "unix://%s", socket_path);
+    assert(length > 0 && (size_t)length < sizeof(options.endpoint.uri));
+    options.transport = transport;
+
+    cubicle_client_t *client = NULL;
+    assert(cubicle_client_connect(&options, &client) == CUBICLE_OK);
+    return client;
+}
+
+static void cleanup(void)
+{
+    if (manager_pid > 0) {
+        kill(manager_pid, SIGTERM);
+        waitpid(manager_pid, NULL, 0);
+    }
+    if (temp_dir[0] != '\0') {
+        char command[512];
+        snprintf(command, sizeof(command), "rm -rf '%s'", temp_dir);
+        (void)system(command);
+    }
+}
+
+int main(void)
+{
+    const char *manager = getenv("CUBICLE_MANAGER");
+    assert(manager != NULL && manager[0] != '\0');
+    atexit(cleanup);
+
+    snprintf(temp_dir, sizeof(temp_dir), "/tmp/libcubicle-real-manager-XXXXXX");
+    assert(mkdtemp(temp_dir) != NULL);
+
+    char state_dir[256];
+    char socket_path[256];
+    char controller_socket[256];
+    join_path(state_dir, sizeof(state_dir), temp_dir, "state");
+    join_path(socket_path, sizeof(socket_path), temp_dir, "manager.sock");
+    join_path(controller_socket, sizeof(controller_socket), temp_dir,
+              "controller.sock");
+
+    char output[1024];
+    char *workspace_args[] = { "workspace", "create", "Project A", NULL };
+    run_manager_capture(manager, state_dir, workspace_args, output,
+                        sizeof(output));
+    char workspace_id[64];
+    parse_between(output, "workspace id=", " name=", workspace_id,
+                  sizeof(workspace_id));
+
+    char *process_args[] = {
+        "process", "register",
+        "--workspace", workspace_id,
+        "--friendly-name", "daemon-1",
+        "--mode", "stream",
+        "--controller-id", "controller-1",
+        "--control-socket", controller_socket,
+        NULL,
+    };
+    run_manager_capture(manager, state_dir, process_args, output,
+                        sizeof(output));
+    char process_id[64];
+    parse_between(output, "process id=", " workspace_id=", process_id,
+                  sizeof(process_id));
+
+    char controller_dir[512];
+    snprintf(controller_dir, sizeof(controller_dir), "%s/controllers/%s",
+             state_dir, process_id);
+    assert(mkdir(state_dir, 0777) == 0 || errno == EEXIST);
+    char controllers_dir[512];
+    join_path(controllers_dir, sizeof(controllers_dir), state_dir,
+              "controllers");
+    assert(mkdir(controllers_dir, 0777) == 0 || errno == EEXIST);
+    assert(mkdir(controller_dir, 0777) == 0);
+
+    char stdout_path[512];
+    char stderr_path[512];
+    char events_path[512];
+    join_path(stdout_path, sizeof(stdout_path), controller_dir, "stdout.log");
+    join_path(stderr_path, sizeof(stderr_path), controller_dir, "stderr.log");
+    join_path(events_path, sizeof(events_path), controller_dir, "events.log");
+    write_file(stdout_path, "hello\n");
+    write_file(stderr_path, "error\n");
+    write_file(events_path,
+               "seq=1 type=process_started controller_id=controller-1 pid=1 pgid=1 mode=stream\n"
+               "seq=2 type=output stream=stdout start=0 length=6\n"
+               "seq=3 type=process_exited status=exited exit_code=0\n");
+
+    manager_pid = fork();
+    assert(manager_pid >= 0);
+    if (manager_pid == 0) {
+        execl(manager, manager, "--state-dir", state_dir, "daemon",
+              "--control-socket", socket_path, "--event-interval-ms", "50",
+              (char *)NULL);
+        _exit(127);
+    }
+    wait_for_socket(socket_path);
+
+    cubicle_client_t *client = connect_client(socket_path);
+
+    cubicle_manager_ping_result_t ping;
+    memset(&ping, 0, sizeof(ping));
+    assert(cubicle_manager_ping(client, &ping) == CUBICLE_OK);
+    assert(strcmp(ping.manager_id, "") != 0);
+
+    cubicle_manager_status_t status;
+    memset(&status, 0, sizeof(status));
+    assert(cubicle_manager_status(client, &status) == CUBICLE_OK);
+    assert(status.workspace_count == 1);
+    assert(status.process_count == 1);
+
+    cubicle_workspace_create_options_t create;
+    memset(&create, 0, sizeof(create));
+    create.name = "Project B";
+    cubicle_workspace_info_t workspace;
+    memset(&workspace, 0, sizeof(workspace));
+    assert(cubicle_workspace_create(client, &create, &workspace) ==
+           CUBICLE_OK);
+    assert(strcmp(workspace.name, "Project B") == 0);
+
+    memset(&workspace, 0, sizeof(workspace));
+    assert(cubicle_workspace_get(client, "Project B", &workspace) ==
+           CUBICLE_OK);
+    assert(strcmp(workspace.name, "Project B") == 0);
+
+    cubicle_workspace_info_t *workspaces = NULL;
+    size_t workspace_count = 0;
+    assert(cubicle_workspace_list(client, NULL, &workspaces,
+                                  &workspace_count, NULL) == CUBICLE_OK);
+    assert(workspace_count == 2);
+    cubicle_workspace_list_free(workspaces);
+
+    cubicle_process_info_t process;
+    memset(&process, 0, sizeof(process));
+    assert(cubicle_process_get(client, process_id, NULL, &process) ==
+           CUBICLE_OK);
+    assert(strcmp(process.id, process_id) == 0);
+
+    memset(&process, 0, sizeof(process));
+    assert(cubicle_process_get(client, "daemon-1", workspace_id, &process) ==
+           CUBICLE_OK);
+    assert(strcmp(process.id, process_id) == 0);
+
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    cubicle_process_filter_t filter;
+    memset(&filter, 0, sizeof(filter));
+    filter.workspace_id = workspace_id;
+    assert(cubicle_process_list(client, &filter, &processes,
+                                &process_count, NULL) == CUBICLE_OK);
+    assert(process_count == 1);
+    cubicle_process_list_free(processes);
+
+    cubicle_output_chunk_t chunk;
+    memset(&chunk, 0, sizeof(chunk));
+    assert(cubicle_process_read_output(client, process_id,
+                                       CUBICLE_STREAM_STDOUT, 0, 16,
+                                       &chunk) == CUBICLE_OK);
+    assert(chunk.length == 6);
+    assert(memcmp(chunk.data, "hello\n", 6) == 0);
+    cubicle_output_chunk_free(&chunk);
+
+    cubicle_event_query_t query;
+    memset(&query, 0, sizeof(query));
+    query.workspace_id = workspace_id;
+    query.process_id = process_id;
+    query.limit = 10;
+
+    cubicle_event_t *events = NULL;
+    size_t event_count = 0;
+    for (int i = 0; i < 100; ++i) {
+        if (cubicle_events_list(client, &query, &events, &event_count) ==
+                CUBICLE_OK &&
+            event_count == 3) {
+            break;
+        }
+        free(events);
+        events = NULL;
+        event_count = 0;
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 50000000L };
+        nanosleep(&delay, NULL);
+    }
+    assert(event_count == 3);
+    cubicle_events_free(events);
+
+    assert(cubicle_manager_shutdown(client, false) == CUBICLE_OK);
+    cubicle_client_disconnect(client);
+
+    int status_code = 0;
+    assert(waitpid(manager_pid, &status_code, 0) == manager_pid);
+    manager_pid = -1;
+    assert(WIFEXITED(status_code));
+    assert(WEXITSTATUS(status_code) == 0);
+    return 0;
+}

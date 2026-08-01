@@ -58,7 +58,7 @@ def call_api(args, method, params):
         print(json.dumps(response, separators=(",", ":"), sort_keys=True))
     else:
         print(json.dumps(response, sort_keys=True))
-    if not args.allow_error and not response.get("ok", False):
+    if not args.allow_error and not response.get("success", False):
         return 1
     return 0
 
@@ -76,11 +76,11 @@ def params_for_command(args):
     if command == "workspace-create":
         return "workspace.create", {"name": args.name}
     if command == "workspace-get":
-        return "workspace.get", {"workspace_id_or_name": args.workspace}
+        return "workspace.get", {"workspace": args.workspace}
     if command == "workspace-list":
         return "workspace.list", {}
     if command == "process-get":
-        params = {"process_id_or_name": args.process}
+        params = {"process": args.process}
         if args.workspace is not None:
             params["workspace_id"] = args.workspace
         return "process.get", params

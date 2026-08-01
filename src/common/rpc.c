@@ -319,7 +319,7 @@ int cubicle_rpc_success(char *buffer, size_t buffer_size,
                    append_json_string(buffer, buffer_size, &used,
                                       request_id) == 0 &&
                    append_raw(buffer, buffer_size, &used,
-                              ",\"ok\":true,\"result\":") == 0 &&
+                              ",\"success\":true,\"result\":") == 0 &&
                    append_raw(buffer, buffer_size, &used, result_json) == 0 &&
                    append_raw(buffer, buffer_size, &used, "}") == 0
                ? 0
@@ -346,7 +346,7 @@ int cubicle_rpc_error(char *buffer, size_t buffer_size,
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"request_id\":\"%s\",\"ok\":false,\"error\":{\"code\":\"%s\",\"message\":\"%s\",\"retryable\":%s,\"system_errno\":%d}}",
+                          "{\"request_id\":\"%s\",\"success\":false,\"error\":{\"code\":\"%s\",\"message\":\"%s\",\"retryable\":%s,\"system_errno\":%d}}",
                           request_id, cubicle_error_code_name(code),
                           escaped_message, retryable ? "true" : "false",
                           system_errno);
@@ -538,7 +538,7 @@ int cubicle_rpc_get_object(const char *json, const char *field,
 
 int cubicle_rpc_response_ok(const char *json, int *ok_out)
 {
-    return cubicle_rpc_get_bool(json, "ok", ok_out);
+    return cubicle_rpc_get_bool(json, "success", ok_out);
 }
 
 static cubicle_error_code_t error_code_from_name(const char *name)

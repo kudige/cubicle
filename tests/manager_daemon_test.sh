@@ -79,7 +79,7 @@ send_manager_command() {
 
 # Endpoint test for manager.ping
 ping_response=$(send_manager_command ping)
-printf "%s" "$ping_response" | grep -q '"ok": true'
+printf "%s" "$ping_response" | grep -q '"success": true'
 printf "%s" "$ping_response" | grep -q '"protocol_major": 0'
 printf "%s" "$ping_response" | grep -q '"protocol_minor": 1'
 manager_id=$(python3 - "$ping_response" <<'PY'
@@ -92,14 +92,14 @@ grep -q "^$manager_id$" "$state_dir/manager-id"
 
 # Endpoint test for manager.status
 status_response=$(send_manager_command status)
-printf "%s" "$status_response" | grep -q '"ok": true'
+printf "%s" "$status_response" | grep -q '"success": true'
 printf "%s" "$status_response" | grep -q "\"manager_id\": \"$manager_id\""
 printf "%s" "$status_response" | grep -q '"workspace_count": 1'
 printf "%s" "$status_response" | grep -q '"process_count": 1'
 
 # Endpoint test for workspace.create
 workspace_create_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
-printf "%s" "$workspace_create_response" | grep -q '"ok": true'
+printf "%s" "$workspace_create_response" | grep -q '"success": true'
 printf "%s" "$workspace_create_response" | grep -q '"name": "Project B"'
 workspace_b_id=$(python3 - "$workspace_create_response" <<'PY'
 import json
@@ -109,8 +109,8 @@ PY
 )
 
 # Endpoint test for workspace.get
-workspace_get_response=$(send_manager_rpc workspace.get '{"workspace_id_or_name":"Project B"}')
-printf "%s" "$workspace_get_response" | grep -q '"ok": true'
+workspace_get_response=$(send_manager_rpc workspace.get '{"workspace":"Project B"}')
+printf "%s" "$workspace_get_response" | grep -q '"success": true'
 printf "%s" "$workspace_get_response" | grep -q "\"id\": \"$workspace_b_id\""
 
 # Endpoint test for workspace.list
@@ -122,19 +122,19 @@ printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
 # Endpoint test for workspace.create error response
 workspace_duplicate_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error workspace-create "Project B")
-printf "%s" "$workspace_duplicate_response" | grep -q '"ok": false'
+printf "%s" "$workspace_duplicate_response" | grep -q '"success": false'
 printf "%s" "$workspace_duplicate_response" | grep -q '"code": "already_exists"'
 
 # Endpoint test for process.get
-process_get_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"$process_id\"}")
-printf "%s" "$process_get_response" | grep -q '"ok": true'
+process_get_response=$(send_manager_rpc process.get "{\"process\":\"$process_id\"}")
+printf "%s" "$process_get_response" | grep -q '"success": true'
 printf "%s" "$process_get_response" | grep -q "\"id\": \"$process_id\""
 printf "%s" "$process_get_response" | grep -q '"friendly_name": "daemon-1"'
 printf "%s" "$process_get_response" | grep -q '"state": "running"'
 
 # Endpoint test for process.get workspace-local name lookup
-process_name_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"daemon-1\",\"workspace_id\":\"$workspace_id\"}")
-printf "%s" "$process_name_response" | grep -q '"ok": true'
+process_name_response=$(send_manager_rpc process.get "{\"process\":\"daemon-1\",\"workspace_id\":\"$workspace_id\"}")
+printf "%s" "$process_name_response" | grep -q '"success": true'
 printf "%s" "$process_name_response" | grep -q "\"id\": \"$process_id\""
 
 # Endpoint test for process.list
@@ -144,7 +144,7 @@ printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-1"'
 
 # Endpoint test for process.read_output
 read_output_response=$(send_manager_rpc process.read_output "{\"process_id\":\"$process_id\",\"stream\":\"stdout\",\"offset\":0,\"maximum_length\":16}")
-printf "%s" "$read_output_response" | grep -q '"ok": true'
+printf "%s" "$read_output_response" | grep -q '"success": true'
 printf "%s" "$read_output_response" | grep -q '"start_offset": 0'
 printf "%s" "$read_output_response" | grep -q '"next_offset": 6'
 printf "%s" "$read_output_response" | grep -q '"end_of_stream": true'
@@ -165,7 +165,7 @@ grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
 
 # Endpoint test for events.list
 events_list_response=$(send_manager_rpc events.list "{\"workspace_id\":\"$workspace_id\",\"process_id\":\"$process_id\",\"after_sequence\":0,\"limit\":10}")
-printf "%s" "$events_list_response" | grep -q '"ok": true'
+printf "%s" "$events_list_response" | grep -q '"success": true'
 printf "%s" "$events_list_response" | grep -q '"count": 3'
 printf "%s" "$events_list_response" | grep -q '"type": "process_started"'
 printf "%s" "$events_list_response" | grep -q '"type": "output_available"'
@@ -181,7 +181,7 @@ fi
 
 # Endpoint test for manager.shutdown
 shutdown_response=$(send_manager_command shutdown)
-if ! printf "%s" "$shutdown_response" | grep -q '"ok": true'; then
+if ! printf "%s" "$shutdown_response" | grep -q '"success": true'; then
     echo "unexpected shutdown response: $shutdown_response" >&2
     exit 1
 fi

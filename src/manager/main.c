@@ -1821,8 +1821,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         cubicle_workspace_record_t workspace;
         if (cubicle_rpc_get_object(request, "params", params,
                                    sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "workspace_id_or_name",
-                                   name_or_id, sizeof(name_or_id)) < 0) {
+            cubicle_rpc_get_string(params, "workspace", name_or_id,
+                                   sizeof(name_or_id)) < 0) {
             return manager_api_error(client_fd, request_id,
                                      CUBICLE_ERR_INVALID_ARGUMENT,
                                      "missing workspace reference", false, 0);
@@ -1900,8 +1900,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         const char *workspace_id_ptr = NULL;
         if (cubicle_rpc_get_object(request, "params", params,
                                    sizeof(params)) < 0 ||
-            cubicle_rpc_get_string(params, "process_id_or_name",
-                                   process_ref, sizeof(process_ref)) < 0) {
+            cubicle_rpc_get_string(params, "process", process_ref,
+                                   sizeof(process_ref)) < 0) {
             return manager_api_error(client_fd, request_id,
                                      CUBICLE_ERR_INVALID_ARGUMENT,
                                      "missing process reference", false, 0);
@@ -2244,6 +2244,21 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                              "method is not implemented", false, 0);
 }
 
+static int handle_manager_connection(const manager_state_t *state,
+                                     int client_fd,
+                                     int *shutdown_requested,
+                                     uint64_t started_at_ms)
+{
+    while (!*shutdown_requested) {
+        if (handle_manager_client(state, client_fd, shutdown_requested,
+                                  started_at_ms) == 0) {
+            continue;
+        }
+        return errno == ECONNRESET ? 0 : -1;
+    }
+    return 0;
+}
+
 static int command_daemon(const manager_state_t *state, int argc, char **argv)
 {
     const char *requested_socket = NULL;
@@ -2332,8 +2347,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 break;
             }
 
-            if (handle_manager_client(state, client_fd, &shutdown_requested,
-                                      started_at_ms) < 0) {
+            if (handle_manager_connection(state, client_fd,
+                                          &shutdown_requested,
+                                          started_at_ms) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
                 result = 1;
             }

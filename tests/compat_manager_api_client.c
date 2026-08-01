@@ -599,7 +599,7 @@ cubicle_error_code_t cubicle_workspace_get(
     }
     char params[768];
     int length = snprintf(params, sizeof(params),
-                          "{\"workspace_id_or_name\":\"%s\"}",
+                          "{\"workspace\":\"%s\"}",
                           escaped_reference);
     if (length < 0 || (size_t)length >= sizeof(params)) {
         return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
@@ -819,7 +819,7 @@ cubicle_error_code_t cubicle_process_get(
     }
     char params[1024];
     int length = snprintf(params, sizeof(params),
-                          "{\"process_id_or_name\":\"%s\",\"workspace_id\":\"%s\"}",
+                          "{\"process\":\"%s\",\"workspace_id\":\"%s\"}",
                           escaped_ref, escaped_workspace);
     if (length < 0 || (size_t)length >= sizeof(params)) {
         return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, ENOSPC,
