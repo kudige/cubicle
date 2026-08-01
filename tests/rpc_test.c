@@ -355,6 +355,107 @@ static void test_rpc_envelope_validation(void)
                -1, "response unknown top-level field");
 }
 
+static void test_checked_json_accessors(void)
+{
+    cubicle_json_doc_t parsed;
+    expect_int(cubicle_json_parse(&parsed,
+                                  "{\"id\":\"abc-123\",\"count\":7,"
+                                  "\"enabled\":true,\"items\":[],"
+                                  "\"child\":{\"ok\":true},"
+                                  "\"optional\":null}"),
+               0, "checked accessors parse");
+
+    cubicle_validation_error_t error;
+    memset(&error, 0, sizeof(error));
+    char id[16];
+    expect_int(cubicle_json_get_required_string(parsed.root, "id", id,
+                                                sizeof(id), &error),
+               0, "required string");
+    expect_string(id, "abc-123", "required string value");
+    expect_int(cubicle_json_validate_ascii_identifier(id, "id", &error), 0,
+               "ascii identifier");
+
+    uint64_t count = 0;
+    expect_int(cubicle_json_get_required_u64(parsed.root, "count", &count,
+                                             &error),
+               0, "required u64");
+    expect_int((int)count, 7, "required u64 value");
+
+    int present = 0;
+    count = 0;
+    present = 0;
+    expect_int(cubicle_json_get_optional_u64(parsed.root, "count", &count,
+                                             &present, &error),
+               0, "optional u64 present");
+    expect_int(present, 1, "optional u64 present flag");
+    expect_int((int)count, 7, "optional u64 value");
+
+    bool enabled = false;
+    present = 0;
+    expect_int(cubicle_json_get_optional_bool(parsed.root, "enabled",
+                                              &enabled, &present, &error),
+               0, "optional bool present");
+    expect_int(present, 1, "optional bool present flag");
+    expect_int(enabled, 1, "optional bool value");
+
+    present = 1;
+    char missing[8] = "keep";
+    expect_int(cubicle_json_get_optional_string(parsed.root, "missing",
+                                                missing, sizeof(missing),
+                                                &present, &error),
+               0, "optional missing string");
+    expect_int(present, 0, "optional missing present");
+    expect_string(missing, "keep", "optional missing keeps value");
+
+    expect_int(cubicle_json_get_optional_string(parsed.root, "optional",
+                                                missing, sizeof(missing),
+                                                &present, &error),
+               -1, "optional null rejected");
+    expect_string(error.field_path, "optional", "optional null field");
+    expect_string(error.expected, "non-null", "optional null expected");
+
+    expect_int(cubicle_json_get_required_string(parsed.root, "count", id,
+                                                sizeof(id), &error),
+               -1, "required string wrong type");
+    expect_string(error.field_path, "count", "wrong type field");
+    expect_string(error.expected, "string", "wrong type expected");
+
+    expect_int(cubicle_json_validate_ascii_identifier("abc def", "id",
+                                                      &error),
+               -1, "ascii identifier rejects spaces");
+    expect_string(error.field_path, "id", "ascii invalid field");
+
+    yyjson_val *items = NULL;
+    expect_int(cubicle_json_get_required_array(parsed.root, "items", &items,
+                                               &error),
+               0, "required array");
+    expect_int(items != NULL, 1, "required array value");
+
+    yyjson_val *child = NULL;
+    expect_int(cubicle_json_get_required_object(parsed.root, "child", &child,
+                                                &error),
+               0, "required object");
+    expect_int(child != NULL, 1, "required object value");
+
+    child = NULL;
+    present = 0;
+    expect_int(cubicle_json_get_optional_object(parsed.root, "child", &child,
+                                                &present, &error),
+               0, "optional object present");
+    expect_int(present, 1, "optional object present flag");
+    expect_int(child != NULL, 1, "optional object value");
+
+    child = NULL;
+    present = 1;
+    expect_int(cubicle_json_get_optional_object(parsed.root, "missing_child",
+                                                &child, &present, &error),
+               0, "optional object missing");
+    expect_int(present, 0, "optional object missing flag");
+    expect_int(child == NULL, 1, "optional object missing value");
+
+    cubicle_json_cleanup(&parsed);
+}
+
 int main(void)
 {
     test_escape();
@@ -366,5 +467,6 @@ int main(void)
     test_json_helpers();
     test_json_hardening();
     test_rpc_envelope_validation();
+    test_checked_json_accessors();
     return failures == 0 ? 0 : 1;
 }
