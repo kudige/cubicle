@@ -240,7 +240,8 @@ static cubicle_process_mode_t process_mode_from_name(const char *name)
     if (strcmp(name, "tty") == 0) {
         return CUBICLE_PROCESS_TTY;
     }
-    if (strcmp(name, "tty-captured-stderr") == 0) {
+    if (strcmp(name, "term") == 0 ||
+        strcmp(name, "tty-captured-stderr") == 0) {
         return CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
     }
     return 0;

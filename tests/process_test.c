@@ -25,7 +25,7 @@ int main(void)
                               "tty");
     failures += expect_string("tty captured stderr mode",
                               cubicle_process_mode_name(CUBICLE_PROCESS_TTY_CAPTURED_STDERR),
-                              "tty-captured-stderr");
+                              "term");
     failures += expect_string("unknown mode",
                               cubicle_process_mode_name((cubicle_process_mode_t)99),
                               "unknown");

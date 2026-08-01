@@ -8,7 +8,7 @@ const char *cubicle_process_mode_name(cubicle_process_mode_t mode)
     case CUBICLE_PROCESS_TTY:
         return "tty";
     case CUBICLE_PROCESS_TTY_CAPTURED_STDERR:
-        return "tty-captured-stderr";
+        return "term";
     default:
         return "unknown";
     }

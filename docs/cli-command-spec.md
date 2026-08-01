@@ -644,7 +644,7 @@ Implement:
 - `cube workspace`
 - `cube workspace NAME`
 - `cube workspace list`
-- `cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND...`
+- `cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND...`
 - `cube ps`
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
@@ -712,7 +712,7 @@ Implement:
 
 - `cube defaults show`
 - `cube defaults set launch foreground|background`
-- `cube defaults set mode stream|tty`
+- `cube defaults set mode stream|tty|term`
 - `cube defaults reset launch|mode`
 - config file loading and atomic writes
 - precedence:

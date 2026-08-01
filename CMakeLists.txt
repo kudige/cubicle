@@ -320,6 +320,13 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-term-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_term_test.sh
+)
+
+add_test(
     NAME cubicle-controller-tty-local-input-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>

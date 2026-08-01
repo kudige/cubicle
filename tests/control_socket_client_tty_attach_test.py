@@ -68,6 +68,17 @@ def wait_for_event(events_log, needle):
     raise AssertionError(f"missing event: {needle}")
 
 
+def wait_for_raw_terminal(fd):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        attributes = termios.tcgetattr(fd)
+        local_flags = attributes[3]
+        if not (local_flags & termios.ECHO) and not (local_flags & termios.ICANON):
+            return
+        time.sleep(0.05)
+    raise AssertionError("attach client did not enter raw terminal mode")
+
+
 def send_socket_command(socket_path, command):
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -331,12 +342,14 @@ print("bytes:" + data.hex(), flush=True)
                 stderr=subprocess.PIPE,
                 close_fds=True,
             )
-            os.close(slave_fd)
-            slave_fd = -1
 
             output = read_until(master_fd, "ready", time.monotonic() + 5)
             if "ready" not in output:
                 raise AssertionError(f"missing raw attach output: {output!r}")
+
+            wait_for_raw_terminal(slave_fd)
+            os.close(slave_fd)
+            slave_fd = -1
 
             os.write(master_fd, b"\x1b[A\x1b[B\x1b[C")
             output += read_until(master_fd, "bytes:1b5b411b5b421b5b43",

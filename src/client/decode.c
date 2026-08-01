@@ -138,7 +138,8 @@ int process_mode_from_string(const char *text, cubicle_process_mode_t *out)
 {
     if (strcmp(text, "stream") == 0) *out = CUBICLE_PROCESS_STREAM;
     else if (strcmp(text, "tty") == 0) *out = CUBICLE_PROCESS_TTY;
-    else if (strcmp(text, "tty-captured-stderr") == 0) *out = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+    else if (strcmp(text, "term") == 0 ||
+             strcmp(text, "tty-captured-stderr") == 0) *out = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
     else return -1;
     return 0;
 }

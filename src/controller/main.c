@@ -15,7 +15,7 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|tty-captured-stderr -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
             program);
 }
 
@@ -91,7 +91,8 @@ static int parse_mode(const char *name, cubicle_process_mode_t *mode)
         return 0;
     }
 
-    if (strcmp(name, "tty-captured-stderr") == 0) {
+    if (strcmp(name, "term") == 0 ||
+        strcmp(name, "tty-captured-stderr") == 0) {
         *mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
         return 0;
     }
@@ -184,12 +185,6 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
-        fprintf(stderr, "%s mode is parsed but not implemented yet\n",
-                cubicle_process_mode_name(process_mode));
-        return 3;
-    }
-
     if (daemon && daemonize_controller() < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         return 1;
@@ -198,6 +193,11 @@ int main(int argc, char **argv)
     if (process_mode == CUBICLE_PROCESS_TTY) {
         return run_tty(&argv[command_index], state_dir, control_socket,
                        stdin_policy, completed_retention_ms);
+    }
+
+    if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
+        return run_term(&argv[command_index], state_dir, control_socket,
+                        stdin_policy, completed_retention_ms);
     }
 
     return run_stream(&argv[command_index], state_dir, control_socket,

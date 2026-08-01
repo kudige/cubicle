@@ -75,13 +75,18 @@ static void cube_sleep_poll_interval(void)
     nanosleep(&delay, NULL);
 }
 
+static int process_mode_uses_terminal(const char *mode)
+{
+    return strcmp(mode, "tty") == 0 || strcmp(mode, "term") == 0;
+}
+
 static void print_usage(FILE *stream)
 {
     fprintf(stream,
             "Usage:\n"
             "  cube [--manager-socket PATH] [--workspace NAME] [--json] COMMAND [ARG...]\n"
             "  cube workspace NAME\n"
-            "  cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND [ARG...]\n"
+            "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]\n"
             "  cube ps\n"
             "  cube logs [--follow] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
@@ -1142,7 +1147,7 @@ static int build_process_start_params(cubicle_json_builder_t *params,
         cubicle_json_builder_append_string(
             params,
             run_options->background ||
-                    strcmp(run_options->mode, "tty") == 0
+                    process_mode_uses_terminal(run_options->mode)
                 ? "open"
                 : "eof") < 0 ||
         cubicle_json_builder_append(params, ",\"argv\":[") < 0) {
@@ -1299,10 +1304,18 @@ static int follow_process_output(const char *manager_socket,
     for (;;) {
         int advanced = 0;
         int result = 0;
-        if (strcmp(mode, "tty") == 0) {
+        if (process_mode_uses_terminal(mode)) {
             result = read_process_output_once(manager_socket, process_id,
                                               "tty", &tty_offset, stdout,
                                               &tty_end, &advanced);
+            if (result == 0 && strcmp(mode, "term") == 0) {
+                int stream_advanced = 0;
+                result = read_process_output_once(manager_socket, process_id,
+                                                  "stderr", &stderr_offset,
+                                                  stderr, &stderr_end,
+                                                  &stream_advanced);
+                advanced = advanced || stream_advanced;
+            }
         } else {
             int stream_advanced = 0;
             result = read_process_output_once(manager_socket, process_id,
@@ -1331,7 +1344,8 @@ static int follow_process_output(const char *manager_socket,
         }
         if (terminal &&
             ((strcmp(mode, "tty") == 0 && tty_end) ||
-             (strcmp(mode, "tty") != 0 && stdout_end && stderr_end))) {
+             (strcmp(mode, "term") == 0 && tty_end && stderr_end) ||
+             (!process_mode_uses_terminal(mode) && stdout_end && stderr_end))) {
             return 0;
         }
         if (!advanced) {
@@ -1382,6 +1396,13 @@ static int process_logs(const char *manager_socket,
 
     if (strcmp(mode, "tty") == 0) {
         return read_process_output(manager_socket, process_id, "tty", stdout);
+    }
+    if (strcmp(mode, "term") == 0) {
+        int tty_result = read_process_output(manager_socket, process_id,
+                                             "tty", stdout);
+        int stderr_result = read_process_output(manager_socket, process_id,
+                                                "stderr", stderr);
+        return tty_result != 0 ? tty_result : stderr_result;
     }
 
     int stdout_result = read_process_output(manager_socket, process_id,
@@ -1855,7 +1876,7 @@ static int attachment_loop(const char *controller_socket,
     struct termios original;
     int raw_enabled = 0;
 
-    if (strcmp(mode, "tty") == 0 &&
+    if (process_mode_uses_terminal(mode) &&
         isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
         if (tcgetattr(STDIN_FILENO, &original) < 0) {
             fprintf(stderr, "cube: failed to read terminal mode: %s\n",
@@ -1888,10 +1909,16 @@ static int attachment_loop(const char *controller_socket,
         int stderr_end = 1;
         int tty_end = 1;
 
-        if (strcmp(mode, "tty") == 0 &&
+        if (process_mode_uses_terminal(mode) &&
             (channels & (CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT)) != 0) {
             result = controller_read_stream(controller_socket, "tty",
                                             &tty_offset, stdout, &tty_end);
+            if (result == 0 && strcmp(mode, "term") == 0 &&
+                (channels & CUBE_CHANNEL_STDERR) != 0) {
+                result = controller_read_stream(controller_socket, "stderr",
+                                                &stderr_offset, stderr,
+                                                &stderr_end);
+            }
         } else {
             if ((channels & CUBE_CHANNEL_STDOUT) != 0) {
                 result = controller_read_stream(controller_socket, "stdout",
@@ -1905,7 +1932,7 @@ static int attachment_loop(const char *controller_socket,
             }
         }
         if (result == 1 &&
-            (!stdin_open || strcmp(mode, "tty") == 0)) {
+            (!stdin_open || process_mode_uses_terminal(mode))) {
             result = 0;
             break;
         }
@@ -1921,7 +1948,7 @@ static int attachment_loop(const char *controller_socket,
                                                    &completed);
         if (status_result == 1 &&
             ((stdout_end && stderr_end && tty_end && !stdin_open) ||
-             strcmp(mode, "tty") == 0)) {
+             process_mode_uses_terminal(mode))) {
             break;
         }
         if (status_result != 0) {
@@ -1996,8 +2023,11 @@ static int attach_to_process_id(const char *manager_socket,
                                 int read_only)
 {
     unsigned int requested_channels = CUBE_CHANNEL_STDOUT | CUBE_CHANNEL_STDERR;
-    if (strcmp(mode, "tty") == 0) {
+    if (process_mode_uses_terminal(mode)) {
         requested_channels = CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT;
+        if (strcmp(mode, "term") == 0) {
+            requested_channels |= CUBE_CHANNEL_STDERR;
+        }
     }
     if (!read_only) {
         requested_channels |= CUBE_CHANNEL_STDIN;
@@ -2140,8 +2170,9 @@ static int process_run(const char *manager_socket,
             continue;
         }
         if (strcmp(argument, "--term") == 0) {
-            fprintf(stderr, "cube: term mode is not implemented yet\n");
-            return 2;
+            run_options.mode = "term";
+            ++argument_index;
+            continue;
         }
         if (strcmp(argument, "--name") == 0) {
             if (argument_index + 1 >= argc) {
@@ -2268,7 +2299,7 @@ static int process_run(const char *manager_socket,
     }
     cleanup_rpc_response(&start_response);
 
-    if (strcmp(mode, "tty") == 0) {
+    if (process_mode_uses_terminal(mode)) {
         return attach_to_process_id(manager_socket, process_id, process_name,
                                     mode, 0);
     }

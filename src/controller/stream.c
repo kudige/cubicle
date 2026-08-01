@@ -832,16 +832,25 @@ static int open_pty_pair(int *master_fd, int *slave_fd)
     return 0;
 }
 
-int run_tty(char **command, const char *state_dir,
-            const char *control_socket,
-            stdin_policy_t stdin_policy,
-            int completed_retention_ms)
+static int run_pty_mode(char **command, const char *state_dir,
+                        const char *control_socket,
+                        stdin_policy_t stdin_policy,
+                        int completed_retention_ms,
+                        cubicle_process_mode_t process_mode)
 {
     int master_fd = -1;
     int slave_fd = -1;
+    int stderr_pipe[2] = {-1, -1};
+    int capture_stderr =
+        process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
 
     if (open_pty_pair(&master_fd, &slave_fd) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
+        return 1;
+    }
+    if (capture_stderr && create_pipe(stderr_pipe, "stderr") < 0) {
+        close_if_open(&master_fd);
+        close_if_open(&slave_fd);
         return 1;
     }
 
@@ -850,11 +859,14 @@ int run_tty(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         close_if_open(&master_fd);
         close_if_open(&slave_fd);
+        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stderr_pipe[1]);
         return 1;
     }
 
     if (child_pid == 0) {
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         if (setsid() < 0) {
             _exit(127);
         }
@@ -862,21 +874,26 @@ int run_tty(char **command, const char *state_dir,
 
         if (dup2(slave_fd, STDIN_FILENO) < 0 ||
             dup2(slave_fd, STDOUT_FILENO) < 0 ||
-            dup2(slave_fd, STDERR_FILENO) < 0) {
+            dup2(capture_stderr ? stderr_pipe[1] : slave_fd,
+                 STDERR_FILENO) < 0) {
             _exit(127);
         }
 
         close_if_open(&slave_fd);
+        close_if_open(&stderr_pipe[1]);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
 
     close_if_open(&slave_fd);
+    close_if_open(&stderr_pipe[1]);
 
-    if (set_nonblocking(master_fd) < 0) {
+    if (set_nonblocking(master_fd) < 0 ||
+        (capture_stderr && set_nonblocking(stderr_pipe[0]) < 0)) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         return 1;
     }
 
@@ -885,12 +902,13 @@ int run_tty(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         return 1;
     }
 
     char message[256];
-    snprintf(message, sizeof(message), "started pid %ld in tty mode",
-             (long)child_pid);
+    snprintf(message, sizeof(message), "started pid %ld in %s mode",
+             (long)child_pid, cubicle_process_mode_name(process_mode));
     cubicle_log(CUBICLE_LOG_INFO, "controller", message);
 
     controller_state_t state;
@@ -898,7 +916,7 @@ int run_tty(char **command, const char *state_dir,
     int child_reaped = 0;
     int child_result = 1;
     if (initialize_controller_state(&state, state_dir, child_pid, command,
-                                    CUBICLE_PROCESS_TTY, stdin_policy) < 0) {
+                                    process_mode, stdin_policy) < 0) {
         snprintf(message, sizeof(message), "failed to initialize state %s: %s",
                  state_dir == NULL ? "(default)" : state_dir,
                  strerror(errno));
@@ -906,6 +924,7 @@ int run_tty(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         close_controller_state(&state);
         return 1;
     }
@@ -922,6 +941,7 @@ int run_tty(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         close_controller_state(&state);
         return 1;
     }
@@ -934,12 +954,12 @@ int run_tty(char **command, const char *state_dir,
          .name = "stdout",
          .offset = &state.stdout_offset,
          .open = 1},
-        {.fd = -1,
+        {.fd = capture_stderr ? stderr_pipe[0] : -1,
          .output_fd = STDERR_FILENO,
          .log_fd = state.stderr_fd,
          .name = "stderr",
          .offset = &state.stderr_offset,
-         .open = 0},
+         .open = capture_stderr ? 1 : 0},
     };
 
     terminal_mode_t terminal_mode = {.enabled = 0};
@@ -952,6 +972,7 @@ int run_tty(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         close_if_open(&control_fd);
         close_if_open(&master_fd);
+        close_if_open(&stderr_pipe[0]);
         close_controller_state(&state);
         return 1;
     }
@@ -978,6 +999,9 @@ int run_tty(char **command, const char *state_dir,
         sigaction(SIGWINCH, &previous_winch, NULL);
     }
 
+    close_if_open(&pipes[0].fd);
+    close_if_open(&pipes[1].fd);
+
     child_result = wait_for_child(child_pid, &state, &child_reaped,
                                   &child_result);
     int retention_result = 0;
@@ -994,4 +1018,23 @@ int run_tty(char **command, const char *state_dir,
     }
 
     return child_result;
+}
+
+int run_tty(char **command, const char *state_dir,
+            const char *control_socket,
+            stdin_policy_t stdin_policy,
+            int completed_retention_ms)
+{
+    return run_pty_mode(command, state_dir, control_socket, stdin_policy,
+                        completed_retention_ms, CUBICLE_PROCESS_TTY);
+}
+
+int run_term(char **command, const char *state_dir,
+             const char *control_socket,
+             stdin_policy_t stdin_policy,
+             int completed_retention_ms)
+{
+    return run_pty_mode(command, state_dir, control_socket, stdin_policy,
+                        completed_retention_ms,
+                        CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
 }

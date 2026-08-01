@@ -124,5 +124,9 @@ int run_tty(char **command, const char *state_dir,
             const char *control_socket,
             stdin_policy_t stdin_policy,
             int completed_retention_ms);
+int run_term(char **command, const char *state_dir,
+             const char *control_socket,
+             stdin_policy_t stdin_policy,
+             int completed_retention_ms);
 
 #endif

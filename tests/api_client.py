@@ -295,7 +295,7 @@ def build_parser():
     process_start = subparsers.add_parser("process-start")
     process_start.add_argument("--workspace", required=True)
     process_start.add_argument("--friendly-name")
-    process_start.add_argument("--mode", choices=("stream", "tty"),
+    process_start.add_argument("--mode", choices=("stream", "tty", "term"),
                                default="stream")
     process_start.add_argument("--stdin-policy", choices=("open", "eof"),
                                default="open")

@@ -141,3 +141,27 @@ if [ -s "$state_dir/controllers/$tty_process_id/stderr.log" ]; then
     echo "manager-started tty should not capture independent stderr" >&2
     exit 1
 fi
+
+term_output=$("$CUBICLE_MANAGER" \
+    --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    process start \
+    --workspace "Project A" \
+    --friendly-name term-1 \
+    --mode term \
+    --stdin-policy eof \
+    -- sh -c 'test -t 0 && test -t 1 && ! test -t 2; printf "manager-term\n"; printf "manager-term-err\n" >&2')
+
+term_process_id=${term_output#process id=}
+term_process_id=${term_process_id%% workspace_id=*}
+term_socket=${term_output##* control_socket=}
+
+"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$term_process_id" >"$tmpdir/resolve-term"
+grep -q "^$term_process_id	$workspace_id	term-1	term	exited	.*	$term_socket$" "$tmpdir/resolve-term"
+
+grep -q 'manager-term' "$state_dir/controllers/$term_process_id/stdout.log"
+if grep -q 'manager-term-err' "$state_dir/controllers/$term_process_id/stdout.log"; then
+    echo "manager-started term stderr should not be captured in stdout" >&2
+    exit 1
+fi
+grep -q 'manager-term-err' "$state_dir/controllers/$term_process_id/stderr.log"

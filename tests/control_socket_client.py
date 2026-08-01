@@ -212,7 +212,7 @@ def attach_stdin(socket_path, command):
         sys.stdout.buffer.write(response)
         sys.stdout.buffer.flush()
 
-        with maybe_raw_terminal(mode == "tty"):
+        with maybe_raw_terminal(mode in ("tty", "term")):
             while True:
                 chunk = sys.stdin.buffer.read(4096)
                 if not chunk:
@@ -224,8 +224,8 @@ def attach_stdin(socket_path, command):
 
 def attach_tty(socket_path, start):
     mode = get_controller_mode(socket_path)
-    if mode != "tty":
-        raise RuntimeError(f"attach tty requires mode=tty, got mode={mode}")
+    if mode not in ("tty", "term"):
+        raise RuntimeError(f"attach tty requires mode=tty or mode=term, got mode={mode}")
 
     if start is None:
         start = get_stdout_offset(socket_path)

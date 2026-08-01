@@ -323,15 +323,23 @@ if [ "$status" -ne 2 ]; then
 fi
 grep -q 'invalid signal' "$tmpdir/signal-invalid.err"
 
-set +e
-cube run --term true >"$tmpdir/run-term.out" 2>"$tmpdir/run-term.err"
-status=$?
-set -e
-if [ "$status" -ne 2 ]; then
-    echo "cube run --term should exit 2, got $status" >&2
+cube run --fg --term --name term-run sh -c \
+    'test -t 0 && test -t 1 && ! test -t 2; printf "term-out\n"; printf "term-err\n" >&2; sleep 0.2' \
+    >"$tmpdir/term-run.out" 2>"$tmpdir/term-run.err"
+grep -q 'term-out' "$tmpdir/term-run.out"
+grep -q 'term-err' "$tmpdir/term-run.err"
+if grep -q 'term-err' "$tmpdir/term-run.out"; then
+    echo "cube foreground term stderr should not be merged into stdout" >&2
     exit 1
 fi
-grep -q 'term mode is not implemented yet' "$tmpdir/run-term.err"
+cube logs term-run >"$tmpdir/term-run-logs.out" 2>"$tmpdir/term-run-logs.err"
+grep -q 'term-out' "$tmpdir/term-run-logs.out"
+grep -q 'term-err' "$tmpdir/term-run-logs.err"
+if grep -q 'term-err' "$tmpdir/term-run-logs.out"; then
+    echo "cube term logs should keep stderr separate" >&2
+    exit 1
+fi
+cube remove term-run >/dev/null
 
 follow_logs_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name follow-logs -- sh -c \

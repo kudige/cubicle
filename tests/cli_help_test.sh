@@ -32,7 +32,7 @@ if [ -s "$PWD/cube-help.err" ]; then
 fi
 grep -q 'Usage:' "$PWD/cube-help.out"
 grep -q 'cube workspace NAME' "$PWD/cube-help.out"
-grep -q 'cube run \[--fg|--bg\] \[--stream|--tty\]' "$PWD/cube-help.out"
+grep -q 'cube run \[--fg|--bg\] \[--stream|--tty|--term\]' "$PWD/cube-help.out"
 grep -q 'cube logs \[--follow\] NAME' "$PWD/cube-help.out"
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube cleanup' "$PWD/cube-help.out"

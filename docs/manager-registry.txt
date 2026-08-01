@@ -128,15 +128,16 @@ cubicle-manager \
   process start \
   --workspace "Project A" \
   --friendly-name make-1 \
-  --mode stream|tty \
+  --mode stream|tty|term \
   --stdin-policy eof \
   -- make
 ```
 
-Starts a stream-mode or TTY-mode controller as a daemon, waits for its control
+Starts a stream, TTY, or term-mode controller as a daemon, waits for its control
 socket and metadata, then registers the process/controller mapping. Plain TTY
 mode routes stdin, stdout, and stderr through a PTY and exposes combined
-terminal output through the existing stdout stream.
+output. Term mode routes stdin/stdout through a PTY while retaining stderr as a
+separate stream.
 Start fails before launching a controller if the friendly name is already
 present in the target workspace.
 

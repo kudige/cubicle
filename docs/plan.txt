@@ -36,7 +36,6 @@
   - notify the managed process group after TTY window-size changes
   - preserve socket stdin attachment semantics for interactive TTY input
   - support TTY resize over the control socket
-  - keep tty-captured-stderr reserved for the later phase
 - Added initial durable controller state for stream mode:
   - metadata
   - stdout.log
@@ -337,7 +336,7 @@
   - docs/cli-command-spec.md now uses cube run [OPTIONS] COMMAND [ARG...]
   - top-level cube COMMAND shortcut is reserved for a later phase
 - Added initial cube run implementation over the manager API:
-  - cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND [ARG...]
+  - cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
   - foreground stream fallback waits and drains retained stdout/stderr
   - background launch returns startup metadata or human-readable status
   - generated process names from command basenames
@@ -395,6 +394,13 @@
   - cube logs --follow tails retained stdout/stderr or TTY output until process completion
   - cube events --follow polls manager events until interrupted
   - cube events --follow --iterations N provides bounded follow mode for tests and scripts
+- Implemented term mode:
+  - controller --mode term wires stdin/stdout through a PTY
+  - controller --mode term captures stderr through a separate pipe
+  - term metadata and process_started events persist mode=term
+  - manager process start and framed process.start accept term
+  - cube run --term, cube connect, and cube logs handle terminal output with separately retained stderr
+  - controller, manager, and cube E2E tests cover term stdout/stderr separation
 
 ## Next
 
@@ -418,8 +424,3 @@
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
    - PTY behavior tests when PTY support lands.
-
-4. Implement TTY with captured stderr.
-   - Wire stdin/stdout through PTY.
-   - Capture stderr through a separate pipe.
-   - Persist and expose stderr independently.
