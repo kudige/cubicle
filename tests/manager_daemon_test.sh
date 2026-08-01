@@ -77,6 +77,7 @@ send_manager_command() {
     esac
 }
 
+# Endpoint test for manager.ping
 ping_response=$(send_manager_command ping)
 printf "%s" "$ping_response" | grep -q '"ok": true'
 printf "%s" "$ping_response" | grep -q '"protocol_major": 0'
@@ -89,12 +90,14 @@ PY
 )
 grep -q "^$manager_id$" "$state_dir/manager-id"
 
+# Endpoint test for manager.status
 status_response=$(send_manager_command status)
 printf "%s" "$status_response" | grep -q '"ok": true'
 printf "%s" "$status_response" | grep -q "\"manager_id\": \"$manager_id\""
 printf "%s" "$status_response" | grep -q '"workspace_count": 1'
 printf "%s" "$status_response" | grep -q '"process_count": 1'
 
+# Endpoint test for workspace.create
 workspace_create_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
 printf "%s" "$workspace_create_response" | grep -q '"ok": true'
 printf "%s" "$workspace_create_response" | grep -q '"name": "Project B"'
@@ -105,34 +108,41 @@ print(json.loads(sys.argv[1])["result"]["id"])
 PY
 )
 
+# Endpoint test for workspace.get
 workspace_get_response=$(send_manager_rpc workspace.get '{"workspace_id_or_name":"Project B"}')
 printf "%s" "$workspace_get_response" | grep -q '"ok": true'
 printf "%s" "$workspace_get_response" | grep -q "\"id\": \"$workspace_b_id\""
 
+# Endpoint test for workspace.list
 workspace_list_response=$(send_manager_rpc workspace.list)
 printf "%s" "$workspace_list_response" | grep -q '"count": 2'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project A"'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
 
+# Endpoint test for workspace.create error response
 workspace_duplicate_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error workspace-create "Project B")
 printf "%s" "$workspace_duplicate_response" | grep -q '"ok": false'
 printf "%s" "$workspace_duplicate_response" | grep -q '"code": "already_exists"'
 
+# Endpoint test for process.get
 process_get_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"$process_id\"}")
 printf "%s" "$process_get_response" | grep -q '"ok": true'
 printf "%s" "$process_get_response" | grep -q "\"id\": \"$process_id\""
 printf "%s" "$process_get_response" | grep -q '"friendly_name": "daemon-1"'
 printf "%s" "$process_get_response" | grep -q '"state": "running"'
 
+# Endpoint test for process.get workspace-local name lookup
 process_name_response=$(send_manager_rpc process.get "{\"process_id_or_name\":\"daemon-1\",\"workspace_id\":\"$workspace_id\"}")
 printf "%s" "$process_name_response" | grep -q '"ok": true'
 printf "%s" "$process_name_response" | grep -q "\"id\": \"$process_id\""
 
+# Endpoint test for process.list
 process_list_response=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
 printf "%s" "$process_list_response" | grep -q '"count": 1'
 printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-1"'
 
+# Endpoint test for process.read_output
 read_output_response=$(send_manager_rpc process.read_output "{\"process_id\":\"$process_id\",\"stream\":\"stdout\",\"offset\":0,\"maximum_length\":16}")
 printf "%s" "$read_output_response" | grep -q '"ok": true'
 printf "%s" "$read_output_response" | grep -q '"start_offset": 0'
@@ -153,6 +163,7 @@ grep -q "^$workspace_id	$process_id	daemon-1	seq=2 type=output stream=stdout" "$
 grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"
 grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
 
+# Endpoint test for events.list
 events_list_response=$(send_manager_rpc events.list "{\"workspace_id\":\"$workspace_id\",\"process_id\":\"$process_id\",\"after_sequence\":0,\"limit\":10}")
 printf "%s" "$events_list_response" | grep -q '"ok": true'
 printf "%s" "$events_list_response" | grep -q '"count": 3'
@@ -160,6 +171,7 @@ printf "%s" "$events_list_response" | grep -q '"type": "process_started"'
 printf "%s" "$events_list_response" | grep -q '"type": "output_available"'
 printf "%s" "$events_list_response" | grep -q '"type": "process_exited"'
 
+# Endpoint test for unsupported endpoint error response
 unknown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error call unknown)
 if ! printf "%s" "$unknown_response" | grep -q '"code": "unsupported"'; then
@@ -167,6 +179,7 @@ if ! printf "%s" "$unknown_response" | grep -q '"code": "unsupported"'; then
     exit 1
 fi
 
+# Endpoint test for manager.shutdown
 shutdown_response=$(send_manager_command shutdown)
 if ! printf "%s" "$shutdown_response" | grep -q '"ok": true'; then
     echo "unexpected shutdown response: $shutdown_response" >&2

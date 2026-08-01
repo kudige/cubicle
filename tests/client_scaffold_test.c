@@ -36,30 +36,39 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
 
     char response[1024];
     if (strstr(request_json, "\"session.local_bootstrap\"") != NULL) {
+        // Endpoint test for session.local_bootstrap
         assert(cubicle_rpc_success(response, sizeof(response), "c1",
                                    "{\"session_id\":\"session-1\",\"manager_id\":\"manager-1\",\"client_key_id\":\"local-key\",\"protocol_major\":0,\"protocol_minor\":1,\"negotiated_capabilities\":258,\"authenticated_at_ms\":10,\"expires_at_ms\":0}") == 0);
     } else if (strstr(request_json, "\"manager.ping\"") != NULL) {
+        // Endpoint test for manager.ping
         assert(cubicle_rpc_success(response, sizeof(response), "c2",
                                    "{\"manager_id\":\"manager-1\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":20,\"uptime_ms\":10}") == 0);
     } else if (strstr(request_json, "\"workspace.create\"") != NULL) {
+        // Endpoint test for workspace.create
         assert(cubicle_rpc_success(response, sizeof(response), "c3",
                                    "{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":0,\"running_process_count\":0}") == 0);
     } else if (strstr(request_json, "\"workspace.get\"") != NULL) {
+        // Endpoint test for workspace.get
         assert(cubicle_rpc_success(response, sizeof(response), "c4",
                                    "{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":2,\"running_process_count\":1}") == 0);
     } else if (strstr(request_json, "\"workspace.list\"") != NULL) {
+        // Endpoint test for workspace.list
         assert(cubicle_rpc_success(response, sizeof(response), "c5",
                                    "{\"workspaces\":[{\"manager_id\":\"manager-1\",\"id\":\"workspace-1\",\"name\":\"Project A\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":2,\"running_process_count\":1},{\"manager_id\":\"manager-1\",\"id\":\"workspace-2\",\"name\":\"Project B\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":0,\"running_process_count\":0}],\"count\":2,\"has_more\":false}") == 0);
     } else if (strstr(request_json, "\"process.get\"") != NULL) {
+        // Endpoint test for process.get
         assert(cubicle_rpc_success(response, sizeof(response), "c6",
                                    "{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}") == 0);
     } else if (strstr(request_json, "\"process.list\"") != NULL) {
+        // Endpoint test for process.list
         assert(cubicle_rpc_success(response, sizeof(response), "c7",
                                    "{\"processes\":[{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}],\"count\":1,\"has_more\":false}") == 0);
     } else if (strstr(request_json, "\"events.list\"") != NULL) {
+        // Endpoint test for events.list
         assert(cubicle_rpc_success(response, sizeof(response), "c8",
                                    "{\"events\":[{\"global_sequence\":1,\"workspace_sequence\":1,\"timestamp_ms\":0,\"type\":\"process_started\",\"workspace_id\":\"workspace-1\",\"process_id\":\"process-1\",\"payload\":\"seq=1 type=process_started\"}],\"count\":1,\"has_more\":false}") == 0);
     } else if (strstr(request_json, "\"process.read_output\"") != NULL) {
+        // Endpoint test for process.read_output
         assert(cubicle_rpc_success(response, sizeof(response), "c9",
                                    "{\"start_offset\":0,\"next_offset\":6,\"end_of_stream\":true,\"data\":\"hello\\n\",\"length\":6}") == 0);
     } else {
@@ -109,12 +118,14 @@ int main(void)
     assert(client != NULL);
     cubicle_session_info_t session;
     memset(&session, 0, sizeof(session));
+    // Endpoint test for session.local_bootstrap
     assert(cubicle_client_session_info(client, &session) == CUBICLE_OK);
     assert(strcmp(session.session_id, "session-1") == 0);
     assert(session.negotiated_capabilities == 258);
 
     cubicle_manager_ping_result_t ping_result;
     memset(&ping_result, 0, sizeof(ping_result));
+    // Endpoint test for manager.ping
     assert(cubicle_manager_ping(client, &ping_result) == CUBICLE_OK);
     assert(strcmp(ping_result.manager_id, "manager-1") == 0);
     assert(ping_result.protocol_major == 0);
@@ -127,12 +138,14 @@ int main(void)
     };
     cubicle_workspace_info_t workspace;
     memset(&workspace, 0, sizeof(workspace));
+    // Endpoint test for workspace.create
     assert(cubicle_workspace_create(client, &create_options, &workspace) ==
            CUBICLE_OK);
     assert(strcmp(workspace.id, "workspace-1") == 0);
     assert(strcmp(workspace.name, "Project A") == 0);
 
     memset(&workspace, 0, sizeof(workspace));
+    // Endpoint test for workspace.get
     assert(cubicle_workspace_get(client, "Project A", &workspace) ==
            CUBICLE_OK);
     assert(workspace.process_count == 2);
@@ -142,6 +155,7 @@ int main(void)
     size_t workspace_count = 0;
     cubicle_page_info_t page;
     memset(&page, 0, sizeof(page));
+    // Endpoint test for workspace.list
     assert(cubicle_workspace_list(client, NULL, &workspaces,
                                   &workspace_count, &page) == CUBICLE_OK);
     assert(workspace_count == 2);
@@ -152,6 +166,7 @@ int main(void)
 
     cubicle_process_info_t process;
     memset(&process, 0, sizeof(process));
+    // Endpoint test for process.get
     assert(cubicle_process_get(client, "build", "workspace-1", &process) ==
            CUBICLE_OK);
     assert(strcmp(process.id, "process-1") == 0);
@@ -160,6 +175,7 @@ int main(void)
 
     cubicle_process_info_t *processes = NULL;
     size_t process_count = 0;
+    // Endpoint test for process.list
     assert(cubicle_process_list(client, NULL, &processes, &process_count,
                                 NULL) == CUBICLE_OK);
     assert(process_count == 1);
@@ -168,6 +184,7 @@ int main(void)
 
     cubicle_event_t *events = NULL;
     size_t event_count = 0;
+    // Endpoint test for events.list
     assert(cubicle_events_list(client, NULL, &events, &event_count) ==
            CUBICLE_OK);
     assert(event_count == 1);
@@ -178,6 +195,7 @@ int main(void)
 
     cubicle_output_chunk_t chunk;
     memset(&chunk, 0, sizeof(chunk));
+    // Endpoint test for process.read_output
     assert(cubicle_process_read_output(client, "process-1",
                                        CUBICLE_STREAM_STDOUT, 0, 16,
                                        &chunk) == CUBICLE_OK);
