@@ -65,6 +65,19 @@ The package installs:
 After installing a new package, restart any running `cubicle-manager` daemon so
 the installed `cube` and manager support the same API surface.
 
+## Pacman package
+
+On Arch-style systems with `makepkg` available, the same CMake install rules can
+create a pacman package:
+
+```console
+cmake -S . -B build
+cmake --build build --target pacman-package
+sudo pacman -U ./build/cubicle-0.1.0-1-*.pkg.tar.*
+```
+
+The package installs the same runtime binaries as the Debian package.
+
 ## Coverage
 
 Coverage is opt-in and uses GCC/Clang gcov data plus lcov:

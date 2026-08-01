@@ -383,6 +383,7 @@
 - Added Ubuntu runtime packaging:
   - CMake install rules include cube, cubicle-manager, and cubicle-controller
   - CPack can build a Debian package with cmake --build build --target package
+  - CMake can build a pacman package with cmake --build build --target pacman-package
   - .cubicle/ repo-local runtime state is ignored
 - Hardened manager restart reconciliation:
   - daemon startup checks registered non-terminal controllers for responsiveness

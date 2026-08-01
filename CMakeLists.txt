@@ -216,6 +216,46 @@ set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 include(CPack)
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    set(CUBICLE_PACMAN_ARCH "x86_64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(CUBICLE_PACMAN_ARCH "aarch64")
+else()
+    set(CUBICLE_PACMAN_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/PKGBUILD.in
+    ${CMAKE_CURRENT_BINARY_DIR}/pacman/PKGBUILD
+    @ONLY
+)
+
+find_program(MAKEPKG_EXECUTABLE makepkg)
+if(MAKEPKG_EXECUTABLE)
+    add_custom_target(pacman-package
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+                ${CMAKE_CURRENT_BINARY_DIR}/${CPACK_PACKAGE_NAME}-${PROJECT_VERSION}-1-${CUBICLE_PACMAN_ARCH}.pkg.tar.*
+        COMMAND ${MAKEPKG_EXECUTABLE} --force --nodeps
+        COMMAND ${CMAKE_COMMAND}
+                -D SOURCE_DIR=${CMAKE_CURRENT_BINARY_DIR}/pacman
+                -D DEST_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -D PACKAGE_NAME=${CPACK_PACKAGE_NAME}
+                -D PACKAGE_VERSION=${PROJECT_VERSION}
+                -D PACKAGE_ARCH=${CUBICLE_PACMAN_ARCH}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/packaging/copy-pacman-package.cmake
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/pacman
+        DEPENDS cube cubicle-manager cubicle-controller
+        COMMENT "Building pacman package"
+        VERBATIM
+    )
+else()
+    add_custom_target(pacman-package
+        COMMAND ${CMAKE_COMMAND} -E false
+        COMMENT "makepkg was not found; install pacman/package tools to build pacman packages"
+        VERBATIM
+    )
+endif()
+
 add_test(
     NAME cubicle-cli-help-test
     COMMAND ${CMAKE_COMMAND} -E env

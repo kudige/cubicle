@@ -1,0 +1,13 @@
+pkgname=@CPACK_PACKAGE_NAME@
+pkgver=@PROJECT_VERSION@
+pkgrel=1
+pkgdesc='@CPACK_PACKAGE_DESCRIPTION_SUMMARY@'
+arch=('@CUBICLE_PACMAN_ARCH@')
+url='@CPACK_PACKAGE_HOMEPAGE_URL@'
+license=('custom')
+depends=('glibc')
+makedepends=('cmake')
+
+package() {
+    DESTDIR="$pkgdir" cmake --install '@CMAKE_CURRENT_BINARY_DIR@' --prefix /usr
+}
