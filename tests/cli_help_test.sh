@@ -18,5 +18,53 @@ grep -q 'Usage: .*cubicle-manager' "$PWD/manager-help.err"
 grep -q 'events follow \[--iterations N\]' "$PWD/manager-help.err"
 grep -q 'daemon \[--control-socket PATH\] \[--event-interval-ms N\]' "$PWD/manager-help.err"
 
+"$CUBE" --help >"$PWD/cube-help.out" 2>"$PWD/cube-help.err"
+if [ -s "$PWD/cube-help.err" ]; then
+    echo "cube help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'Usage:' "$PWD/cube-help.out"
+grep -q 'cube workspace NAME' "$PWD/cube-help.out"
+grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
+
+set +e
+"$CUBE" ps >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube missing manager should exit 2, got $status" >&2
+    exit 1
+fi
+if [ -s "$PWD/cube-missing-manager.out" ]; then
+    echo "cube missing manager should not write stdout" >&2
+    exit 1
+fi
+grep -q 'manager socket is not configured' "$PWD/cube-missing-manager.err"
+grep -q 'CUBICLE_MANAGER_SOCKET' "$PWD/cube-missing-manager.err"
+
+set +e
+"$CUBE" --manager-socket /tmp/cubicle-test.sock ps >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube unimplemented command should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q "command 'ps' is not implemented yet" "$PWD/cube-unimplemented.err"
+
+set +e
+"$CUBE" wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube unknown command should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q "unknown command 'wat'" "$PWD/cube-unknown.err"
+
 rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
 rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"
+rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
+rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
+rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
+rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"

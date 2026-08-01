@@ -77,6 +77,16 @@ target_compile_options(cubicle-controller PRIVATE
     -Wpedantic
 )
 
+add_executable(cube
+    src/cli/main.c
+)
+
+target_compile_options(cube PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 enable_testing()
 
 add_executable(cubicle-process-test
@@ -182,6 +192,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBE=$<TARGET_FILE:cube>
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_help_test.sh
 )
 
@@ -407,6 +418,7 @@ if(CUBICLE_ENABLE_COVERAGE)
         DEPENDS
             cubicle-manager
             cubicle-controller
+            cube
             cubicle-process-test
             cubicle-rpc-test
             cubicle-util-test
