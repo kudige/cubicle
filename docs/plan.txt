@@ -419,6 +419,8 @@
   - manager now creates and preserves a strict-permission identity under state/keys
   - tests cover key generation, persistence, signatures, HMAC, and unsafe key permissions
   - added deterministic binary auth transcript and resume-authenticator encoders
+  - added Unix-socket auth.challenge/auth.authenticate flow with signed transcript verification
+  - added E2E coverage for signed local session creation over a persistent framed socket
 
 ## Next
 
@@ -445,7 +447,8 @@
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
    - add client identity generation/loading in cube and libcubicle
-   - implement authenticated Unix session creation and session resume
+   - add client-side use of authenticated Unix session creation
+   - implement session resume
    - enforce workspace capability checks and bootstrap owner keys
 
 3. Expand tests.

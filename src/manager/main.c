@@ -1,15 +1,18 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "cubicle/log.h"
 #include "cubicle/config.h"
 #include "cubicle/manager_registry.h"
 #include "cubicle/attachment.h"
+#include "cubicle/auth.h"
 #include "cubicle/process.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
 
 #include "../common/auth_crypto.h"
+#include "../common/auth_protocol.h"
 #include "../common/rpc_internal.h"
 
 #include <arpa/inet.h>
@@ -44,6 +47,18 @@ typedef struct manager_state {
     char controller_bin[PATH_MAX];
     cubicle_auth_identity_t identity;
 } manager_state_t;
+
+typedef struct manager_connection {
+    int has_peer_credentials;
+    uid_t peer_uid;
+    gid_t peer_gid;
+    pid_t peer_pid;
+    int has_pending_auth;
+    cubicle_auth_transcript_t pending_auth;
+    int authenticated;
+    cubicle_session_info_t session;
+    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+} manager_connection_t;
 
 typedef struct workspace_key_record {
     char workspace_id[CUBICLE_ID_STRING_LENGTH];
@@ -2610,7 +2625,78 @@ static int manager_api_success(int client_fd, const char *request_id,
     return write_api_frame(client_fd, response);
 }
 
+static void load_peer_credentials(int client_fd, manager_connection_t *connection)
+{
+    memset(connection, 0, sizeof(*connection));
+#ifdef SO_PEERCRED
+    struct ucred credentials;
+    socklen_t credentials_length = sizeof(credentials);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &credentials,
+                   &credentials_length) == 0) {
+        connection->has_peer_credentials = 1;
+        connection->peer_uid = credentials.uid;
+        connection->peer_gid = credentials.gid;
+        connection->peer_pid = credentials.pid;
+    }
+#else
+    (void)client_fd;
+#endif
+}
+
+static int session_info_json(const manager_state_t *state,
+                             const cubicle_session_info_t *session,
+                             char *result,
+                             size_t result_size)
+{
+    int length = snprintf(
+        result, result_size,
+        "{\"session_id\":\"%s\",\"manager_id\":\"%s\",\"client_key_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":%llu,\"manager_public_key\":\"%s\"}",
+        session->session_id, session->manager_id, session->client_key_id,
+        session->protocol_major, session->protocol_minor,
+        (unsigned long long)session->negotiated_capabilities,
+        (unsigned long long)session->authenticated_at_ms,
+        (unsigned long long)session->expires_at_ms,
+        state->identity.public_key_hex);
+    if (length < 0 || (size_t)length >= result_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+static int create_authenticated_session(const manager_state_t *state,
+                                        manager_connection_t *connection,
+                                        const unsigned char *client_public_key,
+                                        uint64_t now_ms)
+{
+    memset(&connection->session, 0, sizeof(connection->session));
+    char client_fingerprint[CUBICLE_AUTH_FINGERPRINT_LENGTH];
+    if (cubicle_generate_hex_id(connection->session.session_id,
+                                sizeof(connection->session.session_id)) < 0 ||
+        cubicle_auth_key_fingerprint(client_public_key,
+                                     CUBICLE_AUTH_PUBLIC_KEY_BYTES,
+                                     connection->session.client_key_id,
+                                     client_fingerprint) < 0 ||
+        cubicle_auth_random_bytes(connection->resume_secret,
+                                  sizeof(connection->resume_secret)) < 0) {
+        return -1;
+    }
+
+    snprintf(connection->session.manager_id,
+             sizeof(connection->session.manager_id), "%s",
+             state->identity.key_id);
+    connection->session.protocol_major = CUBICLE_PROTOCOL_MAJOR;
+    connection->session.protocol_minor = CUBICLE_PROTOCOL_MINOR;
+    connection->session.negotiated_capabilities =
+        CUBICLE_API_CAPABILITIES | CUBICLE_PROTOCOL_CAP_AUTH_ED25519;
+    connection->session.authenticated_at_ms = now_ms;
+    connection->session.expires_at_ms = now_ms + 12ULL * 60ULL * 60ULL * 1000ULL;
+    connection->authenticated = 1;
+    return 0;
+}
+
 static int handle_manager_client(const manager_state_t *state, int client_fd,
+                                 manager_connection_t *connection,
                                  int *shutdown_requested,
                                  uint64_t started_at_ms)
 {
@@ -2646,15 +2732,181 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     uint64_t now_ms = manager_time_ms();
+    if (strcmp(method, "auth.challenge") == 0) {
+        if (!connection->has_peer_credentials) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_UNSUPPORTED,
+                                             "authenticated bootstrap requires Unix peer credentials",
+                                             false, 0));
+        }
+
+        char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
+        char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+        char workspace_ref[CUBICLE_NAME_MAX] = "";
+        int has_workspace_ref = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "client_public_key",
+                                             client_public_key_hex,
+                                             sizeof(client_public_key_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "client_nonce",
+                                             client_nonce_hex,
+                                             sizeof(client_nonce_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "workspace",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid auth challenge request",
+                                             false, 0));
+        }
+
+        cubicle_auth_transcript_t transcript;
+        memset(&transcript, 0, sizeof(transcript));
+        transcript.protocol_major = CUBICLE_PROTOCOL_MAJOR;
+        transcript.protocol_minor = CUBICLE_PROTOCOL_MINOR;
+        memcpy(transcript.manager_public_key, state->identity.public_key,
+               sizeof(transcript.manager_public_key));
+        if (cubicle_auth_hex_decode(client_public_key_hex,
+                                    transcript.client_public_key,
+                                    sizeof(transcript.client_public_key)) < 0 ||
+            cubicle_auth_hex_decode(client_nonce_hex,
+                                    transcript.client_nonce,
+                                    sizeof(transcript.client_nonce)) < 0 ||
+            cubicle_auth_random_bytes(transcript.manager_nonce,
+                                      sizeof(transcript.manager_nonce)) < 0 ||
+            cubicle_auth_random_bytes(transcript.connection_id,
+                                      sizeof(transcript.connection_id)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid auth challenge material",
+                                             false, 0));
+        }
+        transcript.capabilities =
+            CUBICLE_API_CAPABILITIES | CUBICLE_PROTOCOL_CAP_AUTH_ED25519;
+        transcript.manager_generation = started_at_ms;
+        transcript.peer_uid = connection->peer_uid;
+        transcript.peer_gid = connection->peer_gid;
+        if (has_workspace_ref) {
+            snprintf(transcript.workspace_ref, sizeof(transcript.workspace_ref),
+                     "%s", workspace_ref);
+        }
+        connection->pending_auth = transcript;
+        connection->has_pending_auth = 1;
+
+        char manager_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+        char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+        if (cubicle_auth_hex_encode(transcript.manager_nonce,
+                                    sizeof(transcript.manager_nonce),
+                                    manager_nonce_hex,
+                                    sizeof(manager_nonce_hex)) < 0 ||
+            cubicle_auth_hex_encode(transcript.connection_id,
+                                    sizeof(transcript.connection_id),
+                                    connection_id_hex,
+                                    sizeof(connection_id_hex)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode auth challenge",
+                                             false, errno));
+        }
+        char result[2048];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"manager_id\":\"%s\",\"manager_public_key\":\"%s\",\"manager_nonce\":\"%s\",\"connection_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"capabilities\":%llu,\"manager_generation\":%llu,\"peer_uid\":%llu,\"peer_gid\":%llu}",
+            state->identity.key_id, state->identity.public_key_hex,
+            manager_nonce_hex, connection_id_hex, CUBICLE_PROTOCOL_MAJOR,
+            CUBICLE_PROTOCOL_MINOR,
+            (unsigned long long)transcript.capabilities,
+            (unsigned long long)transcript.manager_generation,
+            (unsigned long long)transcript.peer_uid,
+            (unsigned long long)transcript.peer_gid);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(-1);
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "auth.authenticate") == 0) {
+        if (!connection->has_pending_auth) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_STATE,
+                                             "auth challenge is required",
+                                             false, 0));
+        }
+
+        char signature_hex[CUBICLE_AUTH_SIGNATURE_BYTES * 2 + 1];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "signature",
+                                             signature_hex,
+                                             sizeof(signature_hex),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing auth signature",
+                                             false, 0));
+        }
+
+        unsigned char signature[CUBICLE_AUTH_SIGNATURE_BYTES];
+        unsigned char transcript_bytes[512];
+        size_t transcript_length = 0;
+        if (cubicle_auth_hex_decode(signature_hex, signature,
+                                    sizeof(signature)) < 0 ||
+            cubicle_auth_encode_transcript(&connection->pending_auth,
+                                           transcript_bytes,
+                                           sizeof(transcript_bytes),
+                                           &transcript_length) < 0 ||
+            cubicle_auth_verify(connection->pending_auth.client_public_key,
+                                transcript_bytes, transcript_length,
+                                signature) < 0) {
+            connection->has_pending_auth = 0;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "invalid auth signature",
+                                             false, 0));
+        }
+        if (create_authenticated_session(
+                state, connection, connection->pending_auth.client_public_key,
+                now_ms) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to create session",
+                                             false, errno));
+        }
+        connection->has_pending_auth = 0;
+
+        char result[2048];
+        if (session_info_json(state, &connection->session, result,
+                              sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode session",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
     if (strcmp(method, "session.local_bootstrap") == 0) {
         char result[1024];
-        int length = snprintf(result, sizeof(result),
-                              "{\"session_id\":\"local-session\",\"manager_id\":\"%s\",\"client_key_id\":\"local-bootstrap\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":0}",
-                              id, CUBICLE_PROTOCOL_MAJOR,
-                              CUBICLE_PROTOCOL_MINOR,
-                              (unsigned long long)CUBICLE_API_CAPABILITIES,
-                              (unsigned long long)now_ms);
-        if (length < 0 || (size_t)length >= sizeof(result)) {
+        if (connection->authenticated) {
+            if (session_info_json(state, &connection->session, result,
+                                  sizeof(result)) < 0) {
+                MANAGER_RETURN(-1);
+            }
+        } else {
+            int length = snprintf(
+                result, sizeof(result),
+                "{\"session_id\":\"local-session\",\"manager_id\":\"%s\",\"client_key_id\":\"local-bootstrap\",\"protocol_major\":%u,\"protocol_minor\":%u,\"negotiated_capabilities\":%llu,\"authenticated_at_ms\":%llu,\"expires_at_ms\":0,\"manager_public_key\":\"%s\"}",
+                id, CUBICLE_PROTOCOL_MAJOR, CUBICLE_PROTOCOL_MINOR,
+                (unsigned long long)CUBICLE_API_CAPABILITIES,
+                (unsigned long long)now_ms, state->identity.public_key_hex);
+            if (length < 0 || (size_t)length >= sizeof(result)) {
+                MANAGER_RETURN(-1);
+            }
+        }
+        if (result[0] == '\0') {
             MANAGER_RETURN(-1);
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
@@ -4452,9 +4704,11 @@ static int handle_manager_connection(const manager_state_t *state,
                                      int *shutdown_requested,
                                      uint64_t started_at_ms)
 {
+    manager_connection_t connection;
+    load_peer_credentials(client_fd, &connection);
     while (!*shutdown_requested) {
-        if (handle_manager_client(state, client_fd, shutdown_requested,
-                                  started_at_ms) == 0) {
+        if (handle_manager_client(state, client_fd, &connection,
+                                  shutdown_requested, started_at_ms) == 0) {
             continue;
         }
         return errno == ECONNRESET ? 0 : -1;

@@ -173,6 +173,19 @@ target_compile_options(cubicle-auth-crypto-test PRIVATE
 
 add_test(NAME cubicle-auth-crypto-test COMMAND cubicle-auth-crypto-test)
 
+add_executable(cubicle-manager-auth-client
+    tests/manager_auth_client.c
+)
+
+target_link_libraries(cubicle-manager-auth-client PRIVATE cubicle_common)
+target_include_directories(cubicle-manager-auth-client PRIVATE third_party/yyjson)
+
+target_compile_options(cubicle-manager-auth-client PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 add_executable(cubicle-rpc-test
     tests/rpc_test.c
 )
@@ -387,6 +400,16 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_daemon_test.sh
+)
+
+add_test(
+    NAME cubicle-manager-auth-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_MANAGER_AUTH_CLIENT=$<TARGET_FILE:cubicle-manager-auth-client>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_auth_test.sh
 )
 
 add_test(
@@ -606,6 +629,7 @@ if(CUBICLE_ENABLE_COVERAGE)
             cubicle-process-test
             cubicle-config-test
             cubicle-auth-crypto-test
+            cubicle-manager-auth-client
             cubicle-rpc-test
             cubicle-util-test
             cubicle-rpc-test
