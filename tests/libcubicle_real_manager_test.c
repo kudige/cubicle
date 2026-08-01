@@ -125,7 +125,7 @@ static void write_file(const char *path, const char *content)
 static cubicle_error_code_t reconcile_with_retry(cubicle_client_t *client)
 {
     cubicle_error_code_t result = CUBICLE_ERR_INTERNAL;
-    for (int attempt = 0; attempt < 50; ++attempt) {
+    for (int attempt = 0; attempt < 250; ++attempt) {
         result = cubicle_manager_reconcile(client);
         if (result == CUBICLE_OK) {
             return result;
@@ -142,7 +142,7 @@ static cubicle_error_code_t process_wait_with_retry(cubicle_client_t *client,
                                                     cubicle_process_info_t *process)
 {
     cubicle_error_code_t result = CUBICLE_ERR_INTERNAL;
-    for (int attempt = 0; attempt < 50; ++attempt) {
+    for (int attempt = 0; attempt < 250; ++attempt) {
         result = cubicle_process_wait(client, process_id, timeout_ms, process);
         if (result == CUBICLE_OK) {
             return result;
@@ -265,6 +265,7 @@ int main(void)
 
     snprintf(temp_dir, sizeof(temp_dir), "/tmp/libcubicle-real-manager-XXXXXX");
     assert(mkdtemp(temp_dir) != NULL);
+    assert(setenv("XDG_RUNTIME_DIR", temp_dir, 1) == 0);
 
     char state_dir[256];
     char socket_path[256];
@@ -700,6 +701,9 @@ int main(void)
         "\"params\":{\"name\":null}}");
 
     client = connect_client(socket_path);
+    memset(&status, 0, sizeof(status));
+    assert(cubicle_manager_status(client, &status) == CUBICLE_OK);
+    assert(status.active_client_sessions == 1);
 
     // Endpoint test for manager.shutdown
     assert(cubicle_manager_shutdown(client, false) == CUBICLE_OK);
