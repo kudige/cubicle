@@ -5,6 +5,7 @@
 #include "../common/json.h"
 #include "../common/rpc_internal.h"
 
+#include "cubicle/attachment.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
 
@@ -185,7 +186,7 @@ static int enqueue_api_success(control_client_t *client,
                                const char *request_id,
                                const char *result)
 {
-    char response[4096];
+    char response[131072];
     if (cubicle_rpc_success(response, sizeof(response), request_id,
                             result) < 0) {
         return -1;
@@ -242,6 +243,10 @@ static const char *stream_file_name(const char *stream)
         return "stdout.log";
     }
 
+    if (strcmp(stream, "tty") == 0) {
+        return "stdout.log";
+    }
+
     if (strcmp(stream, "stderr") == 0 || strcmp(stream, "err") == 0) {
         return "stderr.log";
     }
@@ -253,6 +258,10 @@ static long long stream_available_offset(const controller_state_t *state,
                                          const char *stream)
 {
     if (strcmp(stream, "stdout") == 0 || strcmp(stream, "out") == 0) {
+        return state->stdout_offset;
+    }
+
+    if (strcmp(stream, "tty") == 0) {
         return state->stdout_offset;
     }
 
@@ -736,16 +745,49 @@ static int dispatch_api_request(control_client_t *client,
     if (strcmp(envelope.method, "controller.attach") == 0) {
         char token[CUBICLE_TOKEN_MAX];
         uint64_t channels = 0;
+        char mode[32];
         cubicle_validation_error_t error;
         if (cubicle_json_get_required_string(params, "token", token,
                                              sizeof(token), &error) < 0 ||
             strncmp(token, "local:", 6) != 0 ||
             cubicle_json_get_required_u64(params, "channels", &channels,
                                           &error) < 0 ||
-            channels == 0) {
+            cubicle_json_get_required_string(params, "mode", mode,
+                                             sizeof(mode), &error) < 0 ||
+            channels == 0 ||
+            (channels & ~(uint64_t)(CUBICLE_CHANNEL_STDIN |
+                                    CUBICLE_CHANNEL_STDOUT |
+                                    CUBICLE_CHANNEL_STDERR |
+                                    CUBICLE_CHANNEL_TTY)) != 0 ||
+            (strcmp(mode, "observer") != 0 &&
+             strcmp(mode, "interactive") != 0)) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_PERMISSION_DENIED,
                 "invalid attachment token", false, 0));
+        }
+        if (strcmp(mode, "observer") == 0) {
+            channels &= ~(uint64_t)CUBICLE_CHANNEL_STDIN;
+        }
+        if ((channels & CUBICLE_CHANNEL_STDIN) != 0 &&
+            (process_completed || child_stdin_fd < 0)) {
+            channels &= ~(uint64_t)CUBICLE_CHANNEL_STDIN;
+        }
+        if (channels == 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_PERMISSION_DENIED,
+                "no attachment channels accepted", false, 0));
+        }
+        if ((channels & CUBICLE_CHANNEL_STDOUT) != 0) {
+            append_event(state, "type=client_attached stream=stdout");
+        }
+        if ((channels & CUBICLE_CHANNEL_STDERR) != 0) {
+            append_event(state, "type=client_attached stream=stderr");
+        }
+        if ((channels & CUBICLE_CHANNEL_STDIN) != 0) {
+            append_event(state, "type=client_attached stream=stdin");
+        }
+        if ((channels & CUBICLE_CHANNEL_TTY) != 0) {
+            append_event(state, "type=client_attached stream=tty");
         }
         char result[512];
         int length = snprintf(

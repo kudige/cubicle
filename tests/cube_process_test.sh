@@ -78,6 +78,37 @@ cube workspace select "Project A" >/dev/null
 selected_ps_output=$(cube ps)
 printf "%s\n" "$selected_ps_output" | grep -q '^build	stream	running$'
 
+api() {
+    python3 "$CUBICLE_API_CLIENT" --raw "$socket_path" "$@"
+}
+
+json_id() {
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
+}
+
+connect_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name connect-io -- sh -c \
+    'printf "connect-ready\n"; IFS= read line; printf "connect:%s\n" "$line"; sleep 0.2' |
+    json_id)
+printf "typed\n" | cube connect connect-io \
+    >"$tmpdir/connect.out" 2>"$tmpdir/connect.err"
+grep -q '^connect-ready$' "$tmpdir/connect.out"
+grep -q '^connect:typed$' "$tmpdir/connect.out"
+grep -Fq 'Connected to [connect-io]. Detach with Ctrl-\ d' "$tmpdir/connect.err"
+api process-wait "$connect_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove connect-io >/dev/null
+
+readonly_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name connect-ro -- sh -c \
+    'printf "readonly-ready\n"; sleep 0.1; printf "readonly-done\n"; sleep 0.2' |
+    json_id)
+cube connect --ro connect-ro >"$tmpdir/connect-ro.out" 2>"$tmpdir/connect-ro.err"
+grep -q '^readonly-ready$' "$tmpdir/connect-ro.out"
+grep -q '^readonly-done$' "$tmpdir/connect-ro.out"
+grep -Fq 'Connected to [connect-ro]. Detach with Ctrl-\ d' "$tmpdir/connect-ro.err"
+api process-wait "$readonly_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove connect-ro >/dev/null
+
 cube run --stream --name fg-run sh -c \
     'printf "fg-out\n"; printf "fg-err\n" >&2' \
     >"$tmpdir/fg-run.out" 2>"$tmpdir/fg-run.err"
@@ -127,14 +158,6 @@ cube stop bg-run >/dev/null
 cube stop sleep >/dev/null
 cube stop sleep-1 >/dev/null
 cube stop tty-run >/dev/null
-
-api() {
-    python3 "$CUBICLE_API_CLIENT" --raw "$socket_path" "$@"
-}
-
-json_id() {
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
-}
 
 signal_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name signal-me sleep 30 | json_id)

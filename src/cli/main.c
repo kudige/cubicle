@@ -15,8 +15,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <termios.h>
+#include <time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -25,6 +29,11 @@
 #endif
 
 #define CUBE_MAX_FRAME 65536
+#define CUBE_CHANNEL_STDIN 1U
+#define CUBE_CHANNEL_STDOUT 2U
+#define CUBE_CHANNEL_STDERR 4U
+#define CUBE_CHANNEL_TTY 8U
+#define CUBE_ATTACH_POLL_MS 50
 
 typedef struct cube_options {
     const char *manager_socket;
@@ -44,6 +53,18 @@ typedef struct cube_rpc_response {
     char *result_json;
     char error_message[CUBICLE_ERROR_MESSAGE_MAX];
 } cube_rpc_response_t;
+
+typedef struct cube_attach_grant {
+    char endpoint_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char token[CUBICLE_TOKEN_MAX];
+    unsigned int channels;
+} cube_attach_grant_t;
+
+typedef struct cube_attach_offsets {
+    uint64_t stdout_offset;
+    uint64_t stderr_offset;
+    uint64_t tty_offset;
+} cube_attach_offsets_t;
 
 static void print_usage(FILE *stream)
 {
@@ -182,10 +203,11 @@ static int read_all(int fd, void *buffer, size_t length)
     return 0;
 }
 
-static int call_manager(const char *socket_path,
-                        const char *method,
-                        const char *params,
-                        cube_rpc_response_t *response)
+static int call_rpc_peer(const char *peer_name,
+                         const char *socket_path,
+                         const char *method,
+                         const char *params,
+                         cube_rpc_response_t *response)
 {
     memset(response, 0, sizeof(*response));
 
@@ -212,7 +234,7 @@ static int call_manager(const char *socket_path,
     if (strlen(socket_path) >= sizeof(address.sun_path)) {
         close(fd);
         snprintf(response->error_message, sizeof(response->error_message),
-                 "manager socket path is too long");
+                 "%s socket path is too long", peer_name);
         response->code = CUBICLE_ERR_INVALID_ARGUMENT;
         return -1;
     }
@@ -222,7 +244,7 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to connect to manager");
+                 "failed to connect to %s", peer_name);
         response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
         return -1;
     }
@@ -234,7 +256,7 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to write manager request");
+                 "failed to write %s request", peer_name);
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -246,8 +268,8 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read manager response from %s: %s",
-                 socket_path, strerror(saved_errno));
+                 "failed to read %s response from %s: %s",
+                 peer_name, socket_path, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -255,7 +277,7 @@ static int call_manager(const char *socket_path,
     if (response_length == 0 || response_length > CUBE_MAX_FRAME) {
         close(fd);
         snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid manager response length");
+                 "invalid %s response length", peer_name);
         response->code = CUBICLE_ERR_PROTOCOL;
         return -1;
     }
@@ -272,8 +294,8 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read manager response from %s: %s",
-                 socket_path, strerror(saved_errno));
+                 "failed to read %s response from %s: %s",
+                 peer_name, socket_path, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -283,7 +305,7 @@ static int call_manager(const char *socket_path,
     if (cubicle_rpc_decode_response(&envelope, response_json, "cube-1") < 0) {
         free(response_json);
         snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid manager response");
+                 "invalid %s response", peer_name);
         response->code = CUBICLE_ERR_PROTOCOL;
         return -1;
     }
@@ -297,7 +319,7 @@ static int call_manager(const char *socket_path,
         } else {
             response->code = CUBICLE_ERR_PROTOCOL;
             snprintf(response->error_message, sizeof(response->error_message),
-                     "invalid manager error response");
+                     "invalid %s error response", peer_name);
         }
         cubicle_rpc_response_envelope_cleanup(&envelope);
         free(response_json);
@@ -315,6 +337,22 @@ static int call_manager(const char *socket_path,
     return 0;
 }
 
+static int call_manager(const char *socket_path,
+                        const char *method,
+                        const char *params,
+                        cube_rpc_response_t *response)
+{
+    return call_rpc_peer("manager", socket_path, method, params, response);
+}
+
+static int call_controller(const char *socket_path,
+                           const char *method,
+                           const char *params,
+                           cube_rpc_response_t *response)
+{
+    return call_rpc_peer("controller", socket_path, method, params, response);
+}
+
 static void cleanup_rpc_response(cube_rpc_response_t *response)
 {
     free(response->result_json);
@@ -324,7 +362,7 @@ static void cleanup_rpc_response(cube_rpc_response_t *response)
 static int print_rpc_error(const cube_rpc_response_t *response)
 {
     fprintf(stderr, "cube: %s\n",
-            response->error_message[0] == '\0' ? "manager request failed"
+            response->error_message[0] == '\0' ? "request failed"
                                                : response->error_message);
     return response->code == CUBICLE_ERR_NOT_FOUND ? 1 : 2;
 }
@@ -593,7 +631,7 @@ static int workspace_simple_action(const char *manager_socket,
         return 2;
     }
 
-    char params[1024];
+    char params[2048];
     if (strcmp(method, "workspace.delete") == 0) {
         snprintf(params, sizeof(params),
                  "{\"workspace_id\":\"%s\",\"stop_running_processes\":false,\"remove_retained_processes\":true}",
@@ -1251,6 +1289,529 @@ static int process_events(const char *manager_socket,
     return 0;
 }
 
+static int unix_socket_path_from_uri(const char *uri,
+                                     char *path,
+                                     size_t path_size)
+{
+    const char *prefix = "unix://";
+    size_t prefix_length = strlen(prefix);
+    if (strncmp(uri, prefix, prefix_length) != 0 ||
+        uri[prefix_length] == '\0') {
+        return -1;
+    }
+    int length = snprintf(path, path_size, "%s", uri + prefix_length);
+    return length < 0 || (size_t)length >= path_size ? -1 : 0;
+}
+
+static int channel_mask_from_string(const char *text, unsigned int *channels)
+{
+    unsigned int mask = 0;
+    if (strstr(text, "stdin") != NULL) {
+        mask |= CUBE_CHANNEL_STDIN;
+    }
+    if (strstr(text, "stdout") != NULL) {
+        mask |= CUBE_CHANNEL_STDOUT;
+    }
+    if (strstr(text, "stderr") != NULL) {
+        mask |= CUBE_CHANNEL_STDERR;
+    }
+    if (strstr(text, "tty") != NULL) {
+        mask |= CUBE_CHANNEL_TTY;
+    }
+    *channels = mask;
+    return mask == 0 ? -1 : 0;
+}
+
+static int request_attachment_grant(const char *manager_socket,
+                                    const char *process_id,
+                                    unsigned int channels,
+                                    const char *mode,
+                                    cube_attach_grant_t *grant)
+{
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[1024];
+    snprintf(params, sizeof(params),
+             "{\"process_id\":\"%s\",\"channels\":%u,\"mode\":\"%s\",\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"rows\":0,\"cols\":0}",
+             escaped_process_id, channels, mode);
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "attachment.request", params,
+                     &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid attachment grant response\n");
+        return 2;
+    }
+
+    yyjson_val *endpoint = yyjson_obj_get(document.root, "endpoint");
+    char granted_channels[128];
+    if (!yyjson_is_obj(endpoint) ||
+        json_string_field(endpoint, "uri", grant->endpoint_uri,
+                          sizeof(grant->endpoint_uri)) < 0 ||
+        json_string_field(document.root, "token", grant->token,
+                          sizeof(grant->token)) < 0 ||
+        json_string_field(document.root, "granted_channels",
+                          granted_channels, sizeof(granted_channels)) < 0 ||
+        channel_mask_from_string(granted_channels, &grant->channels) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid attachment grant response\n");
+        return 2;
+    }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int controller_attach(const char *controller_socket,
+                             const cube_attach_grant_t *grant,
+                             unsigned int requested_channels,
+                             cube_attach_offsets_t *offsets)
+{
+    char escaped_token[CUBICLE_TOKEN_MAX * 2];
+    if (cubicle_json_escape(escaped_token, sizeof(escaped_token),
+                            grant->token) < 0) {
+        fprintf(stderr, "cube: attachment token is too long\n");
+        return 2;
+    }
+
+    char params[2048];
+    snprintf(params, sizeof(params),
+             "{\"token\":\"%s\",\"channels\":%u,\"mode\":\"%s\"}",
+             escaped_token, requested_channels,
+             (requested_channels & CUBE_CHANNEL_STDIN) != 0 ? "interactive"
+                                                            : "observer");
+    cube_rpc_response_t response;
+    if (call_controller(controller_socket, "controller.attach", params,
+                        &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller attach response\n");
+        return 2;
+    }
+    if (json_u64_field(document.root, "stdout_offset",
+                       &offsets->stdout_offset) < 0 ||
+        json_u64_field(document.root, "stderr_offset",
+                       &offsets->stderr_offset) < 0 ||
+        json_u64_field(document.root, "tty_offset",
+                       &offsets->tty_offset) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller attach response\n");
+        return 2;
+    }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int controller_read_stream(const char *controller_socket,
+                                  const char *stream,
+                                  uint64_t *offset,
+                                  FILE *output,
+                                  int *end_of_stream)
+{
+    char params[512];
+    snprintf(params, sizeof(params),
+             "{\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":8192}",
+             stream, (unsigned long long)*offset);
+    cube_rpc_response_t response;
+    if (call_controller(controller_socket, "controller.read", params,
+                        &response) < 0) {
+        if (response.code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+            response.code == CUBICLE_ERR_IO) {
+            return 1;
+        }
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller read response\n");
+        return 2;
+    }
+
+    yyjson_val *data = yyjson_obj_get(document.root, "data");
+    uint64_t next_offset = 0;
+    if (!yyjson_is_str(data) ||
+        json_u64_field(document.root, "next_offset", &next_offset) < 0 ||
+        json_bool_field(document.root, "end_of_stream", end_of_stream) < 0 ||
+        next_offset < *offset) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller read response\n");
+        return 2;
+    }
+    fputs(yyjson_get_str(data), output);
+    fflush(output);
+    *offset = next_offset;
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int controller_write_stdin(const char *controller_socket,
+                                  const char *data)
+{
+    char escaped_data[8192];
+    if (cubicle_json_escape(escaped_data, sizeof(escaped_data), data) < 0) {
+        fprintf(stderr, "cube: input chunk is too large\n");
+        return 2;
+    }
+    char params[16384];
+    snprintf(params, sizeof(params), "{\"data\":\"%s\"}", escaped_data);
+    cube_rpc_response_t response;
+    if (call_controller(controller_socket, "controller.write", params,
+                        &response) < 0) {
+        return print_rpc_error(&response);
+    }
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int controller_resize_tty(const char *controller_socket)
+{
+    if (!isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+    struct winsize size;
+    memset(&size, 0, sizeof(size));
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0 ||
+        size.ws_row == 0 || size.ws_col == 0) {
+        return 0;
+    }
+    char params[128];
+    snprintf(params, sizeof(params), "{\"rows\":%u,\"columns\":%u}",
+             (unsigned int)size.ws_row, (unsigned int)size.ws_col);
+    cube_rpc_response_t response;
+    if (call_controller(controller_socket, "controller.resize", params,
+                        &response) < 0) {
+        return print_rpc_error(&response);
+    }
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int controller_is_completed(const char *controller_socket,
+                                   int *completed)
+{
+    cube_rpc_response_t response;
+    if (call_controller(controller_socket, "controller.status", "{}",
+                        &response) < 0) {
+        if (response.code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+            response.code == CUBICLE_ERR_IO) {
+            return 1;
+        }
+        return print_rpc_error(&response);
+    }
+    cubicle_json_doc_t document;
+    char state[32];
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller status response\n");
+        return 2;
+    }
+    if (json_string_field(document.root, "state", state, sizeof(state)) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid controller status response\n");
+        return 2;
+    }
+    *completed = strcmp(state, "completed") == 0 ? 1 : 0;
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int set_raw_terminal(struct termios *original, int *raw_enabled)
+{
+    *raw_enabled = 0;
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+    if (tcgetattr(STDIN_FILENO, original) < 0) {
+        return -1;
+    }
+    struct termios raw = *original;
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~OPOST;
+    raw.c_cflag |= CS8;
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
+        return -1;
+    }
+    *raw_enabled = 1;
+    return 0;
+}
+
+static int process_input_chunk(const char *controller_socket,
+                               const char *buffer,
+                               size_t length,
+                               int *escape_pending,
+                               int *detach_requested)
+{
+    char output[4096];
+    size_t used = 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char byte = (unsigned char)buffer[i];
+        if (*escape_pending) {
+            *escape_pending = 0;
+            if (byte == 'd') {
+                *detach_requested = 1;
+                continue;
+            }
+            output[used++] = '\034';
+        } else if (byte == '\034') {
+            *escape_pending = 1;
+            continue;
+        }
+        output[used++] = (char)byte;
+        if (used + 1 >= sizeof(output)) {
+            output[used] = '\0';
+            int result = controller_write_stdin(controller_socket, output);
+            if (result != 0) {
+                return result;
+            }
+            used = 0;
+        }
+    }
+    if (used > 0) {
+        output[used] = '\0';
+        return controller_write_stdin(controller_socket, output);
+    }
+    return 0;
+}
+
+static int attachment_loop(const char *controller_socket,
+                           unsigned int channels,
+                           const char *process_name,
+                           const char *mode,
+                           int read_only)
+{
+    uint64_t stdout_offset = 0;
+    uint64_t stderr_offset = 0;
+    uint64_t tty_offset = 0;
+    int stdin_open = !read_only && (channels & CUBE_CHANNEL_STDIN) != 0;
+    int stdin_is_tty = isatty(STDIN_FILENO);
+    int detach_requested = 0;
+    int escape_pending = 0;
+    struct termios original;
+    int raw_enabled = 0;
+
+    if (set_raw_terminal(&original, &raw_enabled) < 0) {
+        fprintf(stderr, "cube: failed to set terminal raw mode: %s\n",
+                strerror(errno));
+        return 2;
+    }
+
+    fprintf(stderr, "Connected to [%s]. Detach with Ctrl-\\ d\n",
+            process_name);
+    int result = 0;
+    result = controller_resize_tty(controller_socket);
+
+    while (result == 0 && !detach_requested) {
+        int completed = 0;
+        int stdout_end = 1;
+        int stderr_end = 1;
+        int tty_end = 1;
+
+        if (strcmp(mode, "tty") == 0 &&
+            (channels & (CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT)) != 0) {
+            result = controller_read_stream(controller_socket, "tty",
+                                            &tty_offset, stdout, &tty_end);
+        } else {
+            if ((channels & CUBE_CHANNEL_STDOUT) != 0) {
+                result = controller_read_stream(controller_socket, "stdout",
+                                                &stdout_offset, stdout,
+                                                &stdout_end);
+            }
+            if (result == 0 && (channels & CUBE_CHANNEL_STDERR) != 0) {
+                result = controller_read_stream(controller_socket, "stderr",
+                                                &stderr_offset, stderr,
+                                                &stderr_end);
+            }
+        }
+        if (result == 1 && !stdin_open) {
+            result = 0;
+            break;
+        }
+        if (result != 0) {
+            if (result == 1) {
+                fprintf(stderr, "cube: controller connection lost\n");
+                result = 2;
+            }
+            break;
+        }
+
+        int status_result = controller_is_completed(controller_socket,
+                                                   &completed);
+        if (status_result == 1 &&
+            stdout_end && stderr_end && tty_end && !stdin_open) {
+            break;
+        }
+        if (status_result != 0) {
+            if (status_result == 1) {
+                fprintf(stderr, "cube: controller connection lost\n");
+                result = 2;
+            } else {
+                result = status_result;
+            }
+            break;
+        }
+        if (completed && stdout_end && stderr_end && tty_end) {
+            break;
+        }
+
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        int max_fd = -1;
+        if (stdin_open) {
+            FD_SET(STDIN_FILENO, &read_fds);
+            max_fd = STDIN_FILENO;
+        }
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = CUBE_ATTACH_POLL_MS * 1000;
+        int ready = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "cube: failed while waiting for attachment input: %s\n",
+                    strerror(errno));
+            result = 2;
+            break;
+        }
+        if (stdin_open && ready > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
+            char buffer[4096];
+            ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+            if (nread < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                fprintf(stderr, "cube: failed to read stdin: %s\n",
+                        strerror(errno));
+                result = 2;
+                break;
+            }
+            if (nread == 0) {
+                stdin_open = 0;
+            } else {
+                buffer[nread] = '\0';
+                result = process_input_chunk(controller_socket, buffer,
+                                             (size_t)nread, &escape_pending,
+                                             &detach_requested);
+                if (!stdin_is_tty) {
+                    stdin_open = 0;
+                }
+            }
+        }
+    }
+
+    if (raw_enabled) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+    }
+    return result;
+}
+
+static int process_connect(const char *manager_socket,
+                           const cube_options_t *options,
+                           int argc,
+                           char **argv,
+                           int command_index)
+{
+    int read_only = 0;
+    int argument_index = command_index + 1;
+    while (argument_index < argc) {
+        if (strcmp(argv[argument_index], "--ro") == 0) {
+            read_only = 1;
+            ++argument_index;
+            continue;
+        }
+        if (argv[argument_index][0] == '-' &&
+            argv[argument_index][1] == '-') {
+            fprintf(stderr, "cube: unknown connect option '%s'\n",
+                    argv[argument_index]);
+            return 2;
+        }
+        break;
+    }
+    if (argument_index + 1 != argc) {
+        fprintf(stderr, "cube: connect requires a process name\n");
+        return 2;
+    }
+
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char mode[32];
+    int resolve_result = resolve_process_metadata(
+        manager_socket, options, argv[argument_index], process_id,
+        sizeof(process_id), mode, sizeof(mode));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+
+    unsigned int requested_channels = CUBE_CHANNEL_STDOUT | CUBE_CHANNEL_STDERR;
+    if (strcmp(mode, "tty") == 0) {
+        requested_channels = CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT;
+    }
+    if (!read_only) {
+        requested_channels |= CUBE_CHANNEL_STDIN;
+    }
+
+    cube_attach_grant_t grant;
+    memset(&grant, 0, sizeof(grant));
+    int grant_result = request_attachment_grant(
+        manager_socket, process_id, requested_channels,
+        read_only ? "observer" : "interactive", &grant);
+    if (grant_result != 0) {
+        return grant_result;
+    }
+
+    char controller_socket[PATH_MAX];
+    if (unix_socket_path_from_uri(grant.endpoint_uri, controller_socket,
+                                  sizeof(controller_socket)) < 0) {
+        fprintf(stderr, "cube: unsupported attachment endpoint '%s'\n",
+                grant.endpoint_uri);
+        return 2;
+    }
+    unsigned int accepted_channels = requested_channels & grant.channels;
+    if (accepted_channels == 0) {
+        fprintf(stderr, "cube: attachment grant did not include requested channels\n");
+        return 2;
+    }
+
+    cube_attach_offsets_t offsets;
+    memset(&offsets, 0, sizeof(offsets));
+    int attach_result = controller_attach(controller_socket, &grant,
+                                          accepted_channels, &offsets);
+    if (attach_result != 0) {
+        return attach_result;
+    }
+    (void)offsets;
+
+    return attachment_loop(controller_socket, accepted_channels,
+                           argv[argument_index], mode, read_only);
+}
+
 static int wait_for_process(const char *manager_socket,
                             const char *process_id,
                             cube_rpc_response_t *response)
@@ -1549,6 +2110,11 @@ int main(int argc, char **argv)
     if (strcmp(command, "logs") == 0) {
         return process_logs(manager_socket, &options, argc, argv,
                             command_index);
+    }
+
+    if (strcmp(command, "connect") == 0) {
+        return process_connect(manager_socket, &options, argc, argv,
+                               command_index);
     }
 
     if (strcmp(command, "events") == 0) {

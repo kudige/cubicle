@@ -54,14 +54,14 @@ grep -q 'manager socket is not configured' "$PWD/cube-missing-manager.err"
 grep -q 'CUBICLE_MANAGER_SOCKET' "$PWD/cube-missing-manager.err"
 
 set +e
-"$CUBE" --manager-socket /tmp/cubicle-test.sock connect build >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
+"$CUBE" --manager-socket /tmp/cubicle-test.sock defaults >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
 status=$?
 set -e
 if [ "$status" -ne 2 ]; then
     echo "cube unimplemented command should exit 2, got $status" >&2
     exit 1
 fi
-grep -q "command 'connect' is not implemented yet" "$PWD/cube-unimplemented.err"
+grep -q "command 'defaults' is not implemented yet" "$PWD/cube-unimplemented.err"
 
 set +e
 "$CUBE" wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"

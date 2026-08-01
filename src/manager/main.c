@@ -2235,7 +2235,7 @@ static int manager_api_error(int client_fd, const char *request_id,
 static int manager_api_success(int client_fd, const char *request_id,
                                const char *result)
 {
-    char response[4096];
+    char response[131072];
     if (cubicle_rpc_success(response, sizeof(response), request_id,
                             result) < 0) {
         return -1;

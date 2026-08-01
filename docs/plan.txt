@@ -361,12 +361,20 @@
   - cube --json workspace create/select/list/stop/delete return manager API results
 - Covered cube process lifecycle JSON output contracts:
   - cube --json signal/stop/kill/remove return manager API results
+- Added initial spec-backed cube connect:
+  - cube connect NAME requests a manager attachment grant
+  - cube connect uses controller.attach/controller.read/controller.write/controller.resize
+  - stream-mode interactive and read-only connects have daemon-backed E2E coverage
+  - controller.attach validates channels/mode, normalizes accepted channels, and records attachment events
+  - controller.read supports tty as the retained PTY byte stream
+  - manager/controller RPC success envelopes handle larger retained event/output responses
 
 ## Next
 
 1. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
-   - Add foreground attach behavior through manager-issued attachment grants.
+   - Add foreground cube run attach behavior through manager-issued attachment grants.
+   - Harden post-exit connect draining through manager-retained output fallback.
    - Add follow mode for logs and events through manager APIs.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.

@@ -72,6 +72,17 @@ if [ "$(json_field "$attach_response" success)" != "True" ]; then
     echo "controller.attach failed: $attach_response" >&2
     exit 1
 fi
+if [ "$(json_field "$attach_response" result.accepted_channels)" != "2" ]; then
+    echo "controller.attach returned unexpected channels: $attach_response" >&2
+    exit 1
+fi
+grep -q 'type=client_attached stream=stdout$' "$state_dir/events.log"
+
+observer_stdin_response=$(api --allow-error controller-attach local:test:process --channels 1)
+if [ "$(json_field "$observer_stdin_response" success)" != "False" ]; then
+    echo "observer stdin attach unexpectedly succeeded: $observer_stdin_response" >&2
+    exit 1
+fi
 
 write_response=$(api controller-write hello)
 if [ "$(json_field "$write_response" success)" != "True" ]; then
