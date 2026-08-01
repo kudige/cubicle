@@ -461,6 +461,43 @@ int main(void)
     assert(event_count == 3);
     cubicle_events_free(events);
 
+    cubicle_process_info_t waited;
+    memset(&waited, 0, sizeof(waited));
+    // Endpoint test for process.wait
+    assert(cubicle_process_wait(client, started.id, 5000, &waited) ==
+           CUBICLE_OK);
+    assert(strcmp(waited.id, started.id) == 0);
+    assert(waited.state == CUBICLE_PROCESS_COMPLETED);
+
+    // Endpoint test for process.remove
+    assert(cubicle_process_remove(client, started.id) == CUBICLE_OK);
+
+    const char *kill_argv[] = {
+        "sh",
+        "-c",
+        "while true; do sleep 1; done",
+    };
+    cubicle_process_start_options_t kill_start_options;
+    memset(&kill_start_options, 0, sizeof(kill_start_options));
+    kill_start_options.workspace_id = workspace_id;
+    kill_start_options.friendly_name = "api-killed";
+    kill_start_options.mode = CUBICLE_PROCESS_STREAM;
+    kill_start_options.stdin_policy = CUBICLE_STDIN_EOF;
+    kill_start_options.argv = kill_argv;
+    kill_start_options.argc = sizeof(kill_argv) / sizeof(kill_argv[0]);
+    cubicle_process_info_t killed;
+    memset(&killed, 0, sizeof(killed));
+    assert(cubicle_process_start(client, &kill_start_options, &killed) ==
+           CUBICLE_OK);
+
+    // Endpoint test for process.kill
+    assert(cubicle_process_kill(client, killed.id) == CUBICLE_OK);
+    memset(&waited, 0, sizeof(waited));
+    assert(cubicle_process_wait(client, killed.id, 5000, &waited) ==
+           CUBICLE_OK);
+    assert(waited.state == CUBICLE_PROCESS_COMPLETED);
+    assert(cubicle_process_remove(client, killed.id) == CUBICLE_OK);
+
     cubicle_client_disconnect(client);
 
     // Endpoint test for process.list invalid typed params

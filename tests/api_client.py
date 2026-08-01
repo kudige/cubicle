@@ -114,6 +114,15 @@ def params_for_command(args):
             "grace_period_ms": args.grace_period_ms,
             "force_after_grace": args.force_after_grace,
         }
+    if command == "process-kill":
+        return "process.kill", {"process_id": args.process}
+    if command == "process-wait":
+        return "process.wait", {
+            "process_id": args.process,
+            "timeout_ms": args.timeout_ms,
+        }
+    if command == "process-remove":
+        return "process.remove", {"process_id": args.process}
     if command == "workspace-key-add":
         return "workspace.key.add", {
             "workspace_id": args.workspace,
@@ -246,6 +255,16 @@ def build_parser():
     process_terminate.add_argument("--grace-period-ms", type=int, default=0)
     process_terminate.add_argument("--force-after-grace",
                                    action="store_true")
+
+    process_kill = subparsers.add_parser("process-kill")
+    process_kill.add_argument("process")
+
+    process_wait = subparsers.add_parser("process-wait")
+    process_wait.add_argument("process")
+    process_wait.add_argument("--timeout-ms", type=int, default=0)
+
+    process_remove = subparsers.add_parser("process-remove")
+    process_remove.add_argument("process")
 
     workspace_key_add = subparsers.add_parser("workspace-key-add")
     workspace_key_add.add_argument("workspace")

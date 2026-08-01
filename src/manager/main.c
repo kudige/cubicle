@@ -11,6 +11,7 @@
 #include "../common/rpc_internal.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -844,6 +845,43 @@ static int terminate_controller(const cubicle_process_record_t *process)
                                    response, sizeof(response));
 }
 
+static int controller_status_state(const cubicle_process_record_t *process,
+                                   char *state,
+                                   size_t state_size)
+{
+    char response[512];
+    if (controller_line_request(process->control_socket, "status", response,
+                                sizeof(response)) < 0) {
+        return -1;
+    }
+    const char *state_start = strstr(response, "state=");
+    if (state_start == NULL) {
+        errno = EPROTO;
+        return -1;
+    }
+    state_start += strlen("state=");
+    size_t length = strcspn(state_start, " \n");
+    if (length == 0 || length >= state_size) {
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(state, state_start, length);
+    state[length] = '\0';
+    if (strcmp(state, "exited") == 0) {
+        snprintf(state, state_size, "completed");
+    }
+    return 0;
+}
+
+static int process_is_terminal_state(const char *state)
+{
+    return strcmp(state, "completed") == 0 ||
+           strcmp(state, "failed") == 0 ||
+           strcmp(state, "lost") == 0 ||
+           strcmp(state, "removed") == 0 ||
+           strcmp(state, "exited") == 0;
+}
+
 static int channel_mask_string(uint64_t channels, char *buffer,
                                size_t buffer_size)
 {
@@ -951,6 +989,108 @@ static int append_process_record(const manager_state_t *state,
     }
 
     return append_line(state, "processes.tsv", line);
+}
+
+static int rewrite_process_records(const manager_state_t *state,
+                                   const char *process_id,
+                                   const char *new_state,
+                                   int remove_record,
+                                   int *found)
+{
+    *found = 0;
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "processes.tsv") < 0) {
+        return -1;
+    }
+    int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *input = fopen(path, "r");
+    FILE *output = fopen(temp_path, "w");
+    if (output == NULL) {
+        if (input != NULL) {
+            fclose(input);
+        }
+        return -1;
+    }
+
+    if (input != NULL) {
+        char line[PATH_MAX + 512];
+        while (fgets(line, sizeof(line), input) != NULL) {
+            cubicle_process_record_t record;
+            if (cubicle_parse_process_record(line, &record) != 0) {
+                continue;
+            }
+            if (strcmp(record.process_id, process_id) == 0) {
+                *found = 1;
+                if (remove_record) {
+                    continue;
+                }
+                if (new_state != NULL) {
+                    snprintf(record.state, sizeof(record.state), "%s",
+                             new_state);
+                }
+            }
+            if (fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                        record.process_id, record.workspace_id,
+                        record.friendly_name, record.mode, record.state,
+                        record.controller_id, record.control_socket) < 0) {
+                fclose(input);
+                fclose(output);
+                return -1;
+            }
+        }
+        fclose(input);
+    }
+
+    if (fclose(output) != 0) {
+        return -1;
+    }
+    return rename(temp_path, path);
+}
+
+static int remove_tree(const char *path)
+{
+    struct stat status;
+    if (lstat(path, &status) < 0) {
+        return errno == ENOENT ? 0 : -1;
+    }
+
+    if (!S_ISDIR(status.st_mode)) {
+        return unlink(path);
+    }
+
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        char child[PATH_MAX];
+        int length = snprintf(child, sizeof(child), "%s/%s", path,
+                              entry->d_name);
+        if (length < 0 || (size_t)length >= sizeof(child) ||
+            remove_tree(child) < 0) {
+            int saved_errno = errno;
+            closedir(dir);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    if (closedir(dir) != 0) {
+        return -1;
+    }
+    return rmdir(path);
 }
 
 static int process_events_path(char path[PATH_MAX], const manager_state_t *state,
@@ -1181,6 +1321,31 @@ static int event_log_has_exit(const char *metadata_path)
     }
     snprintf(last_slash + 1, (size_t)(events_path + sizeof(events_path) - last_slash - 1),
              "events.log");
+
+    FILE *file = fopen(events_path, "r");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strstr(line, "type=process_exited") != NULL) {
+            fclose(file);
+            return 1;
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
+static int process_event_log_has_exit(const manager_state_t *state,
+                                      const char *process_id)
+{
+    char events_path[PATH_MAX];
+    if (process_events_path(events_path, state, process_id) < 0) {
+        return 0;
+    }
 
     FILE *file = fopen(events_path, "r");
     if (file == NULL) {
@@ -2487,7 +2652,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     if (strcmp(method, "process.signal") == 0 ||
-        strcmp(method, "process.terminate") == 0) {
+        strcmp(method, "process.terminate") == 0 ||
+        strcmp(method, "process.kill") == 0) {
         char process_id[128];
         cubicle_validation_error_t validation_error;
         if (cubicle_json_get_required_string(params, "process_id", process_id,
@@ -2523,8 +2689,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                                  false, 0));
             }
             action_result = signal_controller(&process, (int)signal_number);
-        } else {
+        } else if (strcmp(method, "process.terminate") == 0) {
             action_result = terminate_controller(&process);
+        } else {
+            action_result = signal_controller(&process, SIGKILL);
         }
 
         if (action_result < 0) {
@@ -2533,6 +2701,162 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "controller request failed",
                                              true, errno));
         }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "process.wait") == 0) {
+        char process_id[128];
+        uint64_t timeout_ms = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id", process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "timeout_ms", &timeout_ms,
+                                          NULL,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid process wait request",
+                                             false, 0));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        uint64_t waited_ms = 0;
+        char latest_state[32];
+        snprintf(latest_state, sizeof(latest_state), "%s", process.state);
+        while (!process_is_terminal_state(latest_state)) {
+            if (controller_status_state(&process, latest_state,
+                                        sizeof(latest_state)) < 0) {
+                if (process_event_log_has_exit(state, process.process_id)) {
+                    snprintf(latest_state, sizeof(latest_state), "completed");
+                }
+                break;
+            }
+            if (process_is_terminal_state(latest_state)) {
+                break;
+            }
+            if (waited_ms >= timeout_ms) {
+                break;
+            }
+            struct timespec delay = {.tv_sec = 0, .tv_nsec = 50000000L};
+            nanosleep(&delay, NULL);
+            waited_ms += 50;
+        }
+
+        if (strcmp(latest_state, process.state) != 0 &&
+            process_is_terminal_state(latest_state)) {
+            int found = 0;
+            int lock_fd = lock_state(state);
+            if (lock_fd >= 0) {
+                if (rewrite_process_records(state, process.process_id,
+                                            latest_state, 0, &found) == 0 &&
+                    found) {
+                    snprintf(process.state, sizeof(process.state), "%s",
+                             latest_state);
+                }
+                unlock_state(lock_fd);
+            }
+        }
+
+        char result[2048];
+        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode process",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "process.remove") == 0) {
+        char process_id[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id", process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing process id", false,
+                                             0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        char latest_state[32];
+        snprintf(latest_state, sizeof(latest_state), "%s", process.state);
+        if (!process_is_terminal_state(latest_state) &&
+            controller_status_state(&process, latest_state,
+                                    sizeof(latest_state)) < 0 &&
+            process_event_log_has_exit(state, process.process_id)) {
+            snprintf(latest_state, sizeof(latest_state), "completed");
+        }
+        if (!process_is_terminal_state(process.state) &&
+            process_is_terminal_state(latest_state)) {
+            int found = 0;
+            if (rewrite_process_records(state, process.process_id,
+                                        latest_state, 0, &found) == 0 &&
+                found) {
+                snprintf(process.state, sizeof(process.state), "%s",
+                         latest_state);
+            }
+        }
+
+        if (!process_is_terminal_state(process.state)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_STATE,
+                                             "process is still live", false,
+                                             0));
+        }
+
+        int found = 0;
+        if (rewrite_process_records(state, process.process_id, NULL, 1,
+                                    &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to remove process",
+                                             true, saved_errno));
+        }
+        char controller_state[PATH_MAX];
+        if (controller_state_path(controller_state, state,
+                                  process.process_id) < 0 ||
+            remove_tree(controller_state) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to remove process state",
+                                             true, saved_errno));
+        }
+        unlock_state(lock_fd);
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 

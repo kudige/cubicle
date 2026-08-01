@@ -212,12 +212,38 @@
     - workspace.create
     - workspace.get
     - workspace.list
+    - workspace.key.add
+    - workspace.key.list
+    - workspace.key.revoke
+    - process.start
     - process.get by process ID
     - process.get by workspace-local friendly name
     - process.list
+    - process.signal
+    - process.terminate
+    - process.kill
+    - process.wait
+    - process.remove
     - process.read_output
+    - attachment.request
     - events.list
     - manager.shutdown
+- Added framed controller API requests over the existing control socket:
+  - 4-byte length-prefixed JSON RPC requests
+  - controller.status
+  - controller.attach
+  - controller.read / controller.read_output
+  - controller.write
+  - controller.resize
+  - controller.detach
+  - controller.signal
+  - controller.terminate
+  - controller.events_after
+  - legacy line protocol remains available on the same socket
+- Added manager process lifecycle API endpoints:
+  - process.kill routes SIGKILL to the owning controller
+  - process.wait polls controller state and falls back to controller event logs
+  - process.remove rejects live processes and removes retained manager/controller state for terminal processes
 - Added the initial persistent manager daemon lifecycle:
   - daemon command runs a long-lived foreground manager process
   - Unix socket lifecycle supports ping, status, and shutdown
