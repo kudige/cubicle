@@ -333,13 +333,21 @@
   - cube remove NAME
   - workspace-local process name resolution before process lifecycle calls
   - daemon-backed E2E coverage using real controller-backed processes
+- Updated the cube launch command shape:
+  - docs/cli-command-spec.md now uses cube run [OPTIONS] COMMAND [ARG...]
+  - top-level cube COMMAND shortcut is reserved for a later phase
+- Added initial cube run implementation over the manager API:
+  - cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND [ARG...]
+  - foreground stream fallback waits and drains retained stdout/stderr
+  - background launch returns startup metadata or human-readable status
+  - generated process names from command basenames
+  - daemon-backed E2E coverage for foreground, background, JSON, and TTY launch
 
 ## Next
 
 1. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
-   - Implement process launch.
-   - Add foreground attach/wait behavior through manager-issued attachment grants.
+   - Add foreground attach behavior through manager-issued attachment grants.
    - Add JSON output contracts for workspace list and lifecycle commands.
    - Add logs and events commands through manager APIs.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.

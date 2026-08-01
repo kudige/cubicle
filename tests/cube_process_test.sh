@@ -78,6 +78,34 @@ cube workspace select "Project A" >/dev/null
 selected_ps_output=$(cube ps)
 printf "%s\n" "$selected_ps_output" | grep -q '^build	stream	running$'
 
+cube run --stream --name fg-run sh -c \
+    'printf "fg-out\n"; printf "fg-err\n" >&2' \
+    >"$tmpdir/fg-run.out" 2>"$tmpdir/fg-run.err"
+grep -q '^fg-out$' "$tmpdir/fg-run.out"
+grep -q '^fg-err$' "$tmpdir/fg-run.err"
+output=$(cube remove fg-run)
+if [ "$output" != "Process fg-run removed" ]; then
+    echo "unexpected foreground process remove output: $output" >&2
+    exit 1
+fi
+
+output=$(cube run --bg --stream --name bg-run sleep 30)
+if [ "$output" != "[bg-run] started in stream mode" ]; then
+    echo "unexpected background run output: $output" >&2
+    exit 1
+fi
+json_bg_output=$(cube --json run --bg --stream /bin/sleep 30)
+printf "%s" "$json_bg_output" | grep -q '"friendly_name":"sleep"'
+printf "%s" "$json_bg_output" | grep -q '"mode":"stream"'
+tty_output=$(cube run --bg --tty --name tty-run sleep 30)
+if [ "$tty_output" != "[tty-run] started in tty mode" ]; then
+    echo "unexpected tty run output: $tty_output" >&2
+    exit 1
+fi
+cube stop bg-run >/dev/null
+cube stop sleep >/dev/null
+cube stop tty-run >/dev/null
+
 api() {
     python3 "$CUBICLE_API_CLIENT" --raw "$socket_path" "$@"
 }
@@ -161,6 +189,26 @@ if [ "$status" -ne 2 ]; then
     exit 1
 fi
 grep -q 'invalid signal' "$tmpdir/signal-invalid.err"
+
+set +e
+cube run --term true >"$tmpdir/run-term.out" 2>"$tmpdir/run-term.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube run --term should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'term mode is not implemented yet' "$tmpdir/run-term.err"
+
+set +e
+cube run >"$tmpdir/run-missing.out" 2>"$tmpdir/run-missing.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube run without command should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'run requires a command' "$tmpdir/run-missing.err"
 
 shutdown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown)
 printf "%s" "$shutdown_response" | grep -q '"success": true'

@@ -31,6 +31,12 @@ typedef struct cube_options {
     int json;
 } cube_options_t;
 
+typedef struct cube_run_options {
+    const char *name;
+    const char *mode;
+    int background;
+} cube_run_options_t;
+
 typedef struct cube_rpc_response {
     cubicle_error_code_t code;
     char *result_json;
@@ -43,6 +49,7 @@ static void print_usage(FILE *stream)
             "Usage:\n"
             "  cube [--manager-socket PATH] [--workspace NAME] [--json] COMMAND [ARG...]\n"
             "  cube workspace NAME\n"
+            "  cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND [ARG...]\n"
             "  cube ps\n"
             "  cube connect [--ro] NAME\n"
             "  cube stop NAME\n"
@@ -106,6 +113,7 @@ static int parse_global_options(int argc,
 static int command_requires_manager(const char *command)
 {
     return strcmp(command, "workspace") == 0 ||
+           strcmp(command, "run") == 0 ||
            strcmp(command, "ps") == 0 ||
            strcmp(command, "inspect") == 0 ||
            strcmp(command, "connect") == 0 ||
@@ -326,6 +334,30 @@ static int json_string_field(yyjson_val *object,
     }
     int length = snprintf(buffer, buffer_size, "%s", yyjson_get_str(value));
     return length < 0 || (size_t)length >= buffer_size ? -1 : 0;
+}
+
+static int json_bool_field(yyjson_val *object, const char *field, int *value)
+{
+    yyjson_val *field_value = yyjson_obj_get(object, field);
+    if (!yyjson_is_bool(field_value)) {
+        return -1;
+    }
+    *value = yyjson_get_bool(field_value) ? 1 : 0;
+    return 0;
+}
+
+static int json_int_field(yyjson_val *object, const char *field, int *value)
+{
+    yyjson_val *field_value = yyjson_obj_get(object, field);
+    if (!yyjson_is_int(field_value)) {
+        return -1;
+    }
+    int64_t parsed = yyjson_get_int(field_value);
+    if (parsed < INT_MIN || parsed > INT_MAX) {
+        return -1;
+    }
+    *value = (int)parsed;
+    return 0;
 }
 
 static int selected_workspace_path(char path[PATH_MAX])
@@ -865,6 +897,309 @@ static int process_lifecycle_action(const char *manager_socket,
     return 0;
 }
 
+static int generated_process_name(char *buffer,
+                                  size_t buffer_size,
+                                  const char *command)
+{
+    const char *base = strrchr(command, '/');
+    base = base == NULL ? command : base + 1;
+    if (base[0] == '\0') {
+        return -1;
+    }
+
+    size_t used = 0;
+    for (const char *cursor = base; *cursor != '\0'; ++cursor) {
+        char c = *cursor;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-') {
+            if (used + 1 >= buffer_size) {
+                break;
+            }
+            buffer[used++] = c;
+        } else if (used > 0 && buffer[used - 1] != '-') {
+            if (used + 1 >= buffer_size) {
+                break;
+            }
+            buffer[used++] = '-';
+        }
+    }
+    while (used > 0 && buffer[used - 1] == '-') {
+        --used;
+    }
+    if (used == 0) {
+        return -1;
+    }
+    buffer[used] = '\0';
+    return 0;
+}
+
+static int build_process_start_params(cubicle_json_builder_t *params,
+                                      const char *workspace,
+                                      const cube_run_options_t *run_options,
+                                      int command_argc,
+                                      char **command_argv)
+{
+    if (cubicle_json_builder_append(params, "{\"workspace_id\":") < 0 ||
+        cubicle_json_builder_append_string(params, workspace) < 0 ||
+        cubicle_json_builder_append(params, ",\"friendly_name\":") < 0 ||
+        cubicle_json_builder_append_string(params, run_options->name) < 0 ||
+        cubicle_json_builder_append(params, ",\"mode\":") < 0 ||
+        cubicle_json_builder_append_string(params, run_options->mode) < 0 ||
+        cubicle_json_builder_append(params, ",\"stdin_policy\":") < 0 ||
+        cubicle_json_builder_append_string(
+            params, run_options->background ? "open" : "eof") < 0 ||
+        cubicle_json_builder_append(params, ",\"argv\":[") < 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < command_argc; ++i) {
+        if ((i > 0 && cubicle_json_builder_append(params, ",") < 0) ||
+            cubicle_json_builder_append_string(params, command_argv[i]) < 0) {
+            return -1;
+        }
+    }
+
+    return cubicle_json_builder_append(params, "]}");
+}
+
+static int read_process_output(const char *manager_socket,
+                               const char *process_id,
+                               const char *stream,
+                               FILE *output)
+{
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[512];
+    snprintf(params, sizeof(params),
+             "{\"process_id\":\"%s\",\"stream\":\"%s\",\"offset\":0,\"maximum_length\":8192}",
+             escaped_process_id, stream);
+
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "process.read_output", params,
+                     &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid output response\n");
+        return 2;
+    }
+
+    yyjson_val *data = yyjson_obj_get(document.root, "data");
+    if (!yyjson_is_str(data)) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid output response\n");
+        return 2;
+    }
+    fputs(yyjson_get_str(data), output);
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int wait_for_process(const char *manager_socket,
+                            const char *process_id,
+                            cube_rpc_response_t *response)
+{
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[512];
+    snprintf(params, sizeof(params),
+             "{\"process_id\":\"%s\",\"timeout_ms\":86400000}",
+             escaped_process_id);
+    if (call_manager(manager_socket, "process.wait", params, response) < 0) {
+        return print_rpc_error(response);
+    }
+    return 0;
+}
+
+static int process_run(const char *manager_socket,
+                       const cube_options_t *options,
+                       int argc,
+                       char **argv,
+                       int command_index)
+{
+    cube_run_options_t run_options = {
+        .name = NULL,
+        .mode = "stream",
+        .background = 0,
+    };
+
+    int argument_index = command_index + 1;
+    while (argument_index < argc) {
+        const char *argument = argv[argument_index];
+        if (strcmp(argument, "--") == 0) {
+            ++argument_index;
+            break;
+        }
+        if (strcmp(argument, "--fg") == 0) {
+            run_options.background = 0;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argument, "--bg") == 0) {
+            run_options.background = 1;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argument, "--stream") == 0) {
+            run_options.mode = "stream";
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argument, "--tty") == 0) {
+            run_options.mode = "tty";
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argument, "--term") == 0) {
+            fprintf(stderr, "cube: term mode is not implemented yet\n");
+            return 2;
+        }
+        if (strcmp(argument, "--name") == 0) {
+            if (argument_index + 1 >= argc) {
+                fprintf(stderr, "cube: --name requires a process name\n");
+                return 2;
+            }
+            run_options.name = argv[argument_index + 1];
+            argument_index += 2;
+            continue;
+        }
+        if (argument[0] == '-' && argument[1] == '-') {
+            fprintf(stderr, "cube: unknown run option '%s'\n", argument);
+            return 2;
+        }
+        break;
+    }
+
+    if (argument_index >= argc) {
+        fprintf(stderr, "cube: run requires a command\n");
+        return 2;
+    }
+
+    char generated_name[CUBICLE_NAME_MAX];
+    if (run_options.name == NULL) {
+        if (generated_process_name(generated_name, sizeof(generated_name),
+                                   argv[argument_index]) < 0) {
+            fprintf(stderr, "cube: failed to generate process name\n");
+            return 2;
+        }
+        run_options.name = generated_name;
+    }
+    if (!valid_name(run_options.name)) {
+        fprintf(stderr, "cube: invalid process name\n");
+        return 2;
+    }
+
+    char workspace[CUBICLE_NAME_MAX];
+    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+
+    cubicle_json_builder_t params = {0};
+    int command_argc = argc - argument_index;
+    if (build_process_start_params(&params, workspace, &run_options,
+                                   command_argc, &argv[argument_index]) < 0) {
+        cubicle_json_builder_cleanup(&params);
+        fprintf(stderr, "cube: failed to encode process start request\n");
+        return 2;
+    }
+
+    cube_rpc_response_t start_response;
+    if (call_manager(manager_socket, "process.start", params.data,
+                     &start_response) < 0) {
+        cubicle_json_builder_cleanup(&params);
+        return print_rpc_error(&start_response);
+    }
+    cubicle_json_builder_cleanup(&params);
+
+    cubicle_json_doc_t start_document;
+    if (cubicle_json_parse(&start_document, start_response.result_json) < 0) {
+        cleanup_rpc_response(&start_response);
+        fprintf(stderr, "cube: invalid process start response\n");
+        return 2;
+    }
+
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char process_name[CUBICLE_NAME_MAX];
+    char mode[32];
+    if (json_string_field(start_document.root, "id", process_id,
+                          sizeof(process_id)) < 0 ||
+        json_string_field(start_document.root, "friendly_name", process_name,
+                          sizeof(process_name)) < 0 ||
+        json_string_field(start_document.root, "mode", mode, sizeof(mode)) < 0) {
+        cubicle_json_cleanup(&start_document);
+        cleanup_rpc_response(&start_response);
+        fprintf(stderr, "cube: invalid process start response\n");
+        return 2;
+    }
+    cubicle_json_cleanup(&start_document);
+
+    if (run_options.background) {
+        if (options->json) {
+            printf("%s\n", start_response.result_json);
+        } else {
+            printf("[%s] started in %s mode\n", process_name, mode);
+        }
+        cleanup_rpc_response(&start_response);
+        return 0;
+    }
+    cleanup_rpc_response(&start_response);
+
+    cube_rpc_response_t wait_response;
+    int wait_result = wait_for_process(manager_socket, process_id,
+                                       &wait_response);
+    if (wait_result != 0) {
+        return wait_result;
+    }
+
+    int stdout_result = read_process_output(manager_socket, process_id,
+                                            "stdout", stdout);
+    int stderr_result = read_process_output(manager_socket, process_id,
+                                            "stderr", stderr);
+    if (stdout_result != 0 || stderr_result != 0) {
+        cleanup_rpc_response(&wait_response);
+        return stdout_result != 0 ? stdout_result : stderr_result;
+    }
+
+    int exit_code = 0;
+    int has_exit_code = 0;
+    int has_exit_status = 0;
+    cubicle_json_doc_t wait_document;
+    if (cubicle_json_parse(&wait_document, wait_response.result_json) < 0) {
+        cleanup_rpc_response(&wait_response);
+        fprintf(stderr, "cube: invalid process wait response\n");
+        return 2;
+    }
+    has_exit_code = json_int_field(wait_document.root, "exit_code",
+                                   &exit_code) == 0;
+    if (json_bool_field(wait_document.root, "has_exit_status",
+                        &has_exit_status) == 0 &&
+        has_exit_status && has_exit_code) {
+        cubicle_json_cleanup(&wait_document);
+        cleanup_rpc_response(&wait_response);
+        return exit_code >= 0 && exit_code <= 255 ? exit_code : 1;
+    }
+    cubicle_json_cleanup(&wait_document);
+    cleanup_rpc_response(&wait_response);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     cube_options_t options;
@@ -904,6 +1239,11 @@ int main(int argc, char **argv)
 
     if (strcmp(command, "workspace") == 0) {
         return command_workspace(manager_socket, argc, argv, command_index);
+    }
+
+    if (strcmp(command, "run") == 0) {
+        return process_run(manager_socket, &options, argc, argv,
+                           command_index);
     }
 
     if (strcmp(command, "ps") == 0) {

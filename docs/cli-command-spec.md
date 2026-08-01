@@ -17,7 +17,7 @@ The CLI should hide manager/controller implementation details. Users work with:
 ## 1. Core principles
 
 1. All user-facing commands use the single executable name `cube`.
-2. The common operation is `cube COMMAND...`.
+2. The explicit launch operation is `cube run COMMAND...`.
 3. Explicit command-line options always override configured defaults.
 4. Defaults are policy-driven, not inferred from executable names.
 5. The initial built-in launch default is foreground.
@@ -33,16 +33,16 @@ The CLI should hide manager/controller implementation details. Users work with:
 $ cube workspace Shogun
 Workspace Shogun selected
 
-$ cube make
+$ cube run make
 ... make output appears here ...
 
-$ cube --bg emacs test.c
+$ cube run --bg emacs test.c
 [emacs-test.c] started in tty mode
 
-$ cube --bg --term bash
+$ cube run --bg --term bash
 [bash] started in term mode
 
-$ cube --bg --name CScope bash
+$ cube run --bg --name CScope bash
 [CScope] started in tty mode
 
 $ cube ps
@@ -63,18 +63,18 @@ Connected read-only to [bash]. Detach with Ctrl-\\ d
 ## 3. Launch command shape
 
 ```text
-cube [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
 ```
 
 Examples:
 
 ```console
-cube make
-cube --fg pytest
-cube --bg npm run dev
-cube --bg --tty emacs test.c
-cube --bg --term bash
-cube --bg --name backend npm run server
+cube run make
+cube run --fg pytest
+cube run --bg npm run dev
+cube run --bg --tty emacs test.c
+cube run --bg --term bash
+cube run --bg --name backend npm run server
 ```
 
 ### 3.1 Foreground and background
@@ -93,7 +93,7 @@ The process remains managed. An unexpected client disconnect must not automatica
 `--bg` launches the process detached and returns after successful startup:
 
 ```console
-$ cube --bg make watch
+$ cube run --bg make watch
 [make-watch] started in tty mode
 ```
 
@@ -109,7 +109,8 @@ configured default
 built-in default: foreground
 ```
 
-Initially, `cube COMMAND...` is equivalent to `cube --fg COMMAND...`.
+Initially, `cube run COMMAND...` is equivalent to `cube run --fg COMMAND...`.
+The top-level shortcut form `cube COMMAND...` is reserved for a later phase.
 
 ### 3.2 Process modes
 
@@ -157,7 +158,7 @@ hint: use --tty or run 'cube defaults set mode tty'
 `--name NAME` sets the complete user-facing process name:
 
 ```console
-$ cube --bg --name CScope bash
+$ cube run --bg --name CScope bash
 [CScope] started in tty mode
 ```
 
@@ -188,8 +189,8 @@ Replacement or reuse semantics can be added later; Phase 1 should not silently r
 The CLI must support `--` so commands beginning with options are unambiguous:
 
 ```console
-cube --bg -- command --fg
-cube --stream -- ./script --name internal-option
+cube run --bg -- command --fg
+cube run --stream -- ./script --name internal-option
 ```
 
 ## 4. Workspace commands
@@ -447,14 +448,14 @@ Default process mode set to stream
 Then:
 
 ```console
-$ cube make watch
+$ cube run make watch
 [make-watch] started in stream mode
 ```
 
 An explicit option always wins:
 
 ```console
-cube --fg --tty make watch
+cube run --fg --tty make watch
 ```
 
 ### 8.1 Initial configuration
@@ -618,7 +619,7 @@ Top-level help should emphasize the workflow rather than expose internal archite
 ```text
 Usage:
   cube workspace NAME
-  cube [OPTIONS] COMMAND [ARG...]
+  cube run [OPTIONS] COMMAND [ARG...]
   cube ps
   cube connect [--ro] NAME
   cube stop NAME
@@ -639,7 +640,7 @@ Implement:
 - `cube workspace`
 - `cube workspace NAME`
 - `cube workspace list`
-- `cube [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND...`
+- `cube run [--fg|--bg] [--stream|--tty] [--name NAME] COMMAND...`
 - `cube ps`
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
@@ -667,8 +668,8 @@ Acceptance workflow:
 
 ```console
 cube workspace Shogun
-cube make
-cube --bg --name editor emacs test.c
+cube run make
+cube run --bg --name editor emacs test.c
 cube ps
 cube inspect editor
 cube stop editor
