@@ -128,10 +128,12 @@ static void run_manager_integration(const char *directory)
     cubicle_client_t *client = connect_client(manager_socket);
 
     cubicle_manager_ping_result_t ping;
+    // Endpoint test for manager.ping
     assert(cubicle_manager_ping(client, &ping) == CUBICLE_OK);
     assert(strcmp(ping.manager_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == 0);
 
     cubicle_manager_status_t status;
+    // Endpoint test for manager.status
     assert(cubicle_manager_status(client, &status) == CUBICLE_OK);
     assert(status.workspace_count == 2);
 
@@ -140,12 +142,14 @@ static void run_manager_integration(const char *directory)
         .request = { .idempotency_key = "idem-1", .timeout_ms = 42 },
     };
     cubicle_workspace_info_t workspace;
+    // Endpoint test for workspace.create
     assert(cubicle_workspace_create(client, &create, &workspace) == CUBICLE_OK);
     assert(strcmp(workspace.id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0);
 
     cubicle_workspace_info_t *workspaces = NULL;
     size_t workspace_count = 0;
     cubicle_page_info_t page;
+    // Endpoint test for workspace.list
     assert(cubicle_workspace_list(client, NULL, &workspaces, &workspace_count,
                                   &page) == CUBICLE_OK);
     assert(workspace_count == 1 && page.has_more);
@@ -160,10 +164,12 @@ static void run_manager_integration(const char *directory)
         .argc = 2,
     };
     cubicle_process_info_t process;
+    // Endpoint test for process.start
     assert(cubicle_process_start(client, &start, &process) == CUBICLE_OK);
     assert(process.state == CUBICLE_PROCESS_RUNNING);
 
     cubicle_output_chunk_t chunk;
+    // Endpoint test for process.read_output
     assert(cubicle_process_read_output(client, process.id, CUBICLE_STREAM_STDOUT,
                                        5, 16, &chunk) == CUBICLE_OK);
     assert(chunk.length == 5 && memcmp(chunk.data, "hello", 5) == 0);
@@ -175,17 +181,20 @@ static void run_manager_integration(const char *directory)
         .mode = CUBICLE_ATTACHMENT_INTERACTIVE,
     };
     cubicle_attachment_grant_t grant;
+    // Endpoint test for attachment.request
     assert(cubicle_attachment_request(client, &attachment_request, &grant) ==
            CUBICLE_OK);
     assert(strcmp(grant.endpoint.uri, controller_uri) == 0);
 
     cubicle_event_t *events = NULL;
     size_t event_count = 0;
+    // Endpoint test for events.list
     assert(cubicle_events_list(client, NULL, &events, &event_count) ==
            CUBICLE_OK);
     assert(event_count == 1);
     cubicle_events_free(events);
 
+    // Endpoint test for process.signal
     assert(cubicle_process_signal(client, process.id, 15) == CUBICLE_OK);
 
     cubicle_client_disconnect(client);
@@ -224,6 +233,7 @@ static void run_controller_integration(const char *directory)
         "{\"request_id\":\"raw-1\",\"method\":\"controller.status\",\"params\":{}}";
     void *response = NULL;
     size_t response_length = 0;
+    // Endpoint test for controller.status
     assert(transport->vtable->request(transport, request, sizeof(request) - 1,
                                       &response, &response_length,
                                       &error) == CUBICLE_OK);
@@ -253,6 +263,7 @@ static void run_error_scenario(const char *directory, const char *scenario,
                                     scenario, "unix:///unused.sock", 1);
     cubicle_client_t *client = connect_client(socket_path);
     cubicle_manager_ping_result_t ping;
+    // Endpoint test for manager.ping error handling
     assert(cubicle_manager_ping(client, &ping) == expected);
     const cubicle_error_t *error = cubicle_client_last_error(client);
     assert(error != NULL && error->code == expected);
