@@ -332,6 +332,7 @@ if(CUBICLE_ENABLE_COVERAGE)
             cubicle-manager
             cubicle-controller
             cubicle-process-test
+            cubicle-rpc-test
             cubicle-util-test
             cubicle-rpc-test
             cubicle-manager-registry-unit-test

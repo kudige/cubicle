@@ -29,11 +29,57 @@ static void test_escape(void)
     expect_int(cubicle_json_escape(buffer, sizeof(buffer), "a\"b\\c\n"), 0,
                "escape");
     expect_string(buffer, "a\\\"b\\\\c\\n", "escaped string");
+    expect_int(cubicle_json_escape(buffer, sizeof(buffer), ""), 0,
+               "escape empty");
+    expect_string(buffer, "", "escaped empty string");
 
     errno = 0;
     expect_int(cubicle_json_escape(buffer, 4, "abcdef"), -1,
                "escape overflow");
     expect_int(errno, ENOSPC, "escape overflow errno");
+}
+
+static void test_builder(void)
+{
+    cubicle_json_builder_t builder = {0};
+    expect_int(cubicle_json_builder_init(&builder), 0, "builder init");
+    expect_int(cubicle_json_builder_append(&builder, "{\"name\":"), 0,
+               "builder append");
+    expect_int(cubicle_json_builder_append_string(&builder, "a\"b"), 0,
+               "builder string");
+    expect_int(cubicle_json_builder_appendf(&builder, ",\"n\":%d}", 42), 0,
+               "builder appendf");
+    expect_string(builder.data, "{\"name\":\"a\\\"b\",\"n\":42}",
+                  "builder result");
+    expect_int((int)builder.length, (int)strlen(builder.data),
+               "builder length");
+    cubicle_json_builder_cleanup(&builder);
+    expect_int(builder.data == NULL, 1, "builder cleanup data");
+    expect_int((int)builder.length, 0, "builder cleanup length");
+
+    expect_int(cubicle_json_builder_append_escaped(&builder, "line\n"), 0,
+               "builder escaped");
+    expect_string(builder.data, "line\\n", "builder escaped result");
+    cubicle_json_builder_cleanup(&builder);
+
+    expect_int(cubicle_json_builder_append_string(&builder, NULL), 0,
+               "builder null string");
+    expect_string(builder.data, "\"\"", "builder null string result");
+    cubicle_json_builder_cleanup(&builder);
+
+    expect_int(cubicle_json_builder_reserve(&builder, 4096), 0,
+               "builder reserve");
+    expect_int(builder.capacity >= 4097, 1, "builder reserve capacity");
+    cubicle_json_builder_cleanup(&builder);
+
+    char long_value[1200];
+    memset(long_value, 'x', sizeof(long_value) - 1);
+    long_value[sizeof(long_value) - 1] = '\0';
+    expect_int(cubicle_json_builder_append_escaped(&builder, long_value), 0,
+               "builder long escaped");
+    expect_int((int)builder.length, (int)strlen(long_value),
+               "builder long escaped length");
+    cubicle_json_builder_cleanup(&builder);
 }
 
 static void test_envelopes(void)
@@ -111,6 +157,7 @@ static void test_invalid(void)
 int main(void)
 {
     test_escape();
+    test_builder();
     test_envelopes();
     test_error();
     test_invalid();

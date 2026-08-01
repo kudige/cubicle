@@ -8,8 +8,10 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(cubicle_client STATIC
     ../src/client/client.c
     ../src/client/error.c
-    ../src/common/rpc.c
+    ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
+    ../src/common/process.c
+    ../src/common/rpc.c
 )
 
 add_library(Cubicle::Client ALIAS cubicle_client)
@@ -56,4 +58,61 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic
     )
     add_test(NAME libcubicle-rpc-test COMMAND libcubicle-rpc-test)
+
+    add_executable(libcubicle-manager-api-compat-test
+        ../tests/manager_api_compat_test.c
+        ../tests/compat_manager_api_client.c
+        ../src/client/error.c
+        ../src/common/rpc.c
+    )
+    target_include_directories(libcubicle-manager-api-compat-test
+        PRIVATE ../include
+    )
+    target_compile_options(libcubicle-manager-api-compat-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-manager-api-compat-test
+             COMMAND libcubicle-manager-api-compat-test)
+
+    add_executable(libcubicle-client-rpc-test
+        ../tests/libcubicle_rpc_test.c
+    )
+    target_link_libraries(libcubicle-client-rpc-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-client-rpc-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(NAME libcubicle-client-rpc-test COMMAND libcubicle-client-rpc-test)
+
+    add_executable(cubicle-mock-api-server
+        ../tests/mock_api_server.c
+    )
+    target_compile_options(cubicle-mock-api-server PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+
+    add_executable(libcubicle-mock-integration-test
+        ../tests/libcubicle_mock_integration_test.c
+    )
+    target_link_libraries(libcubicle-mock-integration-test PRIVATE Cubicle::Client)
+    target_compile_options(libcubicle-mock-integration-test PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    add_test(
+        NAME libcubicle-mock-integration-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test> all
+    )
+    add_test(
+        NAME libcubicle-mock-integration-unix-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test> unix
+    )
+    add_test(
+        NAME libcubicle-mock-integration-tcp-test
+        COMMAND ${CMAKE_COMMAND} -E env
+                CUBICLE_MOCK_API_SERVER=$<TARGET_FILE:cubicle-mock-api-server>
+                $<TARGET_FILE:libcubicle-mock-integration-test> tcp
+    )
 endif()
