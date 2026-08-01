@@ -5,6 +5,7 @@
 #include "json.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct cubicle_rpc_request_envelope {
@@ -27,12 +28,17 @@ typedef struct cubicle_rpc_response_envelope {
 
 int cubicle_rpc_decode_request(cubicle_rpc_request_envelope_t *envelope,
                                const char *json);
+int cubicle_rpc_decode_request_n(cubicle_rpc_request_envelope_t *envelope,
+                                 const char *json, size_t length);
 void cubicle_rpc_request_envelope_cleanup(
     cubicle_rpc_request_envelope_t *envelope);
 
 int cubicle_rpc_decode_response(cubicle_rpc_response_envelope_t *envelope,
                                 const char *json,
                                 const char *expected_request_id);
+int cubicle_rpc_decode_response_n(cubicle_rpc_response_envelope_t *envelope,
+                                  const char *json, size_t length,
+                                  const char *expected_request_id);
 void cubicle_rpc_response_envelope_cleanup(
     cubicle_rpc_response_envelope_t *envelope);
 

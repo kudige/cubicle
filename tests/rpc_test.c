@@ -172,6 +172,19 @@ static void test_error(void)
                    "\"retryable\":true,\"system_errno\":2147483648}}",
                    &error),
                -1, "error response rejects errno overflow");
+
+    expect_int(cubicle_rpc_error(response, sizeof(response), "req\"bad",
+                                 CUBICLE_ERR_PROTOCOL, "bad \"request\"",
+                                 0, 0),
+               0, "escaped error response");
+    expect_int(cubicle_rpc_response_error(response, &error), 0,
+               "parse escaped error");
+    expect_string(error.message, "bad \"request\"", "escaped error message");
+    char value[64];
+    expect_int(cubicle_rpc_get_string(response, "request_id", value,
+                                      sizeof(value)),
+               0, "escaped error request id");
+    expect_string(value, "req\"bad", "escaped error request id value");
 }
 
 static void test_invalid(void)
@@ -349,6 +362,13 @@ static void test_rpc_envelope_validation(void)
                    "\"params\":null}"),
                -1, "request null params");
 
+    static const char with_trailing_nul[] =
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"req-1\","
+        "\"method\":\"manager.ping\",\"params\":{}}\0garbage";
+    expect_int(cubicle_rpc_decode_request_n(
+                   &request, with_trailing_nul, sizeof(with_trailing_nul) - 1),
+               -1, "request rejects embedded nul");
+
     cubicle_rpc_response_envelope_t response;
     expect_int(cubicle_rpc_decode_response(
                    &response,
@@ -383,6 +403,13 @@ static void test_rpc_envelope_validation(void)
                    "\"result\":{},\"surprise\":true}",
                    "req-1"),
                -1, "response unknown top-level field");
+
+    static const char response_with_trailing_nul[] =
+        "{\"request_id\":\"req-1\",\"success\":true,\"result\":{}}\0garbage";
+    expect_int(cubicle_rpc_decode_response_n(
+                   &response, response_with_trailing_nul,
+                   sizeof(response_with_trailing_nul) - 1, "req-1"),
+               -1, "response rejects embedded nul");
 }
 
 static void test_checked_json_accessors(void)

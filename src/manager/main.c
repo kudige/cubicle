@@ -2132,7 +2132,8 @@ static int read_all_fd(int fd, void *buffer, size_t length)
     return 0;
 }
 
-static int read_api_frame(int client_fd, char *request, size_t request_size)
+static int read_api_frame(int client_fd, char *request, size_t request_size,
+                          size_t *length_out)
 {
     uint32_t length_network = 0;
     if (read_all_fd(client_fd, &length_network, sizeof(length_network)) < 0) {
@@ -2150,6 +2151,9 @@ static int read_api_frame(int client_fd, char *request, size_t request_size)
         return -1;
     }
     request[length] = '\0';
+    if (length_out != NULL) {
+        *length_out = length;
+    }
     return 0;
 }
 
@@ -2184,12 +2188,23 @@ static int manager_api_error(int client_fd, const char *request_id,
 static int manager_api_success(int client_fd, const char *request_id,
                                const char *result)
 {
-    char response[4096];
-    if (cubicle_rpc_success(response, sizeof(response), request_id,
-                            result) < 0) {
-        return -1;
+    char *response = malloc(CUBICLE_API_MAX_FRAME + 1);
+    if (response == NULL) {
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_INTERNAL,
+                                 "failed to allocate API response", false,
+                                 ENOMEM);
     }
-    return write_api_frame(client_fd, response);
+    if (cubicle_rpc_success(response, CUBICLE_API_MAX_FRAME + 1, request_id,
+                            result) < 0) {
+        free(response);
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_RESOURCE_LIMIT,
+                                 "API response is too large", false, 0);
+    }
+    int result_code = write_api_frame(client_fd, response);
+    free(response);
+    return result_code;
 }
 
 static int handle_manager_client(const manager_state_t *state, int client_fd,
@@ -2197,14 +2212,16 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                  uint64_t started_at_ms)
 {
     char request[8192];
-    if (read_api_frame(client_fd, request, sizeof(request)) < 0) {
+    size_t request_length = 0;
+    if (read_api_frame(client_fd, request, sizeof(request),
+                       &request_length) < 0) {
         return -1;
     }
 
     cubicle_rpc_request_envelope_t envelope;
     char request_id[64] = "";
     char method[128] = "";
-    if (cubicle_rpc_decode_request(&envelope, request) < 0) {
+    if (cubicle_rpc_decode_request_n(&envelope, request, request_length) < 0) {
         return manager_api_error(client_fd, request_id,
                                  CUBICLE_ERR_PROTOCOL,
                                  "invalid request envelope", false, 0);

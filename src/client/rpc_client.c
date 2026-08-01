@@ -124,7 +124,8 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     }
 
     cubicle_rpc_response_envelope_t envelope;
-    if (cubicle_rpc_decode_response(&envelope, response, request_id) < 0) {
+    if (cubicle_rpc_decode_response_n(&envelope, response, response_length,
+                                      request_id) < 0) {
         free(response);
         return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
                                 "malformed response envelope");

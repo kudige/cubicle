@@ -119,7 +119,17 @@ int cubicle_json_parse(cubicle_json_doc_t *parsed, const char *json)
         return -1;
     }
 
-    size_t length = strlen(json);
+    return cubicle_json_parse_n(parsed, json, strlen(json));
+}
+
+int cubicle_json_parse_n(cubicle_json_doc_t *parsed, const char *json,
+                         size_t length)
+{
+    if (parsed == NULL || json == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
     if (length > CUBICLE_JSON_MAX_DOCUMENT_BYTES) {
         errno = E2BIG;
         return -1;
