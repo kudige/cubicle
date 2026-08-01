@@ -203,6 +203,8 @@
   - added protocol version and error-code definitions
   - added the transport vtable contract
   - added endpoint parsing for initial Unix socket endpoints
+  - added a reusable Python API test client for framed JSON RPC over Unix sockets
+  - refactored the manager daemon E2E test to use the shared API client
 - Added the initial persistent manager daemon lifecycle:
   - daemon command runs a long-lived foreground manager process
   - Unix socket lifecycle supports ping, status, and shutdown

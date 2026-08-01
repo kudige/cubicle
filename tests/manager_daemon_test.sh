@@ -5,30 +5,8 @@ manager_pid=
 
 cleanup() {
     if [ -n "${manager_pid:-}" ]; then
-        python3 - "$socket_path" <<'PY' >/dev/null 2>&1 || true
-import json
-import socket
-import struct
-import sys
-
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-client.connect(sys.argv[1])
-request = {
-    "protocol_major": 0,
-    "protocol_minor": 1,
-    "request_id": "cleanup",
-    "session_id": "local-session",
-    "method": "manager.shutdown",
-    "params": {},
-}
-payload = json.dumps(request, separators=(",", ":")).encode()
-client.sendall(struct.pack("!I", len(payload)) + payload)
-header = client.recv(4)
-if len(header) == 4:
-    length = struct.unpack("!I", header)[0]
-    client.recv(length)
-client.close()
-PY
+        python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown \
+            >/dev/null 2>&1 || true
         wait "$manager_pid" 2>/dev/null || true
     fi
     rm -rf "$tmpdir"
@@ -87,47 +65,14 @@ if [ ! -S "$socket_path" ]; then
 fi
 
 send_manager_rpc() {
-    params=${2-'{}'}
-    python3 - "$socket_path" "$1" "$params" <<'PY'
-import json
-import socket
-import struct
-import sys
-
-method = sys.argv[2]
-params = json.loads(sys.argv[3])
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-client.connect(sys.argv[1])
-request = {
-    "protocol_major": 0,
-    "protocol_minor": 1,
-    "request_id": "test",
-    "session_id": "local-session",
-    "method": method,
-    "params": params,
-}
-payload = json.dumps(request, separators=(",", ":")).encode()
-client.sendall(struct.pack("!I", len(payload)) + payload)
-header = client.recv(4)
-if len(header) != 4:
-    raise SystemExit("missing response header")
-length = struct.unpack("!I", header)[0]
-response = b""
-while len(response) < length:
-    chunk = client.recv(length - len(response))
-    if not chunk:
-        raise SystemExit("short response")
-    response += chunk
-client.close()
-sys.stdout.write(json.dumps(json.loads(response), sort_keys=True))
-PY
+    python3 "$CUBICLE_API_CLIENT" "$socket_path" call "$@"
 }
 
 send_manager_command() {
     case "$1" in
-        ping) send_manager_rpc manager.ping ;;
-        status) send_manager_rpc manager.status ;;
-        shutdown) send_manager_rpc manager.shutdown ;;
+        ping) python3 "$CUBICLE_API_CLIENT" "$socket_path" ping ;;
+        status) python3 "$CUBICLE_API_CLIENT" "$socket_path" status ;;
+        shutdown) python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown ;;
         *) send_manager_rpc "$1" ;;
     esac
 }
@@ -169,7 +114,8 @@ printf "%s" "$workspace_list_response" | grep -q '"count": 2'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project A"'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
 
-workspace_duplicate_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
+workspace_duplicate_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
+    --allow-error workspace-create "Project B")
 printf "%s" "$workspace_duplicate_response" | grep -q '"ok": false'
 printf "%s" "$workspace_duplicate_response" | grep -q '"code": "already_exists"'
 
@@ -214,7 +160,8 @@ printf "%s" "$events_list_response" | grep -q '"type": "process_started"'
 printf "%s" "$events_list_response" | grep -q '"type": "output_available"'
 printf "%s" "$events_list_response" | grep -q '"type": "process_exited"'
 
-unknown_response=$(send_manager_command unknown)
+unknown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
+    --allow-error call unknown)
 if ! printf "%s" "$unknown_response" | grep -q '"code": "unsupported"'; then
     echo "unexpected unknown-command response: $unknown_response" >&2
     exit 1

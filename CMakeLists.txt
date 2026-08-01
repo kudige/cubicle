@@ -157,6 +157,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_daemon_test.sh
 )
 
