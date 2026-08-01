@@ -1,5 +1,6 @@
 #include "cubicle/rpc.h"
 #include "../src/common/json.h"
+#include "../src/common/rpc_internal.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -279,6 +280,81 @@ static void test_json_hardening(void)
     cubicle_json_builder_cleanup(&builder);
 }
 
+static void test_rpc_envelope_validation(void)
+{
+    cubicle_rpc_request_envelope_t request;
+    const char *valid_request =
+        "{\"protocol_major\":0,\"protocol_minor\":1,\"request_id\":\"req-1\","
+        "\"session_id\":\"sess-1\",\"method\":\"manager.ping\","
+        "\"params\":{}}";
+    expect_int(cubicle_rpc_decode_request(&request, valid_request), 0,
+               "decode request envelope");
+    expect_string(request.request_id, "req-1", "decoded request id");
+    expect_string(request.method, "manager.ping", "decoded method");
+    expect_int(request.params != NULL, 1, "decoded params");
+    cubicle_rpc_request_envelope_cleanup(&request);
+
+    expect_int(cubicle_rpc_decode_request(
+                   &request,
+                   "{\"protocol_major\":0,\"protocol_minor\":1,"
+                   "\"request_id\":\"req-1\",\"method\":\"manager.ping\","
+                   "\"params\":{},\"surprise\":true}"),
+               -1, "request unknown top-level field");
+    expect_int(cubicle_rpc_decode_request(
+                   &request,
+                   "{\"protocol_major\":1,\"protocol_minor\":0,"
+                   "\"request_id\":\"req-1\",\"method\":\"manager.ping\","
+                   "\"params\":{}}"),
+               -1, "request major mismatch");
+    expect_int(cubicle_rpc_decode_request(
+                   &request,
+                   "{\"protocol_major\":0,\"protocol_minor\":2,"
+                   "\"request_id\":\"req-1\",\"method\":\"manager.ping\","
+                   "\"params\":{}}"),
+               -1, "request unsupported minor");
+    expect_int(cubicle_rpc_decode_request(
+                   &request,
+                   "{\"protocol_major\":0,\"protocol_minor\":1,"
+                   "\"request_id\":\"req-1\",\"method\":\"manager.ping\","
+                   "\"params\":null}"),
+               -1, "request null params");
+
+    cubicle_rpc_response_envelope_t response;
+    expect_int(cubicle_rpc_decode_response(
+                   &response,
+                   "{\"request_id\":\"req-1\",\"success\":true,"
+                   "\"result\":{}}",
+                   "req-1"),
+               0, "decode response envelope");
+    expect_int(response.success, 1, "decoded success");
+    cubicle_rpc_response_envelope_cleanup(&response);
+
+    expect_int(cubicle_rpc_decode_response(
+                   &response,
+                   "{\"request_id\":\"wrong\",\"success\":true,"
+                   "\"result\":{}}",
+                   "req-1"),
+               -1, "response request mismatch");
+    expect_int(cubicle_rpc_decode_response(
+                   &response,
+                   "{\"request_id\":\"req-1\",\"success\":true,"
+                   "\"result\":{},\"error\":{}}",
+                   "req-1"),
+               -1, "response result and error");
+    expect_int(cubicle_rpc_decode_response(
+                   &response,
+                   "{\"request_id\":\"req-1\",\"success\":false,"
+                   "\"result\":{}}",
+                   "req-1"),
+               -1, "error response with result");
+    expect_int(cubicle_rpc_decode_response(
+                   &response,
+                   "{\"request_id\":\"req-1\",\"success\":true,"
+                   "\"result\":{},\"surprise\":true}",
+                   "req-1"),
+               -1, "response unknown top-level field");
+}
+
 int main(void)
 {
     test_escape();
@@ -289,5 +365,6 @@ int main(void)
     test_direct_field_lookup();
     test_json_helpers();
     test_json_hardening();
+    test_rpc_envelope_validation();
     return failures == 0 ? 0 : 1;
 }

@@ -11,6 +11,7 @@
 #include "cubicle/workspace.h"
 
 #include "../common/json.h"
+#include "../common/rpc_internal.h"
 
 #include <stdbool.h>
 #include <stddef.h>

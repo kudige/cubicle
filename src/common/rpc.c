@@ -1,6 +1,7 @@
 #include "cubicle/rpc.h"
 
 #include "json.h"
+#include "rpc_internal.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -269,6 +270,186 @@ static int json_fragment_valid(const char *json)
     }
     cubicle_json_cleanup(&parsed);
     return 0;
+}
+
+static int field_allowed(const char *field, const char *const *allowed,
+                         size_t allowed_count)
+{
+    for (size_t i = 0; i < allowed_count; ++i) {
+        if (strcmp(field, allowed[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int validate_top_level_fields(yyjson_val *object,
+                                     const char *const *allowed,
+                                     size_t allowed_count)
+{
+    if (!yyjson_is_obj(object)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    yyjson_obj_iter iter = yyjson_obj_iter_with(object);
+    yyjson_val *key = NULL;
+    while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
+        const char *field = yyjson_get_str(key);
+        if (!field_allowed(field, allowed, allowed_count)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (strcmp(field, "extensions") == 0 &&
+            !yyjson_is_obj(yyjson_obj_iter_get_val(key))) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int get_required_u32(yyjson_val *object, const char *field,
+                            uint32_t *value_out)
+{
+    uint64_t value = 0;
+    if (cubicle_json_get_u64(object, field, &value) < 0 ||
+        value > UINT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    *value_out = (uint32_t)value;
+    return 0;
+}
+
+int cubicle_rpc_decode_request(cubicle_rpc_request_envelope_t *envelope,
+                               const char *json)
+{
+    if (envelope == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(envelope, 0, sizeof(*envelope));
+
+    if (cubicle_json_parse(&envelope->document, json) < 0 ||
+        !yyjson_is_obj(envelope->document.root)) {
+        cubicle_rpc_request_envelope_cleanup(envelope);
+        errno = EINVAL;
+        return -1;
+    }
+
+    static const char *const allowed[] = {
+        "protocol_major", "protocol_minor", "request_id", "session_id",
+        "method", "params", "extensions",
+    };
+    if (validate_top_level_fields(envelope->document.root, allowed,
+                                  sizeof(allowed) / sizeof(allowed[0])) < 0 ||
+        get_required_u32(envelope->document.root, "protocol_major",
+                         &envelope->protocol_major) < 0 ||
+        get_required_u32(envelope->document.root, "protocol_minor",
+                         &envelope->protocol_minor) < 0 ||
+        cubicle_json_get_string(envelope->document.root, "request_id",
+                                envelope->request_id,
+                                sizeof(envelope->request_id)) < 0 ||
+        cubicle_json_get_string(envelope->document.root, "method",
+                                envelope->method,
+                                sizeof(envelope->method)) < 0) {
+        cubicle_rpc_request_envelope_cleanup(envelope);
+        return -1;
+    }
+
+    (void)cubicle_json_get_string(envelope->document.root, "session_id",
+                                  envelope->session_id,
+                                  sizeof(envelope->session_id));
+
+    if (envelope->protocol_major != CUBICLE_PROTOCOL_MAJOR ||
+        envelope->protocol_minor > CUBICLE_PROTOCOL_MINOR ||
+        envelope->request_id[0] == '\0' ||
+        envelope->method[0] == '\0' ||
+        strlen(envelope->method) > CUBICLE_JSON_MAX_METHOD_BYTES) {
+        cubicle_rpc_request_envelope_cleanup(envelope);
+        errno = EINVAL;
+        return -1;
+    }
+
+    envelope->params = cubicle_json_get_object(envelope->document.root,
+                                               "params");
+    if (envelope->params == NULL) {
+        cubicle_rpc_request_envelope_cleanup(envelope);
+        return -1;
+    }
+    return 0;
+}
+
+void cubicle_rpc_request_envelope_cleanup(
+    cubicle_rpc_request_envelope_t *envelope)
+{
+    if (envelope == NULL) {
+        return;
+    }
+    cubicle_json_cleanup(&envelope->document);
+    memset(envelope, 0, sizeof(*envelope));
+}
+
+int cubicle_rpc_decode_response(cubicle_rpc_response_envelope_t *envelope,
+                                const char *json,
+                                const char *expected_request_id)
+{
+    if (envelope == NULL || expected_request_id == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(envelope, 0, sizeof(*envelope));
+
+    if (cubicle_json_parse(&envelope->document, json) < 0 ||
+        !yyjson_is_obj(envelope->document.root)) {
+        cubicle_rpc_response_envelope_cleanup(envelope);
+        errno = EINVAL;
+        return -1;
+    }
+
+    static const char *const allowed[] = {
+        "request_id", "success", "result", "error", "extensions",
+    };
+    if (validate_top_level_fields(envelope->document.root, allowed,
+                                  sizeof(allowed) / sizeof(allowed[0])) < 0 ||
+        cubicle_json_get_string(envelope->document.root, "request_id",
+                                envelope->request_id,
+                                sizeof(envelope->request_id)) < 0 ||
+        cubicle_json_get_bool(envelope->document.root, "success",
+                              &envelope->success) < 0 ||
+        strcmp(envelope->request_id, expected_request_id) != 0) {
+        cubicle_rpc_response_envelope_cleanup(envelope);
+        return -1;
+    }
+
+    envelope->result = cubicle_json_object_get(envelope->document.root,
+                                               "result");
+    envelope->error = cubicle_json_get_object(envelope->document.root,
+                                              "error");
+    if (envelope->success) {
+        if (envelope->result == NULL || envelope->error != NULL) {
+            cubicle_rpc_response_envelope_cleanup(envelope);
+            errno = EINVAL;
+            return -1;
+        }
+    } else if (envelope->error == NULL || envelope->result != NULL) {
+        cubicle_rpc_response_envelope_cleanup(envelope);
+        errno = EINVAL;
+        return -1;
+    }
+    errno = 0;
+    return 0;
+}
+
+void cubicle_rpc_response_envelope_cleanup(
+    cubicle_rpc_response_envelope_t *envelope)
+{
+    if (envelope == NULL) {
+        return;
+    }
+    cubicle_json_cleanup(&envelope->document);
+    memset(envelope, 0, sizeof(*envelope));
 }
 
 int cubicle_rpc_request(char *buffer, size_t buffer_size,

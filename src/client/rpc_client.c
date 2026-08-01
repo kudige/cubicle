@@ -84,15 +84,14 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     }
     cubicle_json_cleanup(&parsed_params);
 
-    cubicle_json_builder_t request = {0};
-    if (cubicle_json_builder_append(&request, "{\"request_id\":") < 0 ||
-        cubicle_json_builder_append_string(&request, request_id) < 0 ||
-        cubicle_json_builder_append(&request, ",\"method\":") < 0 ||
-        cubicle_json_builder_append_string(&request, method) < 0 ||
-        cubicle_json_builder_append(&request, ",\"params\":") < 0 ||
-        cubicle_json_builder_append(&request, request_params) < 0 ||
-        cubicle_json_builder_append(&request, "}") < 0) {
-        cubicle_json_builder_cleanup(&request);
+    size_t request_size = strlen(request_params) + strlen(method) +
+                          strlen(request_id) + 256;
+    char *request = malloc(request_size);
+    if (request == NULL ||
+        cubicle_rpc_request(request, request_size, request_id,
+                            client->session.session_id, method,
+                            request_params) < 0) {
+        free(request);
         return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
                                 "failed to build request");
     }
@@ -100,9 +99,9 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     void *response_data = NULL;
     size_t response_length = 0;
     cubicle_error_code_t result = client->transport->vtable->request(
-        client->transport, request.data, request.length, &response_data,
+        client->transport, request, strlen(request), &response_data,
         &response_length, &client->last_error);
-    cubicle_json_builder_cleanup(&request);
+    free(request);
     if (result != CUBICLE_OK) {
         return result;
     }
@@ -124,38 +123,34 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
                                                  response_data);
     }
 
-    char response_request_id[32];
-    bool success = false;
-    if (json_string_field(response, "request_id", response_request_id,
-                          sizeof(response_request_id)) < 0 ||
-        strcmp(response_request_id, request_id) != 0 ||
-        json_bool_field(response, "success", &success) < 0) {
+    cubicle_rpc_response_envelope_t envelope;
+    if (cubicle_rpc_decode_response(&envelope, response, request_id) < 0) {
         free(response);
         return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
                                 "malformed response envelope");
     }
 
-    if (!success) {
-        const char *error_object = json_object_field(response, "error");
+    if (!envelope.success) {
         char code_name[64] = "protocol";
         char message[CUBICLE_ERROR_MESSAGE_MAX] = "";
         bool retryable = false;
         int64_t system_errno = 0;
-        if (error_object != NULL) {
-            json_string_field(error_object, "code", code_name,
-                              sizeof(code_name));
-            json_string_field(error_object, "message", message,
-                              sizeof(message));
-            json_bool_field(error_object, "retryable", &retryable);
-            json_i64_field(error_object, "system_errno", &system_errno);
-        }
+        (void)cubicle_json_get_string(envelope.error, "code", code_name,
+                                      sizeof(code_name));
+        (void)cubicle_json_get_string(envelope.error, "message", message,
+                                      sizeof(message));
+        (void)cubicle_json_get_bool(envelope.error, "retryable", &retryable);
+        (void)cubicle_json_get_i64(envelope.error, "system_errno",
+                                   &system_errno);
         cubicle_error_code_t code = error_code_from_name(code_name);
         set_error(&client->last_error, code, (int)system_errno, retryable,
                   message);
+        cubicle_rpc_response_envelope_cleanup(&envelope);
         free(response);
         return code;
     }
 
+    cubicle_rpc_response_envelope_cleanup(&envelope);
     *response_out = response;
     memset(&client->last_error, 0, sizeof(client->last_error));
     return CUBICLE_OK;

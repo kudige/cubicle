@@ -6,6 +6,8 @@
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
 
+#include "../common/rpc_internal.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1674,16 +1676,17 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         return -1;
     }
 
+    cubicle_rpc_request_envelope_t envelope;
     char request_id[64] = "";
     char method[128] = "";
-    (void)cubicle_rpc_get_string(request, "request_id", request_id,
-                                 sizeof(request_id));
-    if (cubicle_rpc_get_string(request, "method", method,
-                               sizeof(method)) < 0) {
+    if (cubicle_rpc_decode_request(&envelope, request) < 0) {
         return manager_api_error(client_fd, request_id,
                                  CUBICLE_ERR_PROTOCOL,
-                                 "request missing method", false, 0);
+                                 "invalid request envelope", false, 0);
     }
+    snprintf(request_id, sizeof(request_id), "%s", envelope.request_id);
+    snprintf(method, sizeof(method), "%s", envelope.method);
+    cubicle_rpc_request_envelope_cleanup(&envelope);
 
     char id[CUBICLE_MANAGER_ID_LENGTH + 1];
     if (manager_id(state, id) < 0) {

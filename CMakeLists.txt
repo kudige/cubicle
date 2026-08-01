@@ -41,6 +41,7 @@ add_executable(cubicle-manager
 )
 
 target_link_libraries(cubicle-manager PRIVATE cubicle_common)
+target_include_directories(cubicle-manager PRIVATE third_party/yyjson)
 
 target_compile_options(cubicle-manager PRIVATE
     -Wall
