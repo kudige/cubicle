@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "../common/auth_crypto.h"
+#include "../common/auth_protocol.h"
 #include "../common/json.h"
 #include "../common/rpc_internal.h"
 
@@ -67,6 +69,12 @@ typedef struct cube_attach_offsets {
     uint64_t stderr_offset;
     uint64_t tty_offset;
 } cube_attach_offsets_t;
+
+static void cleanup_rpc_response(cube_rpc_response_t *response);
+static int json_string_field(yyjson_val *object,
+                             const char *field,
+                             char *buffer,
+                             size_t buffer_size);
 
 static void cube_sleep_poll_interval(void)
 {
@@ -446,25 +454,58 @@ static int connect_rpc_endpoint(const char *peer_name,
     return -1;
 }
 
-static int call_rpc_peer(const char *peer_name,
-                         const char *endpoint,
-                         const char *method,
-                         const char *params,
-                         cube_rpc_response_t *response)
+static int endpoint_is_unix(const char *endpoint)
 {
-    memset(response, 0, sizeof(*response));
+    return strncmp(endpoint, "unix://", 7) == 0 ||
+           strncmp(endpoint, "tcp://", 6) != 0;
+}
+
+static int cube_client_key_dir(char path[PATH_MAX])
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    if (config_home != NULL && config_home[0] != '\0') {
+        int length = snprintf(path, PATH_MAX, "%s/cubicle/keys",
+                              config_home);
+        return length < 0 || length >= PATH_MAX ? -1 : 0;
+    }
+
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        int length = snprintf(path, PATH_MAX, "%s/.config/cubicle/keys",
+                              home);
+        return length < 0 || length >= PATH_MAX ? -1 : 0;
+    }
+
+    int length = snprintf(path, PATH_MAX, ".cubicle/keys");
+    return length < 0 || length >= PATH_MAX ? -1 : 0;
+}
+
+static int cube_client_private_key_path(char path[PATH_MAX],
+                                        const char *key_dir)
+{
+    int length = snprintf(path, PATH_MAX, "%s/client.key", key_dir);
+    return length < 0 || length >= PATH_MAX ? -1 : 0;
+}
+
+static int call_rpc_peer_fd(const char *peer_name,
+                            const char *endpoint,
+                            int fd,
+                            const char *request_id,
+                            const char *session_id,
+                            const char *method,
+                            const char *params,
+                            cube_rpc_response_t *response)
+{
+    cleanup_rpc_response(response);
+    response->code = CUBICLE_OK;
+    response->error_message[0] = '\0';
 
     char request[8192];
-    if (cubicle_rpc_request(request, sizeof(request), "cube-1",
-                            "local-session", method, params) < 0) {
+    if (cubicle_rpc_request(request, sizeof(request), request_id,
+                            session_id, method, params) < 0) {
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to encode request");
         response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-
-    int fd = connect_rpc_endpoint(peer_name, endpoint, response);
-    if (fd < 0) {
         return -1;
     }
 
@@ -472,7 +513,6 @@ static int call_rpc_peer(const char *peer_name,
     if (write_all(fd, &request_length, sizeof(request_length)) < 0 ||
         write_all(fd, request, strlen(request)) < 0) {
         int saved_errno = errno;
-        close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to write %s request", peer_name);
@@ -484,7 +524,6 @@ static int call_rpc_peer(const char *peer_name,
     if (read_all(fd, &response_length_network,
                  sizeof(response_length_network)) < 0) {
         int saved_errno = errno;
-        close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to read %s response from %s: %s",
@@ -494,7 +533,6 @@ static int call_rpc_peer(const char *peer_name,
     }
     uint32_t response_length = ntohl(response_length_network);
     if (response_length == 0 || response_length > CUBE_MAX_FRAME) {
-        close(fd);
         snprintf(response->error_message, sizeof(response->error_message),
                  "invalid %s response length", peer_name);
         response->code = CUBICLE_ERR_PROTOCOL;
@@ -503,14 +541,12 @@ static int call_rpc_peer(const char *peer_name,
 
     char *response_json = calloc((size_t)response_length + 1, 1);
     if (response_json == NULL) {
-        close(fd);
         response->code = CUBICLE_ERR_INTERNAL;
         return -1;
     }
     if (read_all(fd, response_json, response_length) < 0) {
         int saved_errno = errno;
         free(response_json);
-        close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
                  "failed to read %s response from %s: %s",
@@ -518,10 +554,10 @@ static int call_rpc_peer(const char *peer_name,
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
-    close(fd);
 
     cubicle_rpc_response_envelope_t envelope;
-    if (cubicle_rpc_decode_response(&envelope, response_json, "cube-1") < 0) {
+    if (cubicle_rpc_decode_response(&envelope, response_json,
+                                    request_id) < 0) {
         free(response_json);
         snprintf(response->error_message, sizeof(response->error_message),
                  "invalid %s response", peer_name);
@@ -556,12 +592,221 @@ static int call_rpc_peer(const char *peer_name,
     return 0;
 }
 
+static int authenticate_manager_fd(const char *endpoint,
+                                   int fd,
+                                   char session_id[CUBICLE_ID_STRING_LENGTH],
+                                   cube_rpc_response_t *response)
+{
+    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "local-session");
+    if (!endpoint_is_unix(endpoint)) {
+        return 0;
+    }
+
+    char key_dir[PATH_MAX];
+    char private_key_path[PATH_MAX];
+    cubicle_auth_identity_t identity;
+    if (cube_client_key_dir(key_dir) < 0 ||
+        cube_client_private_key_path(private_key_path, key_dir) < 0 ||
+        cubicle_auth_ensure_identity(key_dir, "client.key", "client.pub",
+                                     &identity) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to initialize client identity: %s",
+                 strerror(errno));
+        response->code = CUBICLE_ERR_IO;
+        return -1;
+    }
+
+    unsigned char client_nonce[CUBICLE_AUTH_NONCE_BYTES];
+    char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+    if (cubicle_auth_random_bytes(client_nonce, sizeof(client_nonce)) < 0 ||
+        cubicle_auth_hex_encode(client_nonce, sizeof(client_nonce),
+                                client_nonce_hex,
+                                sizeof(client_nonce_hex)) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to create auth nonce");
+        response->code = CUBICLE_ERR_INTERNAL;
+        return -1;
+    }
+
+    char params[512];
+    int length = snprintf(
+        params, sizeof(params),
+        "{\"client_public_key\":\"%s\",\"client_nonce\":\"%s\"}",
+        identity.public_key_hex, client_nonce_hex);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "auth challenge request is too large");
+        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
+        return -1;
+    }
+
+    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-1", "",
+                         "auth.challenge", params, response) < 0) {
+        if (response->code == CUBICLE_ERR_UNSUPPORTED) {
+            cleanup_rpc_response(response);
+            memset(response, 0, sizeof(*response));
+            snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "local-session");
+            return 0;
+        }
+        return -1;
+    }
+
+    cubicle_json_doc_t challenge_doc;
+    if (cubicle_json_parse(&challenge_doc, response->result_json) < 0) {
+        cleanup_rpc_response(response);
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "invalid auth challenge response");
+        response->code = CUBICLE_ERR_PROTOCOL;
+        return -1;
+    }
+
+    char manager_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
+    char manager_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+    char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+    cubicle_auth_transcript_t transcript;
+    memset(&transcript, 0, sizeof(transcript));
+    uint64_t value = 0;
+    int parse_failed =
+        json_string_field(challenge_doc.root, "manager_public_key",
+                          manager_public_key_hex,
+                          sizeof(manager_public_key_hex)) < 0 ||
+        json_string_field(challenge_doc.root, "manager_nonce",
+                          manager_nonce_hex,
+                          sizeof(manager_nonce_hex)) < 0 ||
+        json_string_field(challenge_doc.root, "connection_id",
+                          connection_id_hex,
+                          sizeof(connection_id_hex)) < 0 ||
+        cubicle_json_get_u64(challenge_doc.root, "protocol_major",
+                             &value) < 0;
+    if (!parse_failed) {
+        transcript.protocol_major = (uint32_t)value;
+        if (cubicle_json_get_u64(challenge_doc.root, "protocol_minor",
+                                 &value) == 0) {
+            transcript.protocol_minor = (uint32_t)value;
+        }
+        parse_failed =
+            cubicle_auth_hex_decode(manager_public_key_hex,
+                                    transcript.manager_public_key,
+                                    sizeof(transcript.manager_public_key)) < 0 ||
+            cubicle_auth_hex_decode(manager_nonce_hex,
+                                    transcript.manager_nonce,
+                                    sizeof(transcript.manager_nonce)) < 0 ||
+            cubicle_auth_hex_decode(connection_id_hex,
+                                    transcript.connection_id,
+                                    sizeof(transcript.connection_id)) < 0;
+    }
+    if (!parse_failed) {
+        memcpy(transcript.client_public_key, identity.public_key,
+               sizeof(transcript.client_public_key));
+        memcpy(transcript.client_nonce, client_nonce,
+               sizeof(transcript.client_nonce));
+        (void)cubicle_json_get_u64(challenge_doc.root, "capabilities",
+                                   &transcript.capabilities);
+        (void)cubicle_json_get_u64(challenge_doc.root, "manager_generation",
+                                   &transcript.manager_generation);
+        if (cubicle_json_get_u64(challenge_doc.root, "peer_uid",
+                                 &value) == 0) {
+            transcript.peer_uid = (uid_t)value;
+        }
+        if (cubicle_json_get_u64(challenge_doc.root, "peer_gid",
+                                 &value) == 0) {
+            transcript.peer_gid = (gid_t)value;
+        }
+    }
+    cubicle_json_cleanup(&challenge_doc);
+    cleanup_rpc_response(response);
+    if (parse_failed) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "invalid auth challenge response");
+        response->code = CUBICLE_ERR_PROTOCOL;
+        return -1;
+    }
+
+    unsigned char transcript_bytes[512];
+    size_t transcript_length = 0;
+    unsigned char signature[CUBICLE_AUTH_SIGNATURE_BYTES];
+    char signature_hex[CUBICLE_AUTH_SIGNATURE_BYTES * 2 + 1];
+    if (cubicle_auth_encode_transcript(&transcript, transcript_bytes,
+                                       sizeof(transcript_bytes),
+                                       &transcript_length) < 0 ||
+        cubicle_auth_sign_file_key(private_key_path, transcript_bytes,
+                                   transcript_length, signature) < 0 ||
+        cubicle_auth_hex_encode(signature, sizeof(signature), signature_hex,
+                                sizeof(signature_hex)) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to sign auth transcript");
+        response->code = CUBICLE_ERR_AUTHENTICATION_FAILED;
+        return -1;
+    }
+
+    length = snprintf(params, sizeof(params), "{\"signature\":\"%s\"}",
+                      signature_hex);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "auth signature request is too large");
+        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
+        return -1;
+    }
+    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-2", "",
+                         "auth.authenticate", params, response) < 0) {
+        return -1;
+    }
+
+    cubicle_json_doc_t session_doc;
+    if (cubicle_json_parse(&session_doc, response->result_json) < 0 ||
+        json_string_field(session_doc.root, "session_id", session_id,
+                          CUBICLE_ID_STRING_LENGTH) < 0) {
+        cubicle_json_cleanup(&session_doc);
+        cleanup_rpc_response(response);
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "invalid auth session response");
+        response->code = CUBICLE_ERR_PROTOCOL;
+        return -1;
+    }
+    cubicle_json_cleanup(&session_doc);
+    cleanup_rpc_response(response);
+    memset(response, 0, sizeof(*response));
+    return 0;
+}
+
+static int call_rpc_peer(const char *peer_name,
+                         const char *endpoint,
+                         const char *method,
+                         const char *params,
+                         int authenticate_manager,
+                         cube_rpc_response_t *response)
+{
+    memset(response, 0, sizeof(*response));
+
+    int fd = connect_rpc_endpoint(peer_name, endpoint, response);
+    if (fd < 0) {
+        return -1;
+    }
+
+    char session_id[CUBICLE_ID_STRING_LENGTH];
+    snprintf(session_id, sizeof(session_id), "local-session");
+    if (authenticate_manager &&
+        authenticate_manager_fd(endpoint, fd, session_id, response) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    int result = call_rpc_peer_fd(peer_name, endpoint, fd, "cube-1",
+                                  session_id, method, params, response);
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return result;
+}
+
 static int call_manager(const char *socket_path,
                         const char *method,
                         const char *params,
                         cube_rpc_response_t *response)
 {
-    return call_rpc_peer("manager", socket_path, method, params, response);
+    return call_rpc_peer("manager", socket_path, method, params, 1, response);
 }
 
 static int call_controller(const char *socket_path,
@@ -569,7 +814,8 @@ static int call_controller(const char *socket_path,
                            const char *params,
                            cube_rpc_response_t *response)
 {
-    return call_rpc_peer("controller", socket_path, method, params, response);
+    return call_rpc_peer("controller", socket_path, method, params, 0,
+                         response);
 }
 
 static void cleanup_rpc_response(cube_rpc_response_t *response)
@@ -2093,7 +2339,7 @@ static int attachment_loop(const char *controller_socket,
         raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
         raw.c_cc[VMIN] = 1;
         raw.c_cc[VTIME] = 0;
-        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) < 0) {
             fprintf(stderr, "cube: failed to set terminal raw mode: %s\n",
                     strerror(errno));
             return 2;
