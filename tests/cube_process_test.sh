@@ -145,6 +145,15 @@ if [ "$output" != "Process signal-me signaled" ]; then
 fi
 api process-wait "$signal_process_id" --timeout-ms 2000 | grep -q '"success":true'
 
+json_signal_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name json-signal-me sleep 30 | json_id)
+json_signal_output=$(cube --json signal json-signal-me TERM)
+if [ "$json_signal_output" != "{}" ]; then
+    echo "unexpected process signal JSON output: $json_signal_output" >&2
+    exit 1
+fi
+api process-wait "$json_signal_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
 stop_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name stop-me sleep 30 | json_id)
 output=$(cube stop stop-me)
@@ -153,6 +162,15 @@ if [ "$output" != "Process stop-me stopped" ]; then
     exit 1
 fi
 api process-wait "$stop_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
+json_stop_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name json-stop-me sleep 30 | json_id)
+json_stop_output=$(cube --json stop json-stop-me)
+if [ "$json_stop_output" != "{}" ]; then
+    echo "unexpected process stop JSON output: $json_stop_output" >&2
+    exit 1
+fi
+api process-wait "$json_stop_process_id" --timeout-ms 2000 | grep -q '"success":true'
 
 kill_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-me sleep 30 | json_id)
@@ -169,6 +187,14 @@ api process-wait "$remove_process_id" --timeout-ms 2000 | grep -q '"success":tru
 output=$(cube remove remove-me)
 if [ "$output" != "Process remove-me removed" ]; then
     echo "unexpected process remove output: $output" >&2
+    exit 1
+fi
+json_remove_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name json-remove-me /bin/true | json_id)
+api process-wait "$json_remove_process_id" --timeout-ms 2000 | grep -q '"success":true'
+json_remove_output=$(cube --json remove json-remove-me)
+if [ "$json_remove_output" != "{}" ]; then
+    echo "unexpected process remove JSON output: $json_remove_output" >&2
     exit 1
 fi
 set +e
