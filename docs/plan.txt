@@ -381,6 +381,10 @@
   - manager.cleanup removes terminal retained processes and skips live ones
   - cube cleanup exposes the endpoint for the selected workspace
   - libcubicle exposes cubicle_manager_cleanup with removed/skipped/failed counts
+- Added Ubuntu runtime packaging:
+  - CMake install rules include cube, cubicle-manager, and cubicle-controller
+  - CPack can build a Debian package with cmake --build build --target package
+  - .cubicle/ repo-local runtime state is ignored
 
 ## Next
 

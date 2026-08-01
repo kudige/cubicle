@@ -43,6 +43,28 @@ The test suite includes focused C unit tests for shared process helpers, common
 utility helpers, and manager registry parsing, plus shell integration tests for
 controller and manager workflows.
 
+## Ubuntu package
+
+The top-level CMake build can create a Debian package containing the runtime
+binaries:
+
+```console
+cmake -S . -B build
+cmake --build build --target package
+sudo apt install ./build/cubicle_0.1.0_*.deb
+```
+
+The package installs:
+
+```text
+/usr/bin/cube
+/usr/bin/cubicle-manager
+/usr/bin/cubicle-controller
+```
+
+After installing a new package, restart any running `cubicle-manager` daemon so
+the installed `cube` and manager support the same API surface.
+
 ## Coverage
 
 Coverage is opt-in and uses GCC/Clang gcov data plus lcov:

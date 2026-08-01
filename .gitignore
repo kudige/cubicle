@@ -3,6 +3,7 @@ build-*/
 build-coverage/
 build-libcubicle/
 cmake-build-*/
+.cubicle/
 *.o
 *.a
 *.so

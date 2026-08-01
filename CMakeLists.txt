@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(cubicle VERSION 0.1.0 LANGUAGES C)
 
+include(GNUInstallDirs)
+
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -88,6 +90,13 @@ target_compile_options(cube PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+)
+
+install(TARGETS
+    cube
+    cubicle-manager
+    cubicle-controller
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 enable_testing()
@@ -189,6 +198,23 @@ if(CUBICLE_ENABLE_FUZZERS)
         target_compile_definitions(fuzz-rpc-envelope PRIVATE CUBICLE_FUZZ_STANDALONE=1)
     endif()
 endif()
+
+set(CPACK_PACKAGE_NAME "cubicle")
+set(CPACK_PACKAGE_VENDOR "Cubicle")
+set(CPACK_PACKAGE_CONTACT "kudige")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Persistent local development runtime")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/kudige/cubicle")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_FILE_NAME
+    "${CPACK_PACKAGE_NAME}_${PROJECT_VERSION}_${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_GENERATOR "DEB")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "kudige")
+set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+include(CPack)
 
 add_test(
     NAME cubicle-cli-help-test
