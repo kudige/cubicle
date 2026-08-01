@@ -142,6 +142,36 @@ static void test_error(void)
     expect_int(error.retryable, 1, "error retryable");
     expect_int(error.system_errno, 110, "error errno");
     expect_string(error.message, "too slow", "error message");
+
+    expect_int(cubicle_rpc_response_error(
+                   "{\"request_id\":\"req-2\",\"success\":true,"
+                   "\"result\":{}}",
+                   &error),
+               -1, "success is not error");
+    expect_int(cubicle_rpc_response_error(
+                   "{\"request_id\":\"req-2\",\"success\":false,"
+                   "\"result\":{},\"error\":{\"code\":\"timeout\","
+                   "\"message\":\"too slow\",\"retryable\":true,"
+                   "\"system_errno\":110}}",
+                   &error),
+               -1, "error response rejects result");
+    expect_int(cubicle_rpc_response_error(
+                   "{\"request_id\":\"req-2\",\"success\":false,"
+                   "\"error\":null}",
+                   &error),
+               -1, "error response rejects null error");
+    expect_int(cubicle_rpc_response_error(
+                   "{\"request_id\":\"req-2\",\"success\":false,"
+                   "\"error\":{\"code\":\"timeout\",\"message\":\"too slow\","
+                   "\"retryable\":\"yes\",\"system_errno\":110}}",
+                   &error),
+               -1, "error response rejects invalid retryable");
+    expect_int(cubicle_rpc_response_error(
+                   "{\"request_id\":\"req-2\",\"success\":false,"
+                   "\"error\":{\"code\":\"timeout\",\"message\":\"too slow\","
+                   "\"retryable\":true,\"system_errno\":2147483648}}",
+                   &error),
+               -1, "error response rejects errno overflow");
 }
 
 static void test_invalid(void)

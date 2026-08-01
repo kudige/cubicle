@@ -36,4 +36,7 @@ int cubicle_rpc_decode_response(cubicle_rpc_response_envelope_t *envelope,
 void cubicle_rpc_response_envelope_cleanup(
     cubicle_rpc_response_envelope_t *envelope);
 
+int cubicle_rpc_decode_error_value(yyjson_val *error_value,
+                                   cubicle_error_t *error);
+
 #endif

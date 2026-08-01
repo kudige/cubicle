@@ -4,6 +4,7 @@
 #include "rpc_internal.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -622,10 +623,28 @@ int cubicle_rpc_get_object(const char *json, const char *field,
 
 int cubicle_rpc_response_ok(const char *json, int *ok_out)
 {
-    return cubicle_rpc_get_bool(json, "success", ok_out);
+    if (ok_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0 || !yyjson_is_obj(parsed.root)) {
+        cubicle_json_cleanup(&parsed);
+        errno = EINVAL;
+        return -1;
+    }
+
+    bool success = false;
+    int result = cubicle_json_get_bool(parsed.root, "success", &success);
+    cubicle_json_cleanup(&parsed);
+    if (result == 0) {
+        *ok_out = success ? 1 : 0;
+    }
+    return result;
 }
 
-static cubicle_error_code_t error_code_from_name(const char *name)
+static cubicle_error_code_t rpc_error_code_from_name(const char *name)
 {
     for (int code = CUBICLE_OK; code <= CUBICLE_ERR_INTERNAL; ++code) {
         if (strcmp(cubicle_error_code_name((cubicle_error_code_t)code),
@@ -636,6 +655,34 @@ static cubicle_error_code_t error_code_from_name(const char *name)
     return CUBICLE_ERR_PROTOCOL;
 }
 
+int cubicle_rpc_decode_error_value(yyjson_val *error_value,
+                                   cubicle_error_t *error)
+{
+    if (error == NULL || !yyjson_is_obj(error_value)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char code_name[64];
+    bool retryable = false;
+    int64_t system_errno = 0;
+    if (cubicle_json_get_string(error_value, "code", code_name,
+                                sizeof(code_name)) < 0 ||
+        cubicle_json_get_string(error_value, "message", error->message,
+                                sizeof(error->message)) < 0 ||
+        cubicle_json_get_bool(error_value, "retryable", &retryable) < 0 ||
+        cubicle_json_get_i64(error_value, "system_errno",
+                             &system_errno) < 0 ||
+        system_errno < INT_MIN || system_errno > INT_MAX) {
+        return -1;
+    }
+
+    error->code = rpc_error_code_from_name(code_name);
+    error->retryable = retryable;
+    error->system_errno = (int)system_errno;
+    return 0;
+}
+
 int cubicle_rpc_response_error(const char *json, cubicle_error_t *error)
 {
     if (error == NULL) {
@@ -643,24 +690,33 @@ int cubicle_rpc_response_error(const char *json, cubicle_error_t *error)
         return -1;
     }
 
-    char error_object[1024];
-    char code_name[64];
-    uint64_t system_errno = 0;
-    int retryable = 0;
-    if (cubicle_rpc_get_object(json, "error", error_object,
-                               sizeof(error_object)) < 0 ||
-        cubicle_rpc_get_string(error_object, "code", code_name,
-                               sizeof(code_name)) < 0 ||
-        cubicle_rpc_get_string(error_object, "message", error->message,
-                               sizeof(error->message)) < 0 ||
-        cubicle_rpc_get_bool(error_object, "retryable", &retryable) < 0 ||
-        cubicle_rpc_get_uint64(error_object, "system_errno",
-                               &system_errno) < 0) {
+    cubicle_json_doc_t parsed;
+    if (cubicle_json_parse(&parsed, json) < 0 || !yyjson_is_obj(parsed.root)) {
+        cubicle_json_cleanup(&parsed);
+        errno = EINVAL;
         return -1;
     }
 
-    error->code = error_code_from_name(code_name);
-    error->retryable = retryable != 0;
-    error->system_errno = (int)system_errno;
-    return 0;
+    static const char *const allowed[] = {
+        "request_id", "success", "result", "error", "extensions",
+    };
+    char request_id[64];
+    bool success = false;
+    yyjson_val *result_value = cubicle_json_object_get(parsed.root, "result");
+    yyjson_val *error_value = cubicle_json_get_object(parsed.root, "error");
+    int decode_result = -1;
+    if (validate_top_level_fields(parsed.root, allowed,
+                                  sizeof(allowed) / sizeof(allowed[0])) == 0 &&
+        cubicle_json_get_string(parsed.root, "request_id", request_id,
+                                sizeof(request_id)) == 0 &&
+        cubicle_json_get_bool(parsed.root, "success", &success) == 0 &&
+        !success && result_value == NULL && error_value != NULL) {
+        decode_result = cubicle_rpc_decode_error_value(error_value, error);
+    }
+
+    cubicle_json_cleanup(&parsed);
+    if (decode_result < 0) {
+        errno = EINVAL;
+    }
+    return decode_result;
 }

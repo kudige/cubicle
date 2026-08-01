@@ -131,23 +131,18 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     }
 
     if (!envelope.success) {
-        char code_name[64] = "protocol";
-        char message[CUBICLE_ERROR_MESSAGE_MAX] = "";
-        bool retryable = false;
-        int64_t system_errno = 0;
-        (void)cubicle_json_get_string(envelope.error, "code", code_name,
-                                      sizeof(code_name));
-        (void)cubicle_json_get_string(envelope.error, "message", message,
-                                      sizeof(message));
-        (void)cubicle_json_get_bool(envelope.error, "retryable", &retryable);
-        (void)cubicle_json_get_i64(envelope.error, "system_errno",
-                                   &system_errno);
-        cubicle_error_code_t code = error_code_from_name(code_name);
-        set_error(&client->last_error, code, (int)system_errno, retryable,
-                  message);
+        cubicle_error_t decoded_error;
+        if (cubicle_rpc_decode_error_value(envelope.error,
+                                           &decoded_error) < 0) {
+            cubicle_rpc_response_envelope_cleanup(&envelope);
+            free(response);
+            return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                    "malformed response error");
+        }
+        client->last_error = decoded_error;
         cubicle_rpc_response_envelope_cleanup(&envelope);
         free(response);
-        return code;
+        return decoded_error.code;
     }
 
     cubicle_rpc_response_envelope_cleanup(&envelope);
