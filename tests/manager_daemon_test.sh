@@ -2,12 +2,17 @@ set -eu
 
 tmpdir=$(mktemp -d)
 manager_pid=
+running_controller_pid=
 
 cleanup() {
     if [ -n "${manager_pid:-}" ]; then
         python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown \
             >/dev/null 2>&1 || true
         wait "$manager_pid" 2>/dev/null || true
+    fi
+    if [ -n "${running_controller_pid:-}" ]; then
+        kill "$running_controller_pid" 2>/dev/null || true
+        wait "$running_controller_pid" 2>/dev/null || true
     fi
     rm -rf "$tmpdir"
 }
@@ -31,6 +36,26 @@ register_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
 process_id=${register_output#process id=}
 process_id=${process_id%% workspace_id=*}
 
+lost_register_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+    --workspace "$workspace_id" \
+    --friendly-name daemon-lost \
+    --mode stream \
+    --controller-id controller-lost \
+    --control-socket "$tmpdir/lost-controller.sock")
+
+lost_process_id=${lost_register_output#process id=}
+lost_process_id=${lost_process_id%% workspace_id=*}
+
+running_register_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
+    --workspace "$workspace_id" \
+    --friendly-name daemon-running \
+    --mode stream \
+    --controller-id controller-running \
+    --control-socket "$tmpdir/running-controller.sock")
+
+running_process_id=${running_register_output#process id=}
+running_process_id=${running_process_id%% workspace_id=*}
+
 mkdir -p "$state_dir/controllers/$process_id"
 printf "hello\n" >"$state_dir/controllers/$process_id/stdout.log"
 printf "error\n" >"$state_dir/controllers/$process_id/stderr.log"
@@ -39,6 +64,26 @@ seq=1 type=process_started controller_id=controller-1 pid=1 pgid=1 mode=stream
 seq=2 type=output stream=stdout start=0 length=6
 seq=3 type=process_exited status=exited exit_code=0
 EOF
+
+"$CUBICLE_CONTROLLER" \
+    --state-dir "$state_dir/controllers/$running_process_id" \
+    --control-socket "$tmpdir/running-controller.sock" \
+    --mode stream \
+    --stdin-policy open \
+    -- sleep 30 &
+running_controller_pid=$!
+
+for _ in $(seq 1 100); do
+    if [ -S "$tmpdir/running-controller.sock" ]; then
+        break
+    fi
+    sleep 0.05
+done
+
+if [ ! -S "$tmpdir/running-controller.sock" ]; then
+    echo "running controller did not create control socket" >&2
+    exit 1
+fi
 
 python3 - "$socket_path" <<'PY'
 import socket
@@ -63,6 +108,19 @@ if [ ! -S "$socket_path" ]; then
     echo "manager daemon did not create control socket" >&2
     exit 1
 fi
+
+for _ in $(seq 1 100); do
+    if grep -q "^$process_id	$workspace_id	daemon-1	stream	completed	" "$state_dir/processes.tsv" &&
+        grep -q "^$lost_process_id	$workspace_id	daemon-lost	stream	lost	" "$state_dir/processes.tsv" &&
+        grep -q "^$running_process_id	$workspace_id	daemon-running	stream	running	" "$state_dir/processes.tsv"; then
+        break
+    fi
+    sleep 0.05
+done
+
+grep -q "^$process_id	$workspace_id	daemon-1	stream	completed	" "$state_dir/processes.tsv"
+grep -q "^$lost_process_id	$workspace_id	daemon-lost	stream	lost	" "$state_dir/processes.tsv"
+grep -q "^$running_process_id	$workspace_id	daemon-running	stream	running	" "$state_dir/processes.tsv"
 
 send_manager_rpc() {
     python3 "$CUBICLE_API_CLIENT" "$socket_path" call "$@"
@@ -95,7 +153,11 @@ status_response=$(send_manager_command status)
 printf "%s" "$status_response" | grep -q '"success": true'
 printf "%s" "$status_response" | grep -q "\"manager_id\": \"$manager_id\""
 printf "%s" "$status_response" | grep -q '"workspace_count": 1'
-printf "%s" "$status_response" | grep -q '"process_count": 1'
+printf "%s" "$status_response" | grep -q '"process_count": 3'
+
+# Endpoint test for manager.reconcile
+reconcile_response=$(send_manager_rpc manager.reconcile)
+printf "%s" "$reconcile_response" | grep -q '"success": true'
 
 # Endpoint test for workspace.create
 workspace_create_response=$(send_manager_rpc workspace.create '{"name":"Project B"}')
@@ -139,8 +201,12 @@ printf "%s" "$process_name_response" | grep -q "\"id\": \"$process_id\""
 
 # Endpoint test for process.list
 process_list_response=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
-printf "%s" "$process_list_response" | grep -q '"count": 1'
+printf "%s" "$process_list_response" | grep -q '"count": 3'
 printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-1"'
+printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-lost"'
+printf "%s" "$process_list_response" | grep -q '"state": "lost"'
+printf "%s" "$process_list_response" | grep -q '"friendly_name": "daemon-running"'
+printf "%s" "$process_list_response" | grep -q '"state": "running"'
 
 # Endpoint test for process.read_output
 read_output_response=$(send_manager_rpc process.read_output "{\"process_id\":\"$process_id\",\"stream\":\"stdout\",\"offset\":0,\"maximum_length\":16}")
@@ -174,10 +240,11 @@ printf "%s" "$events_list_response" | grep -q '"type": "process_exited"'
 # Endpoint test for manager.cleanup
 cleanup_response=$(send_manager_rpc manager.cleanup "{\"workspace_id\":\"$workspace_id\"}")
 printf "%s" "$cleanup_response" | grep -q '"success": true'
-printf "%s" "$cleanup_response" | grep -q '"removed_count": 1'
-printf "%s" "$cleanup_response" | grep -q '"skipped_live_count": 0'
+printf "%s" "$cleanup_response" | grep -q '"removed_count": 2'
+printf "%s" "$cleanup_response" | grep -q '"skipped_live_count": 1'
 process_list_after_cleanup=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
-printf "%s" "$process_list_after_cleanup" | grep -q '"count": 0'
+printf "%s" "$process_list_after_cleanup" | grep -q '"count": 1'
+printf "%s" "$process_list_after_cleanup" | grep -q '"friendly_name": "daemon-running"'
 
 # Endpoint test for unsupported endpoint error response
 unknown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \

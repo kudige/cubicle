@@ -1519,16 +1519,33 @@ static int process_event_log_has_exit(const manager_state_t *state,
     return 0;
 }
 
+static int process_observed_state(const manager_state_t *state,
+                                  const cubicle_process_record_t *process,
+                                  char *state_out,
+                                  size_t state_out_size)
+{
+    snprintf(state_out, state_out_size, "%s", process->state);
+    if (process_is_terminal_state(state_out)) {
+        return 0;
+    }
+    if (controller_status_state(process, state_out, state_out_size) == 0) {
+        return 0;
+    }
+    if (process_event_log_has_exit(state, process->process_id)) {
+        snprintf(state_out, state_out_size, "completed");
+    } else {
+        snprintf(state_out, state_out_size, "lost");
+    }
+    return 0;
+}
+
 static int process_observed_terminal_state(const manager_state_t *state,
                                            const cubicle_process_record_t *process,
                                            char *state_out,
                                            size_t state_out_size)
 {
-    snprintf(state_out, state_out_size, "%s", process->state);
-    if (!process_is_terminal_state(state_out) &&
-        controller_status_state(process, state_out, state_out_size) < 0 &&
-        process_event_log_has_exit(state, process->process_id)) {
-        snprintf(state_out, state_out_size, "completed");
+    if (process_observed_state(state, process, state_out, state_out_size) < 0) {
+        return 0;
     }
     return process_is_terminal_state(state_out);
 }
@@ -1537,10 +1554,82 @@ static void refresh_observed_process_state(const manager_state_t *state,
                                            cubicle_process_record_t *process)
 {
     char latest_state[32];
-    if (process_observed_terminal_state(state, process, latest_state,
-                                        sizeof(latest_state))) {
+    if (process_observed_state(state, process, latest_state,
+                               sizeof(latest_state)) == 0) {
         snprintf(process->state, sizeof(process->state), "%s", latest_state);
     }
+}
+
+typedef struct {
+    char process_id[128];
+    char state[32];
+} process_state_update_t;
+
+static int reconcile_process_records(const manager_state_t *state)
+{
+    int lock_fd = lock_state(state);
+    if (lock_fd < 0) {
+        return -1;
+    }
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    process_state_update_t *updates = NULL;
+    size_t update_count = 0;
+    size_t update_capacity = 0;
+    int result = 0;
+
+    if (file != NULL) {
+        char line[PATH_MAX + 512];
+        while (fgets(line, sizeof(line), file) != NULL) {
+            cubicle_process_record_t process;
+            char latest_state[32];
+            if (cubicle_parse_process_record(line, &process) != 0 ||
+                process_is_terminal_state(process.state) ||
+                process_observed_state(state, &process, latest_state,
+                                       sizeof(latest_state)) < 0 ||
+                strcmp(latest_state, process.state) == 0 ||
+                !process_is_terminal_state(latest_state)) {
+                continue;
+            }
+
+            if (update_count == update_capacity) {
+                size_t new_capacity = update_capacity == 0
+                                          ? 8
+                                          : update_capacity * 2;
+                process_state_update_t *new_updates =
+                    realloc(updates, new_capacity * sizeof(*updates));
+                if (new_updates == NULL) {
+                    result = -1;
+                    break;
+                }
+                updates = new_updates;
+                update_capacity = new_capacity;
+            }
+            snprintf(updates[update_count].process_id,
+                     sizeof(updates[update_count].process_id), "%s",
+                     process.process_id);
+            snprintf(updates[update_count].state,
+                     sizeof(updates[update_count].state), "%s",
+                     latest_state);
+            ++update_count;
+        }
+        if (fclose(file) != 0 && result == 0) {
+            result = -1;
+        }
+    }
+
+    for (size_t i = 0; result == 0 && i < update_count; ++i) {
+        int found = 0;
+        if (rewrite_process_records(state, updates[i].process_id,
+                                    updates[i].state, 0, &found) < 0) {
+            result = -1;
+            break;
+        }
+    }
+
+    free(updates);
+    unlock_state(lock_fd);
+    return result;
 }
 
 static int wait_for_controller_ready(const char *control_socket,
@@ -2362,6 +2451,16 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
+    if (strcmp(method, "manager.reconcile") == 0) {
+        if (reconcile_process_records(state) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to reconcile processes",
+                                             true, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
     if (strcmp(method, "workspace.create") == 0) {
         char name[128];
         cubicle_validation_error_t validation_error;
@@ -3116,14 +3215,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         char latest_state[32];
         snprintf(latest_state, sizeof(latest_state), "%s", process.state);
         while (!process_is_terminal_state(latest_state)) {
-            if (controller_status_state(&process, latest_state,
-                                        sizeof(latest_state)) < 0) {
-                if (process_event_log_has_exit(state, process.process_id)) {
-                    snprintf(latest_state, sizeof(latest_state), "completed");
-                }
-                break;
-            }
-            if (process_is_terminal_state(latest_state)) {
+            if (process_observed_state(state, &process, latest_state,
+                                       sizeof(latest_state)) < 0 ||
+                process_is_terminal_state(latest_state)) {
                 break;
             }
             if (waited_ms >= timeout_ms) {
@@ -3191,13 +3285,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         char latest_state[32];
-        snprintf(latest_state, sizeof(latest_state), "%s", process.state);
-        if (!process_is_terminal_state(latest_state) &&
-            controller_status_state(&process, latest_state,
-                                    sizeof(latest_state)) < 0 &&
-            process_event_log_has_exit(state, process.process_id)) {
-            snprintf(latest_state, sizeof(latest_state), "completed");
-        }
+        (void)process_observed_state(state, &process, latest_state,
+                                     sizeof(latest_state));
         if (!process_is_terminal_state(process.state) &&
             process_is_terminal_state(latest_state)) {
             int found = 0;
@@ -4128,6 +4217,14 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     if (set_fd_nonblocking(listen_fd) < 0) {
+        manager_log_error(errno);
+        close(listen_fd);
+        unlink(socket_path);
+        unlock_state(daemon_lock_fd);
+        return 1;
+    }
+
+    if (reconcile_process_records(state) < 0) {
         manager_log_error(errno);
         close(listen_fd);
         unlink(socket_path);

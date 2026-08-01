@@ -56,7 +56,7 @@ cube() {
 ps_output=$(cube --workspace "Project A" ps)
 printf "%s\n" "$ps_output" | grep -q '^Workspace Project A$'
 printf "%s\n" "$ps_output" | grep -q '^NAME	MODE	STATE$'
-printf "%s\n" "$ps_output" | grep -q '^build	stream	running$'
+printf "%s\n" "$ps_output" | grep -q '^build	stream	lost$'
 
 json_ps_output=$(cube --workspace "Project A" --json ps)
 printf "%s" "$json_ps_output" | grep -q '"processes"'
@@ -67,7 +67,7 @@ inspect_output=$(cube --workspace "Project A" inspect build)
 printf "%s\n" "$inspect_output" | grep -q '^Name:        build$'
 printf "%s\n" "$inspect_output" | grep -q '^Workspace:   Project A$'
 printf "%s\n" "$inspect_output" | grep -q '^Mode:        stream$'
-printf "%s\n" "$inspect_output" | grep -q '^State:       running$'
+printf "%s\n" "$inspect_output" | grep -q '^State:       lost$'
 printf "%s\n" "$inspect_output" | grep -q '^Process ID:  process-1$'
 
 json_inspect_output=$(cube --workspace "Project A" --json inspect build)
@@ -76,7 +76,7 @@ printf "%s" "$json_inspect_output" | grep -q '"friendly_name":"build"'
 
 cube workspace select "Project A" >/dev/null
 selected_ps_output=$(cube ps)
-printf "%s\n" "$selected_ps_output" | grep -q '^build	stream	running$'
+printf "%s\n" "$selected_ps_output" | grep -q '^build	stream	lost$'
 
 api() {
     python3 "$CUBICLE_API_CLIENT" --raw "$socket_path" "$@"

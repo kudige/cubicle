@@ -405,6 +405,9 @@ int main(void)
     assert(cubicle_process_terminate(client, started.id, NULL) ==
            CUBICLE_OK);
 
+    // Endpoint test for manager.reconcile
+    assert(cubicle_manager_reconcile(client) == CUBICLE_OK);
+
     cubicle_process_info_t process;
     memset(&process, 0, sizeof(process));
     // Endpoint test for process.get by process ID

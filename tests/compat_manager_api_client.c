@@ -531,7 +531,9 @@ cubicle_error_code_t cubicle_manager_reconcile(cubicle_client_t *client)
     if (client == NULL) {
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
-    return rpc_not_implemented(client, "manager.reconcile");
+    char result[1024];
+    return client_request(client, "manager.reconcile", "{}", result,
+                          sizeof(result));
 }
 
 cubicle_error_code_t cubicle_manager_cleanup(

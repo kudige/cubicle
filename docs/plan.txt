@@ -385,6 +385,12 @@
   - CMake install rules include cube, cubicle-manager, and cubicle-controller
   - CPack can build a Debian package with cmake --build build --target package
   - .cubicle/ repo-local runtime state is ignored
+- Hardened manager restart reconciliation:
+  - daemon startup checks registered non-terminal controllers for responsiveness
+  - unreachable controllers with recorded exit events are persisted as completed
+  - unreachable controllers without exit evidence are persisted as lost
+  - responsive controllers remain live
+  - manager.reconcile exposes the same persistence pass through the API
 
 ## Next
 
