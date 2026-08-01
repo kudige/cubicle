@@ -243,7 +243,8 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read manager response");
+                 "failed to read manager response from %s: %s",
+                 socket_path, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }
@@ -268,7 +269,8 @@ static int call_manager(const char *socket_path,
         close(fd);
         errno = saved_errno;
         snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read manager response");
+                 "failed to read manager response from %s: %s",
+                 socket_path, strerror(saved_errno));
         response->code = CUBICLE_ERR_IO;
         return -1;
     }

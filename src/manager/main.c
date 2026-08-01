@@ -55,6 +55,35 @@ typedef struct workspace_key_record {
     (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
      CUBICLE_PROTOCOL_CAP_PROCESS_TTY | CUBICLE_PROTOCOL_CAP_ATTACHMENT_DIRECT)
 
+static char manager_error_detail[PATH_MAX + 128];
+
+static void clear_manager_error_detail(void)
+{
+    manager_error_detail[0] = '\0';
+}
+
+static int set_manager_path_error(const char *operation,
+                                  const char *path,
+                                  int error_number)
+{
+    snprintf(manager_error_detail, sizeof(manager_error_detail),
+             "%s %s: %s", operation, path, strerror(error_number));
+    errno = error_number;
+    return -1;
+}
+
+static const char *manager_error_message(int error_number)
+{
+    return manager_error_detail[0] == '\0' ? strerror(error_number)
+                                           : manager_error_detail;
+}
+
+static void manager_log_error(int error_number)
+{
+    cubicle_log(CUBICLE_LOG_ERROR, "manager",
+                manager_error_message(error_number));
+}
+
 static void print_usage(const char *program)
 {
     fprintf(stderr,
@@ -130,6 +159,7 @@ static int controller_socket_path(char path[PATH_MAX],
 static int append_line(const manager_state_t *state, const char *file_name,
                        const char *line)
 {
+    clear_manager_error_detail();
     char path[PATH_MAX];
     if (state_path(path, state, file_name) < 0) {
         return -1;
@@ -137,13 +167,20 @@ static int append_line(const manager_state_t *state, const char *file_name,
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0) {
-        return -1;
+        return set_manager_path_error("open", path, errno);
     }
 
     size_t length = strlen(line);
     int result = cubicle_write_all(fd, line, length);
-    close(fd);
-    return result;
+    if (result < 0) {
+        int saved_errno = errno;
+        close(fd);
+        return set_manager_path_error("write", path, saved_errno);
+    }
+    if (close(fd) < 0) {
+        return set_manager_path_error("close", path, errno);
+    }
+    return 0;
 }
 
 static int set_fd_nonblocking(int fd)
@@ -1280,6 +1317,7 @@ static int save_cursors(const manager_state_t *state,
                         cubicle_cursor_record_t *cursors,
                         size_t cursor_count)
 {
+    clear_manager_error_detail();
     char path[PATH_MAX];
     char temp_path[PATH_MAX];
     if (state_path(path, state, "cursors.tsv") < 0) {
@@ -1294,19 +1332,26 @@ static int save_cursors(const manager_state_t *state,
 
     FILE *file = fopen(temp_path, "w");
     if (file == NULL) {
-        return -1;
+        return set_manager_path_error("open", temp_path, errno);
     }
 
     for (size_t i = 0; i < cursor_count; ++i) {
-        fprintf(file, "%s\t%lld\n", cursors[i].process_id,
-                cursors[i].sequence);
+        if (fprintf(file, "%s\t%lld\n", cursors[i].process_id,
+                    cursors[i].sequence) < 0) {
+            int saved_errno = errno;
+            fclose(file);
+            return set_manager_path_error("write", temp_path, saved_errno);
+        }
     }
 
     if (fclose(file) != 0) {
-        return -1;
+        return set_manager_path_error("close", temp_path, errno);
     }
 
-    return rename(temp_path, path);
+    if (rename(temp_path, path) < 0) {
+        return set_manager_path_error("rename", temp_path, errno);
+    }
+    return 0;
 }
 
 static int command_process_register(const manager_state_t *state, int argc,
@@ -1954,10 +1999,12 @@ static int poll_workspace_events(const manager_state_t *state,
                                   process.friendly_name, event_line);
             if (length < 0 || (size_t)length >= sizeof(workspace_event) ||
                 append_line(state, "workspace-events.log", workspace_event) < 0) {
+                int saved_errno = errno;
                 fclose(events);
                 fclose(processes);
-                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                manager_log_error(saved_errno);
                 unlock_state(lock_fd);
+                errno = saved_errno;
                 return 1;
             }
 
@@ -1974,9 +2021,11 @@ static int poll_workspace_events(const manager_state_t *state,
         if (max_sequence > cursor &&
             update_cursor(cursors, &cursor_count, process.process_id,
                           max_sequence) < 0) {
+            int saved_errno = errno;
             fclose(processes);
-            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            manager_log_error(saved_errno);
             unlock_state(lock_fd);
+            errno = saved_errno;
             return 1;
         }
     }
@@ -1984,8 +2033,10 @@ static int poll_workspace_events(const manager_state_t *state,
     fclose(processes);
 
     if (save_cursors(state, cursors, cursor_count) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        int saved_errno = errno;
+        manager_log_error(saved_errno);
         unlock_state(lock_fd);
+        errno = saved_errno;
         return 1;
     }
 
@@ -3895,26 +3946,26 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
 
     int daemon_lock_fd = lock_daemon(state);
     if (daemon_lock_fd < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        manager_log_error(errno);
         return 1;
     }
 
     char socket_path[PATH_MAX];
     if (manager_socket_path(socket_path, state, requested_socket) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        manager_log_error(errno);
         unlock_state(daemon_lock_fd);
         return 1;
     }
 
     int listen_fd = open_manager_socket(socket_path);
     if (listen_fd < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        manager_log_error(errno);
         unlock_state(daemon_lock_fd);
         return 1;
     }
 
     if (set_fd_nonblocking(listen_fd) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        manager_log_error(errno);
         close(listen_fd);
         unlink(socket_path);
         unlock_state(daemon_lock_fd);
@@ -3926,9 +3977,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     uint64_t started_at_ms = manager_time_ms();
     while (!shutdown_requested) {
         if (poll_workspace_events(state, NULL, NULL) != 0) {
-            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
-            result = 1;
-            break;
+            manager_log_error(errno);
         }
 
         struct pollfd daemon_fd = {.fd = listen_fd, .events = POLLIN};
@@ -3937,7 +3986,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             if (errno == EINTR) {
                 continue;
             }
-            cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+            manager_log_error(errno);
             result = 1;
             break;
         }
@@ -3955,7 +4004,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 if (errno == EINTR) {
                     continue;
                 }
-                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                manager_log_error(errno);
                 result = 1;
                 break;
             }
@@ -3963,7 +4012,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             if (handle_manager_connection(state, client_fd,
                                           &shutdown_requested,
                                           started_at_ms) < 0) {
-                cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+                manager_log_error(errno);
                 result = 1;
             }
             close(client_fd);

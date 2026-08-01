@@ -252,6 +252,14 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-manager-event-aggregation-error-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_event_aggregation_error_test.sh
+)
+
+add_test(
     NAME cubicle-libcubicle-real-manager-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>

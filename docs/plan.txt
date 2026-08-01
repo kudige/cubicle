@@ -346,6 +346,10 @@
   - generated friendly-name collisions retry with numeric suffixes like name-1
   - foreground TTY launch fails fast until attachment is implemented
   - regression coverage ensures a foreground TTY launch attempt does not wedge later cube commands
+- Hardened manager storage diagnostics:
+  - state-file write failures include the operation and path in manager logs
+  - event aggregation write failures no longer tear down the daemon
+  - cube transport read failures include the manager socket path and errno text
 
 ## Next
 
