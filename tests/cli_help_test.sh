@@ -1,5 +1,12 @@
 set -eu
 
+rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
+rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"
+rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
+rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
+rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
+rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"
+
 "$CUBICLE_CONTROLLER" --help >"$PWD/controller-help.out" 2>"$PWD/controller-help.err"
 if [ -s "$PWD/controller-help.out" ]; then
     echo "controller help should write to stderr only" >&2
@@ -43,14 +50,14 @@ grep -q 'manager socket is not configured' "$PWD/cube-missing-manager.err"
 grep -q 'CUBICLE_MANAGER_SOCKET' "$PWD/cube-missing-manager.err"
 
 set +e
-"$CUBE" --manager-socket /tmp/cubicle-test.sock ps >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
+"$CUBE" --manager-socket /tmp/cubicle-test.sock connect build >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
 status=$?
 set -e
 if [ "$status" -ne 2 ]; then
     echo "cube unimplemented command should exit 2, got $status" >&2
     exit 1
 fi
-grep -q "command 'ps' is not implemented yet" "$PWD/cube-unimplemented.err"
+grep -q "command 'connect' is not implemented yet" "$PWD/cube-unimplemented.err"
 
 set +e
 "$CUBE" wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"

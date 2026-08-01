@@ -320,14 +320,20 @@
   - cube workspace stop NAME
   - cube workspace delete NAME
   - selected workspace persistence under XDG state or user-local state fallback
+- Added initial cube process inspection commands over the manager API:
+  - cube ps
+  - cube inspect NAME
+  - selected workspace and --workspace resolution
+  - human-readable and --json output
+  - daemon-backed E2E coverage for process.list and process.get
 
 ## Next
 
 1. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
-   - Implement process launch, ps, inspect, signal, stop, kill, and remove.
+   - Implement process launch, signal, stop, kill, and remove.
    - Add foreground attach/wait behavior through manager-issued attachment grants.
-   - Add JSON output contracts for workspace list, ps, and inspect.
+   - Add JSON output contracts for workspace list and lifecycle commands.
    - Add logs and events commands through manager APIs.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.
