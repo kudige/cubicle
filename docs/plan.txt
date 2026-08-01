@@ -368,6 +368,9 @@
   - controller.attach validates channels/mode, normalizes accepted channels, and records attachment events
   - controller.read supports tty as the retained PTY byte stream
   - manager/controller RPC success envelopes handle larger retained event/output responses
+- Fixed stream connect terminal rendering:
+  - stream-mode cube connect no longer puts the local terminal in raw mode
+  - pseudo-terminal regression coverage ensures newline output returns to column zero
 
 ## Next
 

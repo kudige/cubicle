@@ -109,6 +109,24 @@ grep -Fq 'Connected to [connect-ro]. Detach with Ctrl-\ d' "$tmpdir/connect-ro.e
 api process-wait "$readonly_process_id" --timeout-ms 2000 | grep -q '"success":true'
 cube remove connect-ro >/dev/null
 
+if command -v script >/dev/null 2>&1; then
+    terminal_lines_process_id=$(api process-start --workspace "$workspace_id" \
+        --friendly-name connect-terminal-lines -- sh -c \
+        'printf "terminal-line-1\n"; sleep 0.1; printf "terminal-line-2\n"; sleep 0.2' |
+        json_id)
+    script -qfec "env XDG_STATE_HOME=$xdg_state_home CUBICLE_MANAGER_SOCKET=$socket_path $CUBE connect --ro connect-terminal-lines" \
+        /dev/null >"$tmpdir/connect-terminal-lines.out" 2>&1
+    python3 - "$tmpdir/connect-terminal-lines.out" <<'PY'
+import sys
+
+data = open(sys.argv[1], "rb").read()
+if b"terminal-line-1\r\nterminal-line-2" not in data:
+    raise SystemExit(f"stream connect output did not preserve terminal line starts: {data!r}")
+PY
+    api process-wait "$terminal_lines_process_id" --timeout-ms 2000 | grep -q '"success":true'
+    cube remove connect-terminal-lines >/dev/null
+fi
+
 cube run --stream --name fg-run sh -c \
     'printf "fg-out\n"; printf "fg-err\n" >&2' \
     >"$tmpdir/fg-run.out" 2>"$tmpdir/fg-run.err"

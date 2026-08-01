@@ -1540,29 +1540,6 @@ static int controller_is_completed(const char *controller_socket,
     return 0;
 }
 
-static int set_raw_terminal(struct termios *original, int *raw_enabled)
-{
-    *raw_enabled = 0;
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-        return 0;
-    }
-    if (tcgetattr(STDIN_FILENO, original) < 0) {
-        return -1;
-    }
-    struct termios raw = *original;
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~OPOST;
-    raw.c_cflag |= CS8;
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
-        return -1;
-    }
-    *raw_enabled = 1;
-    return 0;
-}
-
 static int process_input_chunk(const char *controller_socket,
                                const char *buffer,
                                size_t length,
@@ -1617,10 +1594,26 @@ static int attachment_loop(const char *controller_socket,
     struct termios original;
     int raw_enabled = 0;
 
-    if (set_raw_terminal(&original, &raw_enabled) < 0) {
-        fprintf(stderr, "cube: failed to set terminal raw mode: %s\n",
-                strerror(errno));
-        return 2;
+    if (strcmp(mode, "tty") == 0 &&
+        isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+        if (tcgetattr(STDIN_FILENO, &original) < 0) {
+            fprintf(stderr, "cube: failed to read terminal mode: %s\n",
+                    strerror(errno));
+            return 2;
+        }
+        struct termios raw = original;
+        raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+        raw.c_oflag &= ~OPOST;
+        raw.c_cflag |= CS8;
+        raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+        raw.c_cc[VMIN] = 1;
+        raw.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
+            fprintf(stderr, "cube: failed to set terminal raw mode: %s\n",
+                    strerror(errno));
+            return 2;
+        }
+        raw_enabled = 1;
     }
 
     fprintf(stderr, "Connected to [%s]. Detach with Ctrl-\\ d\n",
