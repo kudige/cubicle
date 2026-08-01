@@ -418,6 +418,7 @@
   - added OpenSSL-backed Ed25519 identity primitives and HMAC helper
   - manager now creates and preserves a strict-permission identity under state/keys
   - tests cover key generation, persistence, signatures, HMAC, and unsafe key permissions
+  - added deterministic binary auth transcript and resume-authenticator encoders
 
 ## Next
 
@@ -443,7 +444,6 @@
      - make sanitizer and malformed-message runs mandatory in CI
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
-   - add deterministic Unix auth transcript encoding and fixtures
    - add client identity generation/loading in cube and libcubicle
    - implement authenticated Unix session creation and session resume
    - enforce workspace capability checks and bootstrap owner keys

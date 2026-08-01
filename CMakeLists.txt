@@ -35,6 +35,7 @@ endif()
 add_library(cubicle_common
     src/client/error.c
     src/common/auth_crypto.c
+    src/common/auth_protocol.c
     src/common/config.c
     src/common/json.c
     src/common/log.c
