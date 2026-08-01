@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -183,24 +184,10 @@ static char *controller_response(const char *request, const char *request_id)
     return format_error(request_id, "unsupported", "unsupported method");
 }
 
-static int serve(const char *socket_path, const char *log_path,
-                 const char *mode, const char *scenario,
-                 const char *controller_uri, int max_requests)
+static int serve_loop(int listen_fd, const char *log_path,
+                      const char *mode, const char *scenario,
+                      const char *controller_uri, int max_requests)
 {
-    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (listen_fd < 0) return 1;
-
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    if (strlen(socket_path) >= sizeof(address.sun_path)) return 1;
-    strcpy(address.sun_path, socket_path);
-    unlink(socket_path);
-    if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
-        listen(listen_fd, 8) < 0) {
-        return 1;
-    }
-
     FILE *log = fopen(log_path, "a");
     if (log == NULL) return 1;
 
@@ -261,14 +248,87 @@ static int serve(const char *socket_path, const char *log_path,
     }
 
     fclose(log);
+    return handled == max_requests ? 0 : 1;
+}
+
+static int serve_unix(const char *socket_path, const char *log_path,
+                      const char *mode, const char *scenario,
+                      const char *controller_uri, int max_requests)
+{
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) return 1;
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    if (strlen(socket_path) >= sizeof(address.sun_path)) return 1;
+    strcpy(address.sun_path, socket_path);
+    unlink(socket_path);
+    if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        listen(listen_fd, 8) < 0) {
+        close(listen_fd);
+        return 1;
+    }
+
+    int result = serve_loop(listen_fd, log_path, mode, scenario,
+                            controller_uri, max_requests);
     close(listen_fd);
     unlink(socket_path);
-    return handled == max_requests ? 0 : 1;
+    return result;
+}
+
+static int write_port_file(const char *path, uint16_t port)
+{
+    FILE *file = fopen(path, "w");
+    if (file == NULL) return -1;
+    fprintf(file, "%u\n", (unsigned int)port);
+    return fclose(file);
+}
+
+static int serve_tcp(const char *host, int port, const char *port_file,
+                     const char *log_path, const char *mode,
+                     const char *scenario, const char *controller_uri,
+                     int max_requests)
+{
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) return 1;
+    int reuse = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &address.sin_addr) != 1) {
+        close(listen_fd);
+        return 1;
+    }
+    if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        listen(listen_fd, 8) < 0) {
+        close(listen_fd);
+        return 1;
+    }
+
+    socklen_t address_length = sizeof(address);
+    if (getsockname(listen_fd, (struct sockaddr *)&address,
+                    &address_length) < 0 ||
+        write_port_file(port_file, ntohs(address.sin_port)) < 0) {
+        close(listen_fd);
+        return 1;
+    }
+
+    int result = serve_loop(listen_fd, log_path, mode, scenario,
+                            controller_uri, max_requests);
+    close(listen_fd);
+    return result;
 }
 
 int main(int argc, char **argv)
 {
     const char *socket_path = NULL;
+    const char *tcp_host = NULL;
+    const char *tcp_port = NULL;
+    const char *port_file = NULL;
     const char *log_path = NULL;
     const char *mode = "manager";
     const char *scenario = "normal";
@@ -278,6 +338,12 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
             socket_path = argv[++i];
+        } else if (strcmp(argv[i], "--tcp-host") == 0 && i + 1 < argc) {
+            tcp_host = argv[++i];
+        } else if (strcmp(argv[i], "--tcp-port") == 0 && i + 1 < argc) {
+            tcp_port = argv[++i];
+        } else if (strcmp(argv[i], "--port-file") == 0 && i + 1 < argc) {
+            port_file = argv[++i];
         } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
             log_path = argv[++i];
         } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
@@ -293,9 +359,18 @@ int main(int argc, char **argv)
         }
     }
 
-    if (socket_path == NULL || log_path == NULL || max_requests <= 0) {
+    if (log_path == NULL || max_requests <= 0) {
         return 2;
     }
-    return serve(socket_path, log_path, mode, scenario, controller_uri,
-                 max_requests);
+    if (tcp_host != NULL || tcp_port != NULL || port_file != NULL) {
+        if (tcp_host == NULL || tcp_port == NULL || port_file == NULL ||
+            socket_path != NULL) {
+            return 2;
+        }
+        return serve_tcp(tcp_host, atoi(tcp_port), port_file, log_path, mode,
+                         scenario, controller_uri, max_requests);
+    }
+    if (socket_path == NULL) return 2;
+    return serve_unix(socket_path, log_path, mode, scenario, controller_uri,
+                      max_requests);
 }

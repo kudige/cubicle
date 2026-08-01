@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cubicle/cubicle.h"
+#include "cubicle/transport_tcp.h"
 #include "cubicle/transport_unix.h"
 
 #include <assert.h>
@@ -15,11 +16,20 @@
 #include <time.h>
 #include <unistd.h>
 
-static void make_endpoint(cubicle_endpoint_t *endpoint, const char *socket_path)
+typedef enum test_transport_kind {
+    TEST_TRANSPORT_UNIX,
+    TEST_TRANSPORT_TCP,
+} test_transport_kind_t;
+
+static const char *transport_name(test_transport_kind_t kind)
+{
+    return kind == TEST_TRANSPORT_TCP ? "tcp" : "unix";
+}
+
+static void make_endpoint_uri(cubicle_endpoint_t *endpoint, const char *uri)
 {
     memset(endpoint, 0, sizeof(*endpoint));
-    int length = snprintf(endpoint->uri, sizeof(endpoint->uri), "unix://%s",
-                          socket_path);
+    int length = snprintf(endpoint->uri, sizeof(endpoint->uri), "%s", uri);
     assert(length > 0 && (size_t)length < sizeof(endpoint->uri));
 }
 
@@ -36,9 +46,42 @@ static void wait_for_socket(const char *path)
     assert(!"mock socket was not created");
 }
 
-static pid_t start_server(const char *socket_path, const char *log_path,
-                          const char *mode, const char *scenario,
-                          const char *controller_uri, int max_requests)
+static void wait_for_file(const char *path)
+{
+    for (int i = 0; i < 100; ++i) {
+        struct stat file_stat;
+        if (stat(path, &file_stat) == 0 && S_ISREG(file_stat.st_mode)) {
+            return;
+        }
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 10000000L };
+        nanosleep(&delay, NULL);
+    }
+    assert(!"mock port file was not created");
+}
+
+static uint16_t read_port_file(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    assert(file != NULL);
+    unsigned int port = 0;
+    assert(fscanf(file, "%u", &port) == 1);
+    fclose(file);
+    assert(port > 0 && port <= 65535);
+    return (uint16_t)port;
+}
+
+static cubicle_error_code_t create_transport(test_transport_kind_t kind,
+                                             cubicle_transport_t **transport)
+{
+    if (kind == TEST_TRANSPORT_TCP) {
+        return cubicle_transport_tcp_create(transport);
+    }
+    return cubicle_transport_unix_create(transport);
+}
+
+static pid_t start_unix_server(const char *socket_path, const char *log_path,
+                               const char *mode, const char *scenario,
+                               const char *controller_uri, int max_requests)
 {
     const char *server = getenv("CUBICLE_MOCK_API_SERVER");
     assert(server != NULL && server[0] != '\0');
@@ -64,6 +107,66 @@ static pid_t start_server(const char *socket_path, const char *log_path,
     return pid;
 }
 
+static pid_t start_tcp_server(const char *port_file, const char *log_path,
+                              const char *mode, const char *scenario,
+                              const char *controller_uri, int max_requests,
+                              char *endpoint_uri, size_t endpoint_uri_size)
+{
+    const char *server = getenv("CUBICLE_MOCK_API_SERVER");
+    assert(server != NULL && server[0] != '\0');
+
+    char max_requests_text[32];
+    snprintf(max_requests_text, sizeof(max_requests_text), "%d", max_requests);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        execl(server, server,
+              "--tcp-host", "127.0.0.1",
+              "--tcp-port", "0",
+              "--port-file", port_file,
+              "--log", log_path,
+              "--mode", mode,
+              "--scenario", scenario,
+              "--controller-uri", controller_uri,
+              "--max-requests", max_requests_text,
+              (char *)NULL);
+        _exit(127);
+    }
+
+    wait_for_file(port_file);
+    uint16_t port = read_port_file(port_file);
+    int length = snprintf(endpoint_uri, endpoint_uri_size,
+                          "tcp://127.0.0.1:%u", (unsigned int)port);
+    assert(length > 0 && (size_t)length < endpoint_uri_size);
+    return pid;
+}
+
+static pid_t start_server(test_transport_kind_t kind, const char *directory,
+                          const char *label, const char *log_path,
+                          const char *mode, const char *scenario,
+                          const char *controller_uri, int max_requests,
+                          char *endpoint_uri, size_t endpoint_uri_size)
+{
+    if (kind == TEST_TRANSPORT_TCP) {
+        char port_file[256];
+        snprintf(port_file, sizeof(port_file), "%s/%s-%s.port", directory,
+                 label, transport_name(kind));
+        return start_tcp_server(port_file, log_path, mode, scenario,
+                                controller_uri, max_requests, endpoint_uri,
+                                endpoint_uri_size);
+    }
+
+    char socket_path[256];
+    snprintf(socket_path, sizeof(socket_path), "%s/%s-%s.sock", directory,
+             label, transport_name(kind));
+    int length = snprintf(endpoint_uri, endpoint_uri_size, "unix://%s",
+                          socket_path);
+    assert(length > 0 && (size_t)length < endpoint_uri_size);
+    return start_unix_server(socket_path, log_path, mode, scenario,
+                             controller_uri, max_requests);
+}
+
 static void expect_server_exit(pid_t pid)
 {
     int status = 0;
@@ -72,14 +175,15 @@ static void expect_server_exit(pid_t pid)
     assert(WEXITSTATUS(status) == 0);
 }
 
-static cubicle_client_t *connect_client(const char *socket_path)
+static cubicle_client_t *connect_client(test_transport_kind_t kind,
+                                        const char *endpoint_uri)
 {
     cubicle_transport_t *transport = NULL;
-    assert(cubicle_transport_unix_create(&transport) == CUBICLE_OK);
+    assert(create_transport(kind, &transport) == CUBICLE_OK);
 
     cubicle_client_options_t options;
     memset(&options, 0, sizeof(options));
-    make_endpoint(&options.endpoint, socket_path);
+    make_endpoint_uri(&options.endpoint, endpoint_uri);
     options.transport = transport;
 
     cubicle_client_t *client = NULL;
@@ -121,20 +225,26 @@ static void assert_log_contains_all(const char *log_path,
     }
 }
 
-static void run_manager_integration(const char *directory)
+static void run_manager_integration(const char *directory,
+                                    test_transport_kind_t kind)
 {
-    char manager_socket[256];
-    char controller_socket[256];
     char manager_log[256];
+    char manager_uri[320];
     char controller_uri[320];
-    snprintf(manager_socket, sizeof(manager_socket), "%s/manager.sock", directory);
-    snprintf(controller_socket, sizeof(controller_socket), "%s/controller.sock", directory);
-    snprintf(manager_log, sizeof(manager_log), "%s/manager.log", directory);
-    snprintf(controller_uri, sizeof(controller_uri), "unix://%s", controller_socket);
+    snprintf(manager_log, sizeof(manager_log), "%s/manager-%s.log", directory,
+             transport_name(kind));
+    if (kind == TEST_TRANSPORT_TCP) {
+        snprintf(controller_uri, sizeof(controller_uri), "tcp://127.0.0.1:1");
+    } else {
+        snprintf(controller_uri, sizeof(controller_uri),
+                 "unix://%s/controller-%s.sock", directory,
+                 transport_name(kind));
+    }
 
-    pid_t manager_pid = start_server(manager_socket, manager_log, "manager",
-                                     "normal", controller_uri, 25);
-    cubicle_client_t *client = connect_client(manager_socket);
+    pid_t manager_pid = start_server(kind, directory, "manager", manager_log,
+                                     "manager", "normal", controller_uri, 25,
+                                     manager_uri, sizeof(manager_uri));
+    cubicle_client_t *client = connect_client(kind, manager_uri);
 
     cubicle_manager_ping_result_t ping;
     // Endpoint test for manager.ping
@@ -362,21 +472,23 @@ static void send_controller_request(cubicle_transport_t *transport,
     transport->vtable->response_free(transport, response);
 }
 
-static void run_controller_integration(const char *directory)
+static void run_controller_integration(const char *directory,
+                                       test_transport_kind_t kind)
 {
-    char controller_socket[256];
     char controller_log[256];
-    snprintf(controller_socket, sizeof(controller_socket), "%s/controller.sock", directory);
-    snprintf(controller_log, sizeof(controller_log), "%s/controller.log", directory);
+    char controller_uri[320];
+    snprintf(controller_log, sizeof(controller_log), "%s/controller-%s.log",
+             directory, transport_name(kind));
 
-    pid_t controller_pid = start_server(controller_socket, controller_log,
-                                        "controller", "normal",
-                                        "unix:///unused.sock", 5);
+    pid_t controller_pid = start_server(kind, directory, "controller",
+                                        controller_log, "controller", "normal",
+                                        "unix:///unused.sock", 5,
+                                        controller_uri, sizeof(controller_uri));
 
     cubicle_transport_t *transport = NULL;
-    assert(cubicle_transport_unix_create(&transport) == CUBICLE_OK);
+    assert(create_transport(kind, &transport) == CUBICLE_OK);
     cubicle_endpoint_t endpoint;
-    make_endpoint(&endpoint, controller_socket);
+    make_endpoint_uri(&endpoint, controller_uri);
     cubicle_error_t error;
     memset(&error, 0, sizeof(error));
     assert(transport->vtable->connect(transport, &endpoint, &error) == CUBICLE_OK);
@@ -409,17 +521,22 @@ static void run_controller_integration(const char *directory)
                                 sizeof(expected_controller_methods[0]));
 }
 
-static void run_error_scenario(const char *directory, const char *scenario,
+static void run_error_scenario(const char *directory, test_transport_kind_t kind,
+                               const char *scenario,
                                cubicle_error_code_t expected)
 {
-    char socket_path[256];
     char log_path[256];
-    snprintf(socket_path, sizeof(socket_path), "%s/%s.sock", directory, scenario);
-    snprintf(log_path, sizeof(log_path), "%s/%s.log", directory, scenario);
+    char manager_uri[320];
+    char label[128];
+    snprintf(label, sizeof(label), "%s-manager", scenario);
+    snprintf(log_path, sizeof(log_path), "%s/%s-%s.log", directory, scenario,
+             transport_name(kind));
 
-    pid_t server_pid = start_server(socket_path, log_path, "manager",
-                                    scenario, "unix:///unused.sock", 1);
-    cubicle_client_t *client = connect_client(socket_path);
+    pid_t server_pid = start_server(kind, directory, label, log_path,
+                                    "manager", scenario,
+                                    "unix:///unused.sock", 1, manager_uri,
+                                    sizeof(manager_uri));
+    cubicle_client_t *client = connect_client(kind, manager_uri);
     cubicle_manager_ping_result_t ping;
     // Endpoint test for manager.ping error handling
     assert(cubicle_manager_ping(client, &ping) == expected);
@@ -430,17 +547,24 @@ static void run_error_scenario(const char *directory, const char *scenario,
     assert_log_contains(log_path, "\"method\":\"manager.ping\"");
 }
 
+static void run_transport_suite(const char *directory,
+                                test_transport_kind_t kind)
+{
+    run_manager_integration(directory, kind);
+    run_controller_integration(directory, kind);
+    run_error_scenario(directory, kind, "error", CUBICLE_ERR_UNSUPPORTED);
+    run_error_scenario(directory, kind, "malformed", CUBICLE_ERR_PROTOCOL);
+    run_error_scenario(directory, kind, "mismatch", CUBICLE_ERR_PROTOCOL);
+}
+
 int main(void)
 {
     char directory_template[] = "/tmp/libcubicle-mock-test-XXXXXX";
     char *directory = mkdtemp(directory_template);
     assert(directory != NULL);
 
-    run_manager_integration(directory);
-    run_controller_integration(directory);
-    run_error_scenario(directory, "error", CUBICLE_ERR_UNSUPPORTED);
-    run_error_scenario(directory, "malformed", CUBICLE_ERR_PROTOCOL);
-    run_error_scenario(directory, "mismatch", CUBICLE_ERR_PROTOCOL);
+    run_transport_suite(directory, TEST_TRANSPORT_UNIX);
+    run_transport_suite(directory, TEST_TRANSPORT_TCP);
 
     rmdir(directory);
     return 0;

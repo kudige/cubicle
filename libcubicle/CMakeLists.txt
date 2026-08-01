@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(cubicle_client STATIC
     ../src/client/client.c
     ../src/client/error.c
+    ../src/client/transport_tcp.c
     ../src/client/transport_unix.c
     ../src/common/process.c
 )

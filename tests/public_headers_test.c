@@ -1,4 +1,5 @@
 #include "cubicle/cubicle.h"
+#include "cubicle/transport_tcp.h"
 #include "cubicle/transport_unix.h"
 
 int main(void)
