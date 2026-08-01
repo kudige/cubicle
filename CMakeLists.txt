@@ -81,6 +81,9 @@ add_executable(cube
     src/cli/main.c
 )
 
+target_link_libraries(cube PRIVATE cubicle_common)
+target_include_directories(cube PRIVATE third_party/yyjson)
+
 target_compile_options(cube PRIVATE
     -Wall
     -Wextra
@@ -194,6 +197,15 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBE=$<TARGET_FILE:cube>
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_help_test.sh
+)
+
+add_test(
+    NAME cube-workspace-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/cube_workspace_test.sh
 )
 
 add_test(

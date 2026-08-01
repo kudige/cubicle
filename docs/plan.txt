@@ -304,32 +304,41 @@
   - fuzz-rpc-envelope target
   - standalone fuzz smoke mode for environments without libFuzzer linkage
 - Updated README.md with current build, test, and controller usage notes.
+- Merged the user-facing cube CLI specification in docs/cli-command-spec.md.
+- Added the initial cube CLI scaffold:
+  - cube executable target
+  - top-level help
+  - global --manager-socket, --workspace, and --json parsing
+  - manager discovery through --manager-socket or CUBICLE_MANAGER_SOCKET
+  - clear diagnostics for missing manager sockets and unknown commands
+- Added initial cube workspace commands over the manager API:
+  - cube workspace
+  - cube workspace NAME
+  - cube workspace list
+  - cube workspace create NAME
+  - cube workspace select NAME
+  - cube workspace stop NAME
+  - cube workspace delete NAME
+  - selected workspace persistence under XDG state or user-local state fallback
 
 ## Next
 
-1. Implement the API specification over decoupled transports.
-   - Introduce shared manager/controller API request and response types.
-   - Keep the semantic API independent from the transport layer.
-   - Implement the initial manager API subset over Unix sockets.
-   - Implement the initial controller attachment/internal API subset over Unix sockets.
-   - Move manager state mutation commands behind daemon request handling.
-   - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
-   - Move toward transactional storage behind the daemon authority.
-   - Add fixtures and conformance tests for API behavior.
-   - Continue JSON protocol hardening:
+1. Continue implementing the cube CLI specification.
+   - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
+   - Implement process launch, ps, inspect, signal, stop, kill, and remove.
+   - Add foreground attach/wait behavior through manager-issued attachment grants.
+   - Add JSON output contracts for workspace list, ps, and inspect.
+   - Add logs and events commands through manager APIs.
+   - Add defaults config and command-rule phases from docs/cli-command-spec.md.
+   - Keep cube talking to the controller only for authorized process attachments.
+
+2. Continue JSON protocol hardening.
      - replace remaining protocol-facing textual JSON result extraction in libcubicle compatibility/client helpers
      - introduce a structured writer or yyjson-backed writer wrapper for responses and requests currently assembled by snprintf
      - add method schemas and malicious/boundary fixtures under schemas/v0 and tests/fixtures
      - add additional fuzz targets for process.start, process info, attachment grants, events, and RPC errors
      - define deterministic non-JSON signed transcript/grant encoding before authentication grants are implemented
      - make sanitizer and malformed-message runs mandatory in CI
-
-2. Add provisional user-facing CLI commands.
-   - work
-   - dev
-   - tty
-   - attach
-   - stop
 
 3. Expand tests.
    - Large output tests.
