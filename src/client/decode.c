@@ -185,11 +185,24 @@ int channel_mask_from_string(const char *text, cubicle_channel_mask_t *out)
 
 int parse_endpoint(const char *json, cubicle_endpoint_t *endpoint)
 {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
+    }
     memset(endpoint, 0, sizeof(*endpoint));
-    json_string_field(json, "uri", endpoint->uri, sizeof(endpoint->uri));
-    json_string_field(json, "server_identity", endpoint->server_identity,
-                      sizeof(endpoint->server_identity));
-    return endpoint->uri[0] == '\0' ? -1 : 0;
+    cubicle_validation_error_t error;
+    int result =
+        cubicle_json_get_required_string(parsed.root, "uri", endpoint->uri,
+                                         sizeof(endpoint->uri), &error);
+    if (result == 0 &&
+        cubicle_json_get_optional_string(parsed.root, "server_identity",
+                                         endpoint->server_identity,
+                                         sizeof(endpoint->server_identity),
+                                         NULL, &error) < 0) {
+        result = -1;
+    }
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int parse_page(const char *json, cubicle_page_info_t *page)
@@ -197,85 +210,214 @@ int parse_page(const char *json, cubicle_page_info_t *page)
     if (page == NULL) {
         return 0;
     }
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
+    }
     memset(page, 0, sizeof(*page));
-    json_string_field(json, "continuation_token", page->continuation_token,
-                      sizeof(page->continuation_token));
-    json_bool_field(json, "has_more", &page->has_more);
-    return 0;
+    cubicle_validation_error_t error;
+    int result =
+        cubicle_json_get_optional_string(parsed.root, "continuation_token",
+                                         page->continuation_token,
+                                         sizeof(page->continuation_token),
+                                         NULL, &error) == 0 &&
+                cubicle_json_get_optional_bool(parsed.root, "has_more",
+                                               &page->has_more, NULL,
+                                               &error) == 0
+            ? 0
+            : -1;
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int parse_workspace_info(const char *json, cubicle_workspace_info_t *out)
 {
-    memset(out, 0, sizeof(*out));
-    json_string_field(json, "manager_id", out->manager_id, sizeof(out->manager_id));
-    if (json_string_field(json, "id", out->id, sizeof(out->id)) < 0 ||
-        json_string_field(json, "name", out->name, sizeof(out->name)) < 0) {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
         return -1;
     }
-    json_u64_field(json, "created_at_ms", &out->created_at_ms);
-    json_u64_field(json, "updated_at_ms", &out->updated_at_ms);
-    json_u64_field(json, "process_count", &out->process_count);
-    json_u64_field(json, "running_process_count", &out->running_process_count);
-    return 0;
+    memset(out, 0, sizeof(*out));
+    cubicle_validation_error_t error;
+    int result =
+        cubicle_json_get_required_string(parsed.root, "id", out->id,
+                                         sizeof(out->id), &error) == 0 &&
+                cubicle_json_get_required_string(parsed.root, "name",
+                                                 out->name, sizeof(out->name),
+                                                 &error) == 0
+            ? 0
+            : -1;
+    if (result == 0 &&
+        (cubicle_json_get_optional_string(parsed.root, "manager_id",
+                                          out->manager_id,
+                                          sizeof(out->manager_id), NULL,
+                                          &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "created_at_ms",
+                                       &out->created_at_ms, NULL, &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "updated_at_ms",
+                                       &out->updated_at_ms, NULL, &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "process_count",
+                                       &out->process_count, NULL, &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "running_process_count",
+                                       &out->running_process_count, NULL,
+                                       &error) < 0)) {
+        result = -1;
+    }
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int parse_process_info(const char *json, cubicle_process_info_t *out)
 {
     char text[64];
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
+    }
     memset(out, 0, sizeof(*out));
-    json_string_field(json, "manager_id", out->manager_id, sizeof(out->manager_id));
-    json_string_field(json, "workspace_id", out->workspace_id, sizeof(out->workspace_id));
-    if (json_string_field(json, "id", out->id, sizeof(out->id)) < 0) return -1;
-    json_string_field(json, "friendly_name", out->friendly_name,
-                      sizeof(out->friendly_name));
-    if (json_string_field(json, "mode", text, sizeof(text)) == 0) {
-        process_mode_from_string(text, &out->mode);
+    cubicle_validation_error_t error;
+    if (cubicle_json_get_required_string(parsed.root, "id", out->id,
+                                         sizeof(out->id), &error) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
     }
-    if (json_string_field(json, "state", text, sizeof(text)) == 0) {
-        process_state_from_string(text, &out->state);
+    if (cubicle_json_get_optional_string(parsed.root, "manager_id",
+                                         out->manager_id,
+                                         sizeof(out->manager_id), NULL,
+                                         &error) < 0 ||
+        cubicle_json_get_optional_string(parsed.root, "workspace_id",
+                                         out->workspace_id,
+                                         sizeof(out->workspace_id), NULL,
+                                         &error) < 0 ||
+        cubicle_json_get_optional_string(parsed.root, "friendly_name",
+                                         out->friendly_name,
+                                         sizeof(out->friendly_name), NULL,
+                                         &error) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
     }
-    int64_t parsed = 0;
-    if (json_i64_field(json, "exit_code", &parsed) == 0) out->exit_code = (int)parsed;
-    if (json_i64_field(json, "termination_signal", &parsed) == 0) out->termination_signal = (int)parsed;
-    json_bool_field(json, "has_exit_status", &out->has_exit_status);
-    json_u64_field(json, "stdout_offset", &out->stdout_offset);
-    json_u64_field(json, "stderr_offset", &out->stderr_offset);
-    json_u64_field(json, "tty_offset", &out->tty_offset);
-    json_u64_field(json, "created_at_ms", &out->created_at_ms);
-    json_u64_field(json, "started_at_ms", &out->started_at_ms);
-    json_u64_field(json, "exited_at_ms", &out->exited_at_ms);
-    json_i64_field(json, "local_pid", &out->local_pid);
-    json_i64_field(json, "local_pgid", &out->local_pgid);
+    text[0] = '\0';
+    if (cubicle_json_get_optional_string(parsed.root, "mode", text,
+                                         sizeof(text), NULL, &error) == 0 &&
+        text[0] != '\0' &&
+        process_mode_from_string(text, &out->mode) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    text[0] = '\0';
+    if (cubicle_json_get_optional_string(parsed.root, "state", text,
+                                         sizeof(text), NULL, &error) == 0 &&
+        text[0] != '\0' &&
+        process_state_from_string(text, &out->state) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    yyjson_val *value = cubicle_json_object_get(parsed.root, "exit_code");
+    if (yyjson_is_int(value)) out->exit_code = (int)yyjson_get_sint(value);
+    value = cubicle_json_object_get(parsed.root, "termination_signal");
+    if (yyjson_is_int(value)) {
+        out->termination_signal = (int)yyjson_get_sint(value);
+    }
+    if (cubicle_json_get_optional_bool(parsed.root, "has_exit_status",
+                                       &out->has_exit_status, NULL, &error) <
+            0 ||
+        cubicle_json_get_optional_u64(parsed.root, "stdout_offset",
+                                      &out->stdout_offset, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "stderr_offset",
+                                      &out->stderr_offset, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "tty_offset",
+                                      &out->tty_offset, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "created_at_ms",
+                                      &out->created_at_ms, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "started_at_ms",
+                                      &out->started_at_ms, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "exited_at_ms",
+                                      &out->exited_at_ms, NULL, &error) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    value = cubicle_json_object_get(parsed.root, "local_pid");
+    if (yyjson_is_int(value)) out->local_pid = yyjson_get_sint(value);
+    value = cubicle_json_object_get(parsed.root, "local_pgid");
+    if (yyjson_is_int(value)) out->local_pgid = yyjson_get_sint(value);
+    cubicle_json_cleanup(&parsed);
     return 0;
 }
 
 int parse_key_info(const char *json, cubicle_workspace_key_info_t *out)
 {
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
+    }
     memset(out, 0, sizeof(*out));
-    if (json_string_field(json, "key_id", out->key_id, sizeof(out->key_id)) < 0) return -1;
-    json_string_field(json, "fingerprint", out->fingerprint, sizeof(out->fingerprint));
-    json_string_field(json, "label", out->label, sizeof(out->label));
-    json_u64_field(json, "capabilities", &out->capabilities);
-    json_u64_field(json, "created_at_ms", &out->created_at_ms);
-    json_u64_field(json, "revoked_at_ms", &out->revoked_at_ms);
-    return 0;
+    cubicle_validation_error_t error;
+    int result = cubicle_json_get_required_string(
+        parsed.root, "key_id", out->key_id, sizeof(out->key_id), &error);
+    if (result == 0 &&
+        (cubicle_json_get_optional_string(parsed.root, "fingerprint",
+                                          out->fingerprint,
+                                          sizeof(out->fingerprint), NULL,
+                                          &error) < 0 ||
+         cubicle_json_get_optional_string(parsed.root, "label", out->label,
+                                          sizeof(out->label), NULL, &error) <
+             0 ||
+         cubicle_json_get_optional_u64(parsed.root, "capabilities",
+                                       &out->capabilities, NULL, &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "created_at_ms",
+                                       &out->created_at_ms, NULL, &error) < 0 ||
+         cubicle_json_get_optional_u64(parsed.root, "revoked_at_ms",
+                                       &out->revoked_at_ms, NULL, &error) <
+             0)) {
+        result = -1;
+    }
+    cubicle_json_cleanup(&parsed);
+    return result;
 }
 
 int parse_event(const char *json, cubicle_event_t *out)
 {
     char type[64];
-    memset(out, 0, sizeof(*out));
-    json_u64_field(json, "global_sequence", &out->global_sequence);
-    json_u64_field(json, "workspace_sequence", &out->workspace_sequence);
-    json_u64_field(json, "timestamp_ms", &out->timestamp_ms);
-    if (json_string_field(json, "type", type, sizeof(type)) == 0) {
-        event_type_from_string(type, &out->type);
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
     }
-    json_string_field(json, "workspace_id", out->workspace_id,
-                      sizeof(out->workspace_id));
-    json_string_field(json, "process_id", out->process_id,
-                      sizeof(out->process_id));
-    json_string_field(json, "payload", out->payload, sizeof(out->payload));
+    memset(out, 0, sizeof(*out));
+    cubicle_validation_error_t error;
+    if (cubicle_json_get_optional_u64(parsed.root, "global_sequence",
+                                      &out->global_sequence, NULL, &error) <
+            0 ||
+        cubicle_json_get_optional_u64(parsed.root, "workspace_sequence",
+                                      &out->workspace_sequence, NULL,
+                                      &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "timestamp_ms",
+                                      &out->timestamp_ms, NULL, &error) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    type[0] = '\0';
+    if (cubicle_json_get_optional_string(parsed.root, "type", type,
+                                         sizeof(type), NULL, &error) == 0 &&
+        type[0] != '\0' &&
+        event_type_from_string(type, &out->type) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    if (cubicle_json_get_optional_string(parsed.root, "workspace_id",
+                                         out->workspace_id,
+                                         sizeof(out->workspace_id), NULL,
+                                         &error) < 0 ||
+        cubicle_json_get_optional_string(parsed.root, "process_id",
+                                         out->process_id,
+                                         sizeof(out->process_id), NULL,
+                                         &error) < 0 ||
+        cubicle_json_get_optional_string(parsed.root, "payload",
+                                         out->payload,
+                                         sizeof(out->payload), NULL,
+                                         &error) < 0) {
+        cubicle_json_cleanup(&parsed);
+        return -1;
+    }
+    cubicle_json_cleanup(&parsed);
     return 0;
 }
 
