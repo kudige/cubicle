@@ -80,6 +80,26 @@ typedef struct cube_cached_session {
     gid_t peer_gid;
 } cube_cached_session_t;
 
+static struct termios cube_saved_terminal;
+static int cube_terminal_restore_active = 0;
+
+static void cube_restore_terminal(void)
+{
+    if (cube_terminal_restore_active) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &cube_saved_terminal);
+        cube_terminal_restore_active = 0;
+    }
+}
+
+// LCOV_EXCL_START
+static void cube_attach_signal_handler(int signal_number)
+{
+    cube_restore_terminal();
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+}
+// LCOV_EXCL_STOP
+
 static void cleanup_rpc_response(cube_rpc_response_t *response);
 static int json_string_field(yyjson_val *object,
                              const char *field,
@@ -2980,8 +3000,16 @@ static int attachment_loop(const char *controller_socket,
     int escape_pending = 0;
     struct termios original;
     int raw_enabled = 0;
+    int terminal_mode = process_mode_uses_terminal(mode);
+    int interactive_tty = stdin_open && isatty(STDIN_FILENO) &&
+                          isatty(STDOUT_FILENO);
+    struct sigaction old_int;
+    struct sigaction old_term;
+    struct sigaction old_hup;
+    struct sigaction old_quit;
+    int handlers_installed = 0;
 
-    if (process_mode_uses_terminal(mode) &&
+    if ((terminal_mode || interactive_tty) &&
         isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
         if (tcgetattr(STDIN_FILENO, &original) < 0) {
             fprintf(stderr, "cube: failed to read terminal mode: %s\n",
@@ -2990,7 +3018,9 @@ static int attachment_loop(const char *controller_socket,
         }
         struct termios raw = original;
         raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-        raw.c_oflag &= ~OPOST;
+        if (terminal_mode) {
+            raw.c_oflag &= ~OPOST;
+        }
         raw.c_cflag |= CS8;
         raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
         raw.c_cc[VMIN] = 1;
@@ -2999,6 +3029,18 @@ static int attachment_loop(const char *controller_socket,
             fprintf(stderr, "cube: failed to set terminal raw mode: %s\n",
                     strerror(errno));
             return 2;
+        }
+        cube_saved_terminal = original;
+        cube_terminal_restore_active = 1;
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = cube_attach_signal_handler;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGINT, &action, &old_int) == 0 &&
+            sigaction(SIGTERM, &action, &old_term) == 0 &&
+            sigaction(SIGHUP, &action, &old_hup) == 0 &&
+            sigaction(SIGQUIT, &action, &old_quit) == 0) {
+            handlers_installed = 1;
         }
         raw_enabled = 1;
     }
@@ -3014,7 +3056,7 @@ static int attachment_loop(const char *controller_socket,
         int stderr_end = 1;
         int tty_end = 1;
 
-        if (process_mode_uses_terminal(mode) &&
+        if (terminal_mode &&
             (channels & (CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT)) != 0) {
             result = controller_read_stream(controller_socket, "tty",
                                             &tty_offset, stdout, &tty_end);
@@ -3036,8 +3078,7 @@ static int attachment_loop(const char *controller_socket,
                                                 &stderr_end);
             }
         }
-        if (result == 1 &&
-            (!stdin_open || process_mode_uses_terminal(mode))) {
+        if (result == 1 && (!stdin_open || terminal_mode)) {
             result = 0;
             break;
         }
@@ -3053,7 +3094,7 @@ static int attachment_loop(const char *controller_socket,
                                                    &completed);
         if (status_result == 1 &&
             ((stdout_end && stderr_end && tty_end && !stdin_open) ||
-             process_mode_uses_terminal(mode))) {
+             terminal_mode)) {
             break;
         }
         if (status_result != 0) {
@@ -3116,7 +3157,13 @@ static int attachment_loop(const char *controller_socket,
     }
 
     if (raw_enabled) {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+        cube_restore_terminal();
+    }
+    if (handlers_installed) {
+        sigaction(SIGINT, &old_int, NULL);
+        sigaction(SIGTERM, &old_term, NULL);
+        sigaction(SIGHUP, &old_hup, NULL);
+        sigaction(SIGQUIT, &old_quit, NULL);
     }
     return result;
 }

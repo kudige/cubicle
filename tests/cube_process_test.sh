@@ -127,6 +127,66 @@ PY
     cube remove connect-terminal-lines >/dev/null
 fi
 
+stream_detach_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name connect-stream-detach -- sh -c \
+    'printf "stream-detach-ready\n"; sleep 30' |
+    json_id)
+python3 - "$CUBE" "$socket_path" "$xdg_state_home" "$tmpdir/connect-stream-detach.out" <<'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+
+cube, socket_path, xdg_state_home, output_path = sys.argv[1:]
+master_fd, slave_fd = pty.openpty()
+env = os.environ.copy()
+env["CUBICLE_MANAGER_SOCKET"] = socket_path
+env["XDG_STATE_HOME"] = xdg_state_home
+process = subprocess.Popen(
+    [cube, "connect", "connect-stream-detach"],
+    stdin=slave_fd,
+    stdout=slave_fd,
+    stderr=slave_fd,
+    env=env,
+    close_fds=True,
+)
+os.close(slave_fd)
+captured = bytearray()
+try:
+    saw_banner = False
+    saw_output = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master_fd], [], [], 0.05)
+        if ready:
+            chunk = os.read(master_fd, 4096)
+            captured.extend(chunk)
+            saw_banner = saw_banner or b"Connected to [connect-stream-detach]" in captured
+            saw_output = saw_output or b"stream-detach-" in captured
+            if saw_banner and saw_output:
+                break
+    else:
+        raise AssertionError(f"connect did not attach: {captured!r}")
+    os.write(master_fd, b"\x1cd")
+    status = process.wait(timeout=5)
+    if status != 0:
+        raise AssertionError(f"connect detach exited {status}: {captured!r}")
+finally:
+    with open(output_path, "wb") as handle:
+        handle.write(captured)
+    if process.poll() is None:
+        process.terminate()
+        process.wait(timeout=5)
+    os.close(master_fd)
+PY
+grep -q 'stream-detach-' "$tmpdir/connect-stream-detach.out"
+cube ps >/dev/null
+cube stop connect-stream-detach >/dev/null
+api process-wait "$stream_detach_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove connect-stream-detach >/dev/null
+
 cube run --stream --name fg-run sh -c \
     'printf "fg-out\n"; printf "fg-err\n" >&2' \
     >"$tmpdir/fg-run.out" 2>"$tmpdir/fg-run.err"

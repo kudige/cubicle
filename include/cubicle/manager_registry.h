@@ -27,6 +27,7 @@ typedef struct cubicle_process_record {
 typedef struct cubicle_cursor_record {
     char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     long long sequence;
+    long long offset;
 } cubicle_cursor_record_t;
 
 int cubicle_parse_workspace_record(char *line, cubicle_workspace_record_t *record);

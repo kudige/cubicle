@@ -227,7 +227,7 @@ done
 grep -q "^$workspace_id	$process_id	daemon-1	seq=1 type=process_started" "$state_dir/workspace-events.log"
 grep -q "^$workspace_id	$process_id	daemon-1	seq=2 type=output stream=stdout" "$state_dir/workspace-events.log"
 grep -q "^$workspace_id	$process_id	daemon-1	seq=3 type=process_exited status=exited exit_code=0" "$state_dir/workspace-events.log"
-grep -q "^$process_id	3$" "$state_dir/cursors.tsv"
+grep -Eq "^$process_id	3	[1-9][0-9]*$" "$state_dir/cursors.tsv"
 
 # Endpoint test for events.list
 events_list_response=$(send_manager_rpc events.list "{\"workspace_id\":\"$workspace_id\",\"process_id\":\"$process_id\",\"after_sequence\":0,\"limit\":10}")

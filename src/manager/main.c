@@ -1676,25 +1676,30 @@ static int process_output_path(char path[PATH_MAX],
     return 0;
 }
 
-static long long cursor_for_process(cubicle_cursor_record_t *cursors, size_t cursor_count,
-                                    const char *process_id)
+static cubicle_cursor_record_t *cursor_for_process(cubicle_cursor_record_t *cursors,
+                                                   size_t cursor_count,
+                                                   const char *process_id)
 {
     for (size_t i = 0; i < cursor_count; ++i) {
         if (strcmp(cursors[i].process_id, process_id) == 0) {
-            return cursors[i].sequence;
+            return &cursors[i];
         }
     }
 
-    return 0;
+    return NULL;
 }
 
 static int update_cursor(cubicle_cursor_record_t *cursors, size_t *cursor_count,
-                         const char *process_id, long long sequence)
+                         const char *process_id, long long sequence,
+                         long long offset)
 {
     for (size_t i = 0; i < *cursor_count; ++i) {
         if (strcmp(cursors[i].process_id, process_id) == 0) {
             if (sequence > cursors[i].sequence) {
                 cursors[i].sequence = sequence;
+            }
+            if (offset > cursors[i].offset) {
+                cursors[i].offset = offset;
             }
             return 0;
         }
@@ -1708,6 +1713,7 @@ static int update_cursor(cubicle_cursor_record_t *cursors, size_t *cursor_count,
     snprintf(cursors[*cursor_count].process_id,
              sizeof(cursors[*cursor_count].process_id), "%s", process_id);
     cursors[*cursor_count].sequence = sequence;
+    cursors[*cursor_count].offset = offset;
     ++(*cursor_count);
     return 0;
 }
@@ -1759,8 +1765,8 @@ static int save_cursors(const manager_state_t *state,
     }
 
     for (size_t i = 0; i < cursor_count; ++i) {
-        if (fprintf(file, "%s\t%lld\n", cursors[i].process_id,
-                    cursors[i].sequence) < 0) {
+        if (fprintf(file, "%s\t%lld\t%lld\n", cursors[i].process_id,
+                    cursors[i].sequence, cursors[i].offset) < 0) {
             int saved_errno = errno;
             fclose(file);
             return set_manager_path_error("write", temp_path, saved_errno);
@@ -2524,14 +2530,38 @@ static int poll_workspace_events(const manager_state_t *state,
             continue;
         }
 
-        long long cursor = cursor_for_process(cursors, cursor_count,
-                                              process.process_id);
+        cubicle_cursor_record_t *cursor_record =
+            cursor_for_process(cursors, cursor_count, process.process_id);
+        long long cursor = cursor_record == NULL ? 0 : cursor_record->sequence;
+        long long cursor_offset = cursor_record == NULL ? 0 : cursor_record->offset;
         long long max_sequence = cursor;
+        long long max_offset = cursor_offset;
+
+        struct stat events_stat;
+        if (fstat(fileno(events), &events_stat) == 0 &&
+            cursor_offset > events_stat.st_size) {
+            cursor = 0;
+            cursor_offset = 0;
+            max_sequence = 0;
+            max_offset = 0;
+        }
+        if (cursor_offset > 0 &&
+            fseeko(events, (off_t)cursor_offset, SEEK_SET) < 0) {
+            cursor_offset = 0;
+            max_offset = 0;
+            rewind(events);
+        }
+
         char event_line[1024];
         while (fgets(event_line, sizeof(event_line), events) != NULL) {
+            off_t line_end_offset = ftello(events);
             long long sequence = 0;
             if (cubicle_parse_event_sequence(event_line, &sequence) < 0 ||
                 sequence <= cursor) {
+                if (line_end_offset >= 0 &&
+                    (long long)line_end_offset > max_offset) {
+                    max_offset = (long long)line_end_offset;
+                }
                 continue;
             }
 
@@ -2559,13 +2589,17 @@ static int poll_workspace_events(const manager_state_t *state,
             if (sequence > max_sequence) {
                 max_sequence = sequence;
             }
+            if (line_end_offset >= 0 &&
+                (long long)line_end_offset > max_offset) {
+                max_offset = (long long)line_end_offset;
+            }
         }
 
         fclose(events);
 
-        if (max_sequence > cursor &&
+        if ((max_sequence > cursor || max_offset > cursor_offset) &&
             update_cursor(cursors, &cursor_count, process.process_id,
-                          max_sequence) < 0) {
+                          max_sequence, max_offset) < 0) {
             int saved_errno = errno;
             fclose(processes);
             manager_log_error(saved_errno);

@@ -46,12 +46,14 @@ int cubicle_parse_cursor_record(char *line, cubicle_cursor_record_t *record)
 {
     char *process_id = strtok(line, "\t\n");
     char *sequence = strtok(NULL, "\t\n");
+    char *offset = strtok(NULL, "\t\n");
     if (process_id == NULL || sequence == NULL) {
         return -1;
     }
 
     snprintf(record->process_id, sizeof(record->process_id), "%s", process_id);
     record->sequence = atoll(sequence);
+    record->offset = offset == NULL ? 0 : atoll(offset);
     return 0;
 }
 

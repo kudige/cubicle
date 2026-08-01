@@ -67,6 +67,14 @@ static void test_cursor_record(void)
                 "expected valid cursor record to parse");
     expect_string(record.process_id, "process-id", "cursor process id");
     expect_true(record.sequence == 42, "expected cursor sequence 42");
+    expect_true(record.offset == 0, "expected legacy cursor offset 0");
+
+    char offset_line[] = "process-id\t43\t128\n";
+    expect_true(cubicle_parse_cursor_record(offset_line, &record) == 0,
+                "expected offset cursor record to parse");
+    expect_string(record.process_id, "process-id", "offset cursor process id");
+    expect_true(record.sequence == 43, "expected offset cursor sequence 43");
+    expect_true(record.offset == 128, "expected cursor offset 128");
 
     char malformed[] = "process-id-only\n";
     expect_true(cubicle_parse_cursor_record(malformed, &record) < 0,

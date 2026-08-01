@@ -37,7 +37,7 @@ grep -q "^$workspace_id	$process_id	events-1	seq=.*type=output stream=stdout" "$
 grep -q "^$workspace_id	$process_id	events-1	seq=.*type=process_exited status=exited exit_code=0" "$tmpdir/events-1"
 
 cmp "$tmpdir/events-1" "$state_dir/workspace-events.log"
-grep -q "^$process_id	" "$state_dir/cursors.tsv"
+grep -Eq "^$process_id	[0-9]+	[1-9][0-9]*$" "$state_dir/cursors.tsv"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" events list --workspace "Project A" >"$tmpdir/events-list"
 cmp "$tmpdir/events-1" "$tmpdir/events-list"
