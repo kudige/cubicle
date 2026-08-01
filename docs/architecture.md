@@ -16,6 +16,7 @@ The manager is the control plane. It owns:
 - stable process IDs and workspace-local friendly names
 - controller discovery and routing
 - process metadata and lifecycle policy
+- retained terminal process cleanup
 - primitive-event aggregation and richer workspace events
 - client authorization and attachment token issuance
 

@@ -31,8 +31,15 @@ typedef struct cubicle_manager_status {
     uint64_t active_client_sessions;
 } cubicle_manager_status_t;
 
+typedef struct cubicle_manager_cleanup_result {
+    uint64_t removed_count;
+    uint64_t skipped_live_count;
+    uint64_t failed_count;
+} cubicle_manager_cleanup_result_t;
+
 cubicle_error_code_t cubicle_manager_ping(cubicle_client_t *client, cubicle_manager_ping_result_t *result_out);
 cubicle_error_code_t cubicle_manager_status(cubicle_client_t *client, cubicle_manager_status_t *status_out);
+cubicle_error_code_t cubicle_manager_cleanup(cubicle_client_t *client, const char *workspace_id, cubicle_manager_cleanup_result_t *result_out);
 cubicle_error_code_t cubicle_manager_reconcile(cubicle_client_t *client);
 cubicle_error_code_t cubicle_manager_shutdown(cubicle_client_t *client, bool stop_managed_processes);
 

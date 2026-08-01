@@ -534,6 +534,47 @@ cubicle_error_code_t cubicle_manager_reconcile(cubicle_client_t *client)
     return rpc_not_implemented(client, "manager.reconcile");
 }
 
+cubicle_error_code_t cubicle_manager_cleanup(
+    cubicle_client_t *client,
+    const char *workspace_id,
+    cubicle_manager_cleanup_result_t *result_out)
+{
+    if (client == NULL || result_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+
+    char params[1024];
+    if (workspace_id != NULL && workspace_id[0] != '\0') {
+        char escaped_workspace[CUBICLE_NAME_MAX * 2];
+        if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                                workspace_id) < 0) {
+            return set_error(client, CUBICLE_ERR_INVALID_ARGUMENT, 0,
+                             "workspace id is too long");
+        }
+        snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
+                 escaped_workspace);
+    } else {
+        snprintf(params, sizeof(params), "{}");
+    }
+
+    char result[256];
+    if (client_request(client, "manager.cleanup", params, result,
+                       sizeof(result)) != CUBICLE_OK) {
+        return client->last_error.code;
+    }
+    memset(result_out, 0, sizeof(*result_out));
+    if (cubicle_rpc_get_uint64(result, "removed_count",
+                               &result_out->removed_count) < 0 ||
+        cubicle_rpc_get_uint64(result, "skipped_live_count",
+                               &result_out->skipped_live_count) < 0 ||
+        cubicle_rpc_get_uint64(result, "failed_count",
+                               &result_out->failed_count) < 0) {
+        return set_error(client, CUBICLE_ERR_PROTOCOL, errno,
+                         "invalid manager.cleanup response");
+    }
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_manager_shutdown(cubicle_client_t *client,
                                               bool stop_managed_processes)
 {

@@ -76,6 +76,7 @@ static void print_usage(FILE *stream)
             "  cube ps\n"
             "  cube logs NAME\n"
             "  cube events\n"
+            "  cube cleanup\n"
             "  cube connect [--ro] NAME\n"
             "  cube stop NAME\n"
             "\n"
@@ -146,6 +147,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "stop") == 0 ||
            strcmp(command, "kill") == 0 ||
            strcmp(command, "remove") == 0 ||
+           strcmp(command, "cleanup") == 0 ||
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0 ||
            strcmp(command, "defaults") == 0;
@@ -768,6 +770,65 @@ static int process_list(const char *manager_socket,
             printf("%s\t%s\t%s\n", name, mode, state);
         }
     }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int process_cleanup(const char *manager_socket,
+                           const cube_options_t *options)
+{
+    char workspace[CUBICLE_NAME_MAX];
+    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+
+    char escaped_workspace[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                            workspace) < 0) {
+        fprintf(stderr, "cube: workspace name is too long\n");
+        return 2;
+    }
+
+    char params[1024];
+    snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
+             escaped_workspace);
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "manager.cleanup", params,
+                     &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid cleanup response\n");
+        return 2;
+    }
+
+    uint64_t removed_count = 0;
+    uint64_t skipped_live_count = 0;
+    if (json_u64_field(document.root, "removed_count",
+                       &removed_count) < 0 ||
+        json_u64_field(document.root, "skipped_live_count",
+                       &skipped_live_count) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid cleanup response\n");
+        return 2;
+    }
+
+    printf("Removed %llu processes\n", (unsigned long long)removed_count);
+    printf("Skipped %llu live processes\n",
+           (unsigned long long)skipped_live_count);
 
     cubicle_json_cleanup(&document);
     cleanup_rpc_response(&response);
@@ -2104,6 +2165,14 @@ int main(int argc, char **argv)
 
     if (strcmp(command, "ps") == 0) {
         return process_list(manager_socket, &options);
+    }
+
+    if (strcmp(command, "cleanup") == 0) {
+        if (command_index + 1 != argc) {
+            fprintf(stderr, "cube: cleanup does not take arguments\n");
+            return 2;
+        }
+        return process_cleanup(manager_socket, &options);
     }
 
     if (strcmp(command, "inspect") == 0) {

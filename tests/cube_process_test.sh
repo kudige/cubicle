@@ -251,6 +251,37 @@ if [ "$json_remove_output" != "{}" ]; then
     echo "unexpected process remove JSON output: $json_remove_output" >&2
     exit 1
 fi
+
+cleanup_workspace_id=$(api workspace-create "Cleanup Workspace" | json_id)
+cleanup_done_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-done /bin/true | json_id)
+api process-wait "$cleanup_done_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cleanup_live_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-live sleep 30 | json_id)
+cleanup_output=$(cube --workspace "Cleanup Workspace" cleanup)
+printf "%s\n" "$cleanup_output" | grep -q '^Removed 1 processes$'
+printf "%s\n" "$cleanup_output" | grep -q '^Skipped 1 live processes$'
+set +e
+cube --workspace "Cleanup Workspace" inspect cleanup-done \
+    >"$tmpdir/cleanup-done.out" 2>"$tmpdir/cleanup-done.err"
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "cleaned process inspect should exit 1, got $status" >&2
+    exit 1
+fi
+grep -q 'process not found' "$tmpdir/cleanup-done.err"
+cube --workspace "Cleanup Workspace" inspect cleanup-live \
+    >"$tmpdir/cleanup-live.out"
+grep -q '^State:       running$' "$tmpdir/cleanup-live.out"
+json_cleanup_output=$(cube --workspace "Cleanup Workspace" --json cleanup)
+printf "%s" "$json_cleanup_output" | grep -q '"removed_count":0'
+printf "%s" "$json_cleanup_output" | grep -q '"skipped_live_count":1'
+api process-kill "$cleanup_live_process_id" >/dev/null
+api process-wait "$cleanup_live_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube --workspace "Cleanup Workspace" cleanup >/dev/null
+cube workspace delete "Cleanup Workspace" >/dev/null
+
 set +e
 cube inspect remove-me >"$tmpdir/removed-inspect.out" 2>"$tmpdir/removed-inspect.err"
 status=$?

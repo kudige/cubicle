@@ -526,6 +526,75 @@ int main(void)
     assert(waited.state == CUBICLE_PROCESS_COMPLETED);
     assert(cubicle_process_remove(client, killed.id) == CUBICLE_OK);
 
+    cubicle_workspace_create_options_t cleanup_workspace_create;
+    memset(&cleanup_workspace_create, 0, sizeof(cleanup_workspace_create));
+    cleanup_workspace_create.name = "Cleanup Workspace";
+    cubicle_workspace_info_t cleanup_workspace;
+    memset(&cleanup_workspace, 0, sizeof(cleanup_workspace));
+    assert(cubicle_workspace_create(client, &cleanup_workspace_create,
+                                    &cleanup_workspace) == CUBICLE_OK);
+
+    const char *completed_cleanup_argv[] = {"/bin/true"};
+    cubicle_process_start_options_t cleanup_completed_options;
+    memset(&cleanup_completed_options, 0, sizeof(cleanup_completed_options));
+    cleanup_completed_options.workspace_id = cleanup_workspace.id;
+    cleanup_completed_options.friendly_name = "api-cleanup-completed";
+    cleanup_completed_options.mode = CUBICLE_PROCESS_STREAM;
+    cleanup_completed_options.stdin_policy = CUBICLE_STDIN_EOF;
+    cleanup_completed_options.argv = completed_cleanup_argv;
+    cleanup_completed_options.argc = 1;
+    cubicle_process_info_t cleanup_completed;
+    memset(&cleanup_completed, 0, sizeof(cleanup_completed));
+    assert(cubicle_process_start(client, &cleanup_completed_options,
+                                 &cleanup_completed) == CUBICLE_OK);
+    memset(&waited, 0, sizeof(waited));
+    assert(cubicle_process_wait(client, cleanup_completed.id, 5000,
+                                &waited) == CUBICLE_OK);
+
+    cubicle_process_start_options_t cleanup_live_options;
+    memset(&cleanup_live_options, 0, sizeof(cleanup_live_options));
+    cleanup_live_options.workspace_id = cleanup_workspace.id;
+    cleanup_live_options.friendly_name = "api-cleanup-live";
+    cleanup_live_options.mode = CUBICLE_PROCESS_STREAM;
+    cleanup_live_options.stdin_policy = CUBICLE_STDIN_EOF;
+    cleanup_live_options.argv = kill_argv;
+    cleanup_live_options.argc = sizeof(kill_argv) / sizeof(kill_argv[0]);
+    cubicle_process_info_t cleanup_live;
+    memset(&cleanup_live, 0, sizeof(cleanup_live));
+    assert(cubicle_process_start(client, &cleanup_live_options,
+                                 &cleanup_live) == CUBICLE_OK);
+
+    cubicle_manager_cleanup_result_t cleanup_result;
+    memset(&cleanup_result, 0, sizeof(cleanup_result));
+    // Endpoint test for manager.cleanup
+    assert(cubicle_manager_cleanup(client, cleanup_workspace.id,
+                                   &cleanup_result) == CUBICLE_OK);
+    assert(cleanup_result.removed_count == 1);
+    assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.failed_count == 0);
+    assert(cubicle_process_get(client, cleanup_completed.id, NULL,
+                               &process) == CUBICLE_ERR_NOT_FOUND);
+    memset(&process, 0, sizeof(process));
+    assert(cubicle_process_get(client, cleanup_live.id, NULL,
+                               &process) == CUBICLE_OK);
+    assert(process.state == CUBICLE_PROCESS_RUNNING);
+
+    assert(cubicle_process_kill(client, cleanup_live.id) == CUBICLE_OK);
+    memset(&waited, 0, sizeof(waited));
+    assert(cubicle_process_wait(client, cleanup_live.id, 5000,
+                                &waited) == CUBICLE_OK);
+    memset(&cleanup_result, 0, sizeof(cleanup_result));
+    assert(cubicle_manager_cleanup(client, cleanup_workspace.id,
+                                   &cleanup_result) == CUBICLE_OK);
+    assert(cleanup_result.removed_count == 1);
+    assert(cleanup_result.skipped_live_count == 0);
+
+    cubicle_workspace_delete_options_t cleanup_delete_options;
+    memset(&cleanup_delete_options, 0, sizeof(cleanup_delete_options));
+    cleanup_delete_options.remove_retained_processes = true;
+    assert(cubicle_workspace_delete(client, cleanup_workspace.id,
+                                    &cleanup_delete_options) == CUBICLE_OK);
+
     cubicle_workspace_create_options_t stop_workspace_create;
     memset(&stop_workspace_create, 0, sizeof(stop_workspace_create));
     stop_workspace_create.name = "Stop Workspace";

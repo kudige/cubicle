@@ -108,6 +108,40 @@ cubicle_error_code_t cubicle_manager_status(cubicle_client_t *client,
     return CUBICLE_OK;
 }
 
+cubicle_error_code_t cubicle_manager_cleanup(
+    cubicle_client_t *client,
+    const char *workspace_id,
+    cubicle_manager_cleanup_result_t *result_out)
+{
+    if (client == NULL || result_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{");
+    if (workspace_id != NULL && workspace_id[0] != '\0') {
+        cubicle_json_builder_append(&params, "\"workspace_id\":");
+        cubicle_json_builder_append_string(&params, workspace_id);
+    }
+    cubicle_json_builder_append(&params, "}");
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, "manager.cleanup",
+                                           params.data, &response);
+    cubicle_json_builder_cleanup(&params);
+    if (code != CUBICLE_OK) return code;
+    const char *result = result_object(client, response);
+    memset(result_out, 0, sizeof(*result_out));
+    if (json_u64_field(result, "removed_count",
+                       &result_out->removed_count) < 0 ||
+        json_u64_field(result, "skipped_live_count",
+                       &result_out->skipped_live_count) < 0 ||
+        json_u64_field(result, "failed_count",
+                       &result_out->failed_count) < 0) {
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                "invalid manager.cleanup result");
+    }
+    free(response);
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_manager_reconcile(cubicle_client_t *client)
 {
     if (client == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;

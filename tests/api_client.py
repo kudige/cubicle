@@ -71,6 +71,11 @@ def params_for_command(args):
         return "manager.ping", {}
     if command == "status":
         return "manager.status", {}
+    if command == "cleanup":
+        params = {}
+        if args.workspace is not None:
+            params["workspace_id"] = args.workspace
+        return "manager.cleanup", params
     if command == "shutdown":
         return "manager.shutdown", {}
     if command == "workspace-create":
@@ -251,6 +256,8 @@ def build_parser():
 
     subparsers.add_parser("ping")
     subparsers.add_parser("status")
+    cleanup = subparsers.add_parser("cleanup")
+    cleanup.add_argument("--workspace")
     subparsers.add_parser("shutdown")
 
     workspace_create = subparsers.add_parser("workspace-create")

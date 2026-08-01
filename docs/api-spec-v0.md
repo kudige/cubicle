@@ -433,6 +433,25 @@ Requests reconciliation of persistent manager records with live and retained con
 
 Requires manager administration authority.
 
+#### `manager.cleanup`
+
+Removes retained terminal process records and controller state. Live processes
+are never stopped or removed.
+
+Request:
+
+```text
+workspace_id            # optional; workspace name or id
+```
+
+Response:
+
+```text
+removed_count
+skipped_live_count
+failed_count
+```
+
 #### `manager.shutdown`
 
 Stops the manager daemon without stopping process controllers or managed processes unless an explicit separate option is supplied.
@@ -923,6 +942,16 @@ const cubicle_error_t *cubicle_manager_last_error(
     const cubicle_manager_t *manager);
 ```
 
+Manager:
+
+```c
+cubicle_error_code_t cubicle_manager_ping(...);
+cubicle_error_code_t cubicle_manager_status(...);
+cubicle_error_code_t cubicle_manager_cleanup(...);
+cubicle_error_code_t cubicle_manager_reconcile(...);
+cubicle_error_code_t cubicle_manager_shutdown(...);
+```
+
 Workspace:
 
 ```c
@@ -1094,6 +1123,7 @@ The first parallel manager/library milestone should implement:
 ```text
 manager.ping
 manager.status
+manager.cleanup
 
 workspace.create
 workspace.get

@@ -171,6 +171,14 @@ printf "%s" "$events_list_response" | grep -q '"type": "process_started"'
 printf "%s" "$events_list_response" | grep -q '"type": "output_available"'
 printf "%s" "$events_list_response" | grep -q '"type": "process_exited"'
 
+# Endpoint test for manager.cleanup
+cleanup_response=$(send_manager_rpc manager.cleanup "{\"workspace_id\":\"$workspace_id\"}")
+printf "%s" "$cleanup_response" | grep -q '"success": true'
+printf "%s" "$cleanup_response" | grep -q '"removed_count": 1'
+printf "%s" "$cleanup_response" | grep -q '"skipped_live_count": 0'
+process_list_after_cleanup=$(send_manager_rpc process.list "{\"workspace_id\":\"$workspace_id\"}")
+printf "%s" "$process_list_after_cleanup" | grep -q '"count": 0'
+
 # Endpoint test for unsupported endpoint error response
 unknown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error call unknown)

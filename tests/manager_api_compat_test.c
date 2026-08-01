@@ -43,6 +43,10 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
         // Endpoint test for manager.ping
         assert(cubicle_rpc_success(response, sizeof(response), "c2",
                                    "{\"manager_id\":\"manager-1\",\"protocol_major\":0,\"protocol_minor\":1,\"server_time_ms\":20,\"uptime_ms\":10}") == 0);
+    } else if (strstr(request_json, "\"manager.cleanup\"") != NULL) {
+        // Endpoint test for manager.cleanup
+        assert(cubicle_rpc_success(response, sizeof(response), "cCleanup",
+                                   "{\"removed_count\":2,\"skipped_live_count\":1,\"failed_count\":0}") == 0);
     } else if (strstr(request_json, "\"workspace.create\"") != NULL) {
         // Endpoint test for workspace.create
         assert(cubicle_rpc_success(response, sizeof(response), "c3",
@@ -132,6 +136,15 @@ int main(void)
     assert(ping_result.protocol_minor == 1);
     assert(ping_result.server_time_ms == 20);
     assert(ping_result.uptime_ms == 10);
+
+    cubicle_manager_cleanup_result_t cleanup_result;
+    memset(&cleanup_result, 0, sizeof(cleanup_result));
+    // Endpoint test for manager.cleanup
+    assert(cubicle_manager_cleanup(client, "workspace-1",
+                                   &cleanup_result) == CUBICLE_OK);
+    assert(cleanup_result.removed_count == 2);
+    assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.failed_count == 0);
 
     cubicle_workspace_create_options_t create_options = {
         .name = "Project A",

@@ -392,6 +392,7 @@ cube signal NAME SIGNAL
 cube stop NAME
 cube kill NAME
 cube remove NAME
+cube cleanup
 ```
 
 Recommended semantics:
@@ -400,6 +401,7 @@ Recommended semantics:
 - `stop`: request graceful termination, then optionally force after configured grace.
 - `kill`: immediate forceful termination.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
+- `cleanup`: remove retained terminal process state in the current workspace; skip live processes.
 
 Output/history commands:
 
@@ -647,6 +649,7 @@ Implement:
 - `cube stop NAME`
 - `cube kill NAME`
 - `cube remove NAME`
+- `cube cleanup`
 - explicit `--workspace NAME`
 - generated friendly names and collision handling
 - standard built-in defaults:

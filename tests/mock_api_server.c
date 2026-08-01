@@ -113,6 +113,10 @@ static char *manager_response(const char *request, const char *request_id,
         return format_success(request_id,
             "{\"workspaces\":[{\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"name\":\"default\",\"created_at_ms\":1,\"updated_at_ms\":2}],\"continuation_token\":\"next\",\"has_more\":true}");
     }
+    if (has_method(request, "manager.cleanup")) {
+        return format_success(request_id,
+            "{\"removed_count\":2,\"skipped_live_count\":1,\"failed_count\":0}");
+    }
     if (has_method(request, "process.start") ||
         has_method(request, "process.get") ||
         has_method(request, "process.wait")) {

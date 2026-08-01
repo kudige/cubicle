@@ -1519,18 +1519,26 @@ static int process_event_log_has_exit(const manager_state_t *state,
     return 0;
 }
 
+static int process_observed_terminal_state(const manager_state_t *state,
+                                           const cubicle_process_record_t *process,
+                                           char *state_out,
+                                           size_t state_out_size)
+{
+    snprintf(state_out, state_out_size, "%s", process->state);
+    if (!process_is_terminal_state(state_out) &&
+        controller_status_state(process, state_out, state_out_size) < 0 &&
+        process_event_log_has_exit(state, process->process_id)) {
+        snprintf(state_out, state_out_size, "completed");
+    }
+    return process_is_terminal_state(state_out);
+}
+
 static void refresh_observed_process_state(const manager_state_t *state,
                                            cubicle_process_record_t *process)
 {
     char latest_state[32];
-    snprintf(latest_state, sizeof(latest_state), "%s", process->state);
-    if (!process_is_terminal_state(latest_state) &&
-        controller_status_state(process, latest_state,
-                                sizeof(latest_state)) < 0 &&
-        process_event_log_has_exit(state, process->process_id)) {
-        snprintf(latest_state, sizeof(latest_state), "completed");
-    }
-    if (process_is_terminal_state(latest_state)) {
+    if (process_observed_terminal_state(state, process, latest_state,
+                                        sizeof(latest_state))) {
         snprintf(process->state, sizeof(process->state), "%s", latest_state);
     }
 }
@@ -3232,6 +3240,141 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
         unlock_state(lock_fd);
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "manager.cleanup") == 0) {
+        char workspace_ref[128];
+        char workspace_id[CUBICLE_ID_STRING_LENGTH] = "";
+        int has_workspace_ref = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid cleanup request",
+                                             false, 0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
+            cubicle_workspace_record_t workspace;
+            if (find_workspace(state, workspace_ref, &workspace) < 0) {
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
+            }
+            snprintf(workspace_id, sizeof(workspace_id), "%s",
+                     workspace.id);
+        }
+
+        typedef struct cleanup_candidate {
+            char process_id[CUBICLE_ID_STRING_LENGTH];
+        } cleanup_candidate_t;
+
+        cleanup_candidate_t *candidates = NULL;
+        size_t candidate_count = 0;
+        size_t candidate_capacity = 0;
+        size_t skipped_live_count = 0;
+        FILE *file = open_state_file_for_read(state, "processes.tsv");
+        if (file != NULL) {
+            char line[PATH_MAX + 512];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                cubicle_process_record_t process;
+                if (cubicle_parse_process_record(line, &process) != 0 ||
+                    (workspace_id[0] != '\0' &&
+                     strcmp(process.workspace_id, workspace_id) != 0)) {
+                    continue;
+                }
+
+                char latest_state[32];
+                if (!process_observed_terminal_state(state, &process,
+                                                     latest_state,
+                                                     sizeof(latest_state))) {
+                    ++skipped_live_count;
+                    continue;
+                }
+
+                if (candidate_count == candidate_capacity) {
+                    size_t new_capacity = candidate_capacity == 0
+                                              ? 16
+                                              : candidate_capacity * 2;
+                    cleanup_candidate_t *new_candidates = realloc(
+                        candidates,
+                        new_capacity * sizeof(*new_candidates));
+                    if (new_candidates == NULL) {
+                        int saved_errno = errno;
+                        fclose(file);
+                        free(candidates);
+                        unlock_state(lock_fd);
+                        MANAGER_RETURN(manager_api_error(
+                            client_fd, request_id, CUBICLE_ERR_INTERNAL,
+                            "failed to allocate cleanup candidates",
+                            false, saved_errno));
+                    }
+                    candidates = new_candidates;
+                    candidate_capacity = new_capacity;
+                }
+                snprintf(candidates[candidate_count].process_id,
+                         sizeof(candidates[candidate_count].process_id),
+                         "%s", process.process_id);
+                ++candidate_count;
+            }
+            fclose(file);
+        }
+
+        size_t removed_count = 0;
+        for (size_t i = 0; i < candidate_count; ++i) {
+            int found = 0;
+            if (rewrite_process_records(state, candidates[i].process_id,
+                                        NULL, 1, &found) < 0) {
+                int saved_errno = errno;
+                free(candidates);
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(
+                    client_fd, request_id, CUBICLE_ERR_IO,
+                    "failed to remove cleanup process", true,
+                    saved_errno));
+            }
+            char controller_state[PATH_MAX];
+            if (controller_state_path(controller_state, state,
+                                      candidates[i].process_id) < 0 ||
+                remove_tree(controller_state) < 0) {
+                int saved_errno = errno;
+                free(candidates);
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(
+                    client_fd, request_id, CUBICLE_ERR_IO,
+                    "failed to remove cleanup process state", true,
+                    saved_errno));
+            }
+            if (found) {
+                ++removed_count;
+            }
+        }
+        free(candidates);
+        unlock_state(lock_fd);
+
+        char result[256];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"removed_count\":%zu,\"skipped_live_count\":%zu,\"failed_count\":0}",
+            removed_count, skipped_live_count);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(-1);
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "workspace.key.add") == 0) {

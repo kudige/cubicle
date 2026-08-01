@@ -247,7 +247,7 @@ static void run_manager_integration(const char *directory,
     }
 
     pid_t manager_pid = start_server(kind, directory, "manager", manager_log,
-                                     "manager", "normal", controller_uri, 25,
+                                     "manager", "normal", controller_uri, 26,
                                      manager_uri, sizeof(manager_uri));
     cubicle_client_t *client = connect_client(kind, manager_uri);
 
@@ -263,6 +263,13 @@ static void run_manager_integration(const char *directory,
 
     // Endpoint test for manager.reconcile
     assert(cubicle_manager_reconcile(client) == CUBICLE_OK);
+
+    cubicle_manager_cleanup_result_t cleanup_result;
+    // Endpoint test for manager.cleanup
+    assert(cubicle_manager_cleanup(client, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                   &cleanup_result) == CUBICLE_OK);
+    assert(cleanup_result.removed_count == 2);
+    assert(cleanup_result.skipped_live_count == 1);
 
     cubicle_workspace_create_options_t create = {
         .name = "default",
@@ -419,6 +426,7 @@ static void run_manager_integration(const char *directory,
         "\"method\":\"manager.ping\"",
         "\"method\":\"manager.status\"",
         "\"method\":\"manager.reconcile\"",
+        "\"method\":\"manager.cleanup\"",
         "\"method\":\"manager.shutdown\"",
         "\"method\":\"workspace.create\"",
         "\"method\":\"workspace.get\"",
