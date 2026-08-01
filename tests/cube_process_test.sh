@@ -83,6 +83,24 @@ cube run --stream --name fg-run sh -c \
     >"$tmpdir/fg-run.out" 2>"$tmpdir/fg-run.err"
 grep -q '^fg-out$' "$tmpdir/fg-run.out"
 grep -q '^fg-err$' "$tmpdir/fg-run.err"
+cube logs fg-run >"$tmpdir/fg-run-logs.out" 2>"$tmpdir/fg-run-logs.err"
+grep -q '^fg-out$' "$tmpdir/fg-run-logs.out"
+grep -q '^fg-err$' "$tmpdir/fg-run-logs.err"
+for _ in $(seq 1 100); do
+    cube events >"$tmpdir/events.out"
+    if grep -q 'process_exited' "$tmpdir/events.out"; then
+        break
+    fi
+    sleep 0.05
+done
+grep -q '^Workspace Project A$' "$tmpdir/events.out"
+grep -q '^SEQ	PROCESS	TYPE	PAYLOAD$' "$tmpdir/events.out"
+grep -q 'process_started' "$tmpdir/events.out"
+grep -q 'output_available' "$tmpdir/events.out"
+grep -q 'process_exited' "$tmpdir/events.out"
+json_events_output=$(cube --json events)
+printf "%s" "$json_events_output" | grep -q '"events"'
+printf "%s" "$json_events_output" | grep -q '"count"'
 output=$(cube remove fg-run)
 if [ "$output" != "Process fg-run removed" ]; then
     echo "unexpected foreground process remove output: $output" >&2
@@ -218,6 +236,26 @@ fi
 grep -q 'foreground tty attach is not implemented yet' "$tmpdir/run-tty-fg.err"
 cube ps >"$tmpdir/after-tty-fg-ps.out"
 grep -q '^Workspace Project A$' "$tmpdir/after-tty-fg-ps.out"
+
+set +e
+cube logs --follow build >"$tmpdir/logs-follow.out" 2>"$tmpdir/logs-follow.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube logs --follow should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'logs --follow is not implemented yet' "$tmpdir/logs-follow.err"
+
+set +e
+cube events --follow >"$tmpdir/events-follow.out" 2>"$tmpdir/events-follow.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube events --follow should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'events --follow is not implemented yet' "$tmpdir/events-follow.err"
 
 set +e
 cube run >"$tmpdir/run-missing.out" 2>"$tmpdir/run-missing.err"
