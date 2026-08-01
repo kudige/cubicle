@@ -79,6 +79,23 @@ def params_for_command(args):
         return "workspace.get", {"workspace": args.workspace}
     if command == "workspace-list":
         return "workspace.list", {}
+    if command == "workspace-rename":
+        return "workspace.rename", {
+            "workspace_id": args.workspace,
+            "new_name": args.new_name,
+        }
+    if command == "workspace-stop":
+        return "workspace.stop", {
+            "workspace_id": args.workspace,
+            "grace_period_ms": args.grace_period_ms,
+            "force_after_grace": args.force_after_grace,
+        }
+    if command == "workspace-delete":
+        return "workspace.delete", {
+            "workspace_id": args.workspace,
+            "stop_running_processes": args.stop_running_processes,
+            "remove_retained_processes": args.remove_retained_processes,
+        }
     if command == "process-get":
         params = {"process": args.process}
         if args.workspace is not None:
@@ -132,6 +149,12 @@ def params_for_command(args):
         }
     if command == "workspace-key-list":
         return "workspace.key.list", {"workspace_id": args.workspace}
+    if command == "workspace-key-update":
+        return "workspace.key.update", {
+            "workspace_id": args.workspace,
+            "key_id": args.key,
+            "capabilities": args.capabilities,
+        }
     if command == "workspace-key-revoke":
         return "workspace.key.revoke", {
             "workspace_id": args.workspace,
@@ -228,6 +251,23 @@ def build_parser():
 
     subparsers.add_parser("workspace-list")
 
+    workspace_rename = subparsers.add_parser("workspace-rename")
+    workspace_rename.add_argument("workspace")
+    workspace_rename.add_argument("new_name")
+
+    workspace_stop = subparsers.add_parser("workspace-stop")
+    workspace_stop.add_argument("workspace")
+    workspace_stop.add_argument("--grace-period-ms", type=int, default=0)
+    workspace_stop.add_argument("--force-after-grace",
+                                action="store_true")
+
+    workspace_delete = subparsers.add_parser("workspace-delete")
+    workspace_delete.add_argument("workspace")
+    workspace_delete.add_argument("--stop-running-processes",
+                                  action="store_true")
+    workspace_delete.add_argument("--remove-retained-processes",
+                                  action="store_true")
+
     process_get = subparsers.add_parser("process-get")
     process_get.add_argument("process")
     process_get.add_argument("--workspace")
@@ -274,6 +314,11 @@ def build_parser():
 
     workspace_key_list = subparsers.add_parser("workspace-key-list")
     workspace_key_list.add_argument("workspace")
+
+    workspace_key_update = subparsers.add_parser("workspace-key-update")
+    workspace_key_update.add_argument("workspace")
+    workspace_key_update.add_argument("key")
+    workspace_key_update.add_argument("--capabilities", type=int, required=True)
 
     workspace_key_revoke = subparsers.add_parser("workspace-key-revoke")
     workspace_key_revoke.add_argument("workspace")

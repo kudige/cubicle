@@ -404,6 +404,65 @@ static int workspace_name_exists(const manager_state_t *state, const char *name)
     return find_workspace(state, name, &record) == 0;
 }
 
+static int rewrite_workspace_records(const manager_state_t *state,
+                                     const char *workspace_id,
+                                     const char *new_name,
+                                     int remove_record,
+                                     int *found)
+{
+    *found = 0;
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "workspaces.tsv") < 0) {
+        return -1;
+    }
+    int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *input = fopen(path, "r");
+    FILE *output = fopen(temp_path, "w");
+    if (output == NULL) {
+        if (input != NULL) {
+            fclose(input);
+        }
+        return -1;
+    }
+
+    if (input != NULL) {
+        char line[512];
+        while (fgets(line, sizeof(line), input) != NULL) {
+            cubicle_workspace_record_t record;
+            if (cubicle_parse_workspace_record(line, &record) != 0) {
+                continue;
+            }
+            if (strcmp(record.id, workspace_id) == 0) {
+                *found = 1;
+                if (remove_record) {
+                    continue;
+                }
+                if (new_name != NULL) {
+                    snprintf(record.name, sizeof(record.name), "%s",
+                             new_name);
+                }
+            }
+            if (fprintf(output, "%s\t%s\n", record.id, record.name) < 0) {
+                fclose(input);
+                fclose(output);
+                return -1;
+            }
+        }
+        fclose(input);
+    }
+
+    if (fclose(output) != 0) {
+        return -1;
+    }
+    return rename(temp_path, path);
+}
+
 static int count_processes_for_workspace(const manager_state_t *state,
                                          const char *workspace_id,
                                          size_t *process_count,
@@ -717,6 +776,57 @@ static int workspace_key_info_json(const workspace_key_record_t *record,
         return -1;
     }
     return 0;
+}
+
+static int update_workspace_key_capabilities(const manager_state_t *state,
+                                             const char *workspace_id,
+                                             const char *key_id,
+                                             cubicle_capability_mask_t capabilities,
+                                             int *found)
+{
+    *found = 0;
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "workspace-keys.tsv") < 0) {
+        return -1;
+    }
+    int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *input = fopen(path, "r");
+    FILE *output = fopen(temp_path, "w");
+    if (output == NULL) {
+        if (input != NULL) {
+            fclose(input);
+        }
+        return -1;
+    }
+    if (input != NULL) {
+        char line[1024];
+        while (fgets(line, sizeof(line), input) != NULL) {
+            workspace_key_record_t record;
+            if (parse_workspace_key_record(line, &record) == 0) {
+                if (strcmp(record.workspace_id, workspace_id) == 0 &&
+                    strcmp(record.key_id, key_id) == 0) {
+                    record.capabilities = capabilities;
+                    *found = 1;
+                }
+                if (write_workspace_key_record(output, &record) < 0) {
+                    fclose(input);
+                    fclose(output);
+                    return -1;
+                }
+            }
+        }
+        fclose(input);
+    }
+    if (fclose(output) != 0) {
+        return -1;
+    }
+    return rename(temp_path, path);
 }
 
 static int update_workspace_key_revocation(const manager_state_t *state,
@@ -2318,6 +2428,199 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
+    if (strcmp(method, "workspace.rename") == 0) {
+        char workspace_ref[128];
+        char new_name[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "new_name", new_name,
+                                             sizeof(new_name),
+                                             &validation_error) < 0 ||
+            validate_field(new_name, "workspace name") < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace rename request",
+                                             false, 0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        cubicle_workspace_record_t existing;
+        if (find_workspace(state, new_name, &existing) == 0 &&
+            strcmp(existing.id, workspace.id) != 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_ALREADY_EXISTS,
+                                             "workspace name already exists",
+                                             false, 0));
+        }
+        int found = 0;
+        if (rewrite_workspace_records(state, workspace.id, new_name, 0,
+                                      &found) < 0 || !found) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to rename workspace",
+                                             true, saved_errno));
+        }
+        unlock_state(lock_fd);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "workspace.stop") == 0 ||
+        strcmp(method, "workspace.delete") == 0) {
+        char workspace_ref[128];
+        bool stop_running_processes = false;
+        bool remove_retained_processes = false;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_bool(params, "stop_running_processes",
+                                           &stop_running_processes, NULL,
+                                           &validation_error) < 0 ||
+            cubicle_json_get_optional_bool(params, "remove_retained_processes",
+                                           &remove_retained_processes, NULL,
+                                           &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace lifecycle request",
+                                             false, 0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+
+        FILE *processes = open_state_file_for_read(state, "processes.tsv");
+        char process_ids_to_remove[256][CUBICLE_ID_STRING_LENGTH];
+        size_t remove_count = 0;
+        int live_count = 0;
+        int action_failed = 0;
+        if (processes != NULL) {
+            char line[PATH_MAX + 512];
+            while (fgets(line, sizeof(line), processes) != NULL) {
+                cubicle_process_record_t process;
+                if (cubicle_parse_process_record(line, &process) != 0 ||
+                    strcmp(process.workspace_id, workspace.id) != 0) {
+                    continue;
+                }
+                char latest_state[32];
+                snprintf(latest_state, sizeof(latest_state), "%s",
+                         process.state);
+                if (!process_is_terminal_state(latest_state) &&
+                    controller_status_state(&process, latest_state,
+                                            sizeof(latest_state)) < 0 &&
+                    process_event_log_has_exit(state, process.process_id)) {
+                    snprintf(latest_state, sizeof(latest_state),
+                             "completed");
+                }
+                if (!process_is_terminal_state(latest_state)) {
+                    ++live_count;
+                    if (strcmp(method, "workspace.stop") == 0 ||
+                        stop_running_processes) {
+                        if (terminate_controller(&process) < 0) {
+                            action_failed = 1;
+                        }
+                    }
+                }
+                if (remove_retained_processes && remove_count < 256) {
+                    snprintf(process_ids_to_remove[remove_count],
+                             sizeof(process_ids_to_remove[remove_count]), "%s",
+                             process.process_id);
+                    ++remove_count;
+                }
+            }
+            fclose(processes);
+        }
+
+        if (action_failed) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_CONTROLLER_UNAVAILABLE,
+                                             "failed to stop workspace process",
+                                             true, errno));
+        }
+        if (strcmp(method, "workspace.delete") == 0 &&
+            live_count > 0 && !stop_running_processes) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_STATE,
+                                             "workspace has live processes",
+                                             false, 0));
+        }
+
+        if (strcmp(method, "workspace.delete") == 0) {
+            int found = 0;
+            if (rewrite_workspace_records(state, workspace.id, NULL, 1,
+                                          &found) < 0 || !found) {
+                int saved_errno = errno;
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_IO,
+                                                 "failed to delete workspace",
+                                                 true, saved_errno));
+            }
+            if (remove_retained_processes) {
+                for (size_t i = 0; i < remove_count; ++i) {
+                    int process_found = 0;
+                    if (rewrite_process_records(state, process_ids_to_remove[i],
+                                                NULL, 1, &process_found) < 0) {
+                        int saved_errno = errno;
+                        unlock_state(lock_fd);
+                        MANAGER_RETURN(manager_api_error(
+                            client_fd, request_id, CUBICLE_ERR_IO,
+                            "failed to delete workspace processes", true,
+                            saved_errno));
+                    }
+                    char controller_state[PATH_MAX];
+                    if (controller_state_path(controller_state, state,
+                                              process_ids_to_remove[i]) < 0 ||
+                        remove_tree(controller_state) < 0) {
+                        int saved_errno = errno;
+                        unlock_state(lock_fd);
+                        MANAGER_RETURN(manager_api_error(
+                            client_fd, request_id, CUBICLE_ERR_IO,
+                            "failed to delete controller state", true,
+                            saved_errno));
+                    }
+                }
+            }
+        }
+        unlock_state(lock_fd);
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
     if (strcmp(method, "process.get") == 0) {
         char process_ref[128];
         char workspace_ref[128];
@@ -3013,6 +3316,60 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 "key list response too large", false, 0));
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.key.update") == 0) {
+        char workspace_ref[128];
+        char key_id[128];
+        uint64_t capabilities = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "key_id", key_id,
+                                             sizeof(key_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "capabilities",
+                                          &capabilities,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key update request",
+                                             false, 0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        if (update_workspace_key_capabilities(
+                state, workspace.id, key_id,
+                (cubicle_capability_mask_t)capabilities, &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to update key", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        if (!found) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "key not found", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
     if (strcmp(method, "workspace.key.revoke") == 0) {

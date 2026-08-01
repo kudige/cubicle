@@ -338,6 +338,14 @@ int main(void)
     assert(workspace_count == 2);
     cubicle_workspace_list_free(workspaces);
 
+    // Endpoint test for workspace.rename
+    assert(cubicle_workspace_rename(client, workspace.id, "Project C",
+                                    NULL) == CUBICLE_OK);
+    memset(&workspace, 0, sizeof(workspace));
+    assert(cubicle_workspace_get(client, "Project C", &workspace) ==
+           CUBICLE_OK);
+    assert(strcmp(workspace.name, "Project C") == 0);
+
     unsigned char owner_key[] = { 0xab, 0xcd, 0xef };
     cubicle_workspace_key_info_t key;
     memset(&key, 0, sizeof(key));
@@ -349,12 +357,20 @@ int main(void)
                                      &key) == CUBICLE_OK);
     assert(strcmp(key.label, "owner") == 0);
 
+    // Endpoint test for workspace.key.update
+    assert(cubicle_workspace_key_set_capabilities(
+               client, workspace_id, key.key_id,
+               CUBICLE_CAP_WORKSPACE_READ | CUBICLE_CAP_PROCESS_START) ==
+           CUBICLE_OK);
+
     cubicle_workspace_key_info_t *keys = NULL;
     size_t key_count = 0;
     // Endpoint test for workspace.key.list
     assert(cubicle_workspace_key_list(client, workspace_id, &keys,
                                       &key_count) == CUBICLE_OK);
     assert(key_count == 1);
+    assert(keys[0].capabilities ==
+           (CUBICLE_CAP_WORKSPACE_READ | CUBICLE_CAP_PROCESS_START));
     cubicle_workspace_key_list_free(keys);
 
     // Endpoint test for workspace.key.revoke
@@ -497,6 +513,45 @@ int main(void)
            CUBICLE_OK);
     assert(waited.state == CUBICLE_PROCESS_COMPLETED);
     assert(cubicle_process_remove(client, killed.id) == CUBICLE_OK);
+
+    cubicle_workspace_create_options_t stop_workspace_create;
+    memset(&stop_workspace_create, 0, sizeof(stop_workspace_create));
+    stop_workspace_create.name = "Stop Workspace";
+    cubicle_workspace_info_t stop_workspace;
+    memset(&stop_workspace, 0, sizeof(stop_workspace));
+    assert(cubicle_workspace_create(client, &stop_workspace_create,
+                                    &stop_workspace) == CUBICLE_OK);
+
+    cubicle_process_start_options_t stop_start_options;
+    memset(&stop_start_options, 0, sizeof(stop_start_options));
+    stop_start_options.workspace_id = stop_workspace.id;
+    stop_start_options.friendly_name = "api-stopped";
+    stop_start_options.mode = CUBICLE_PROCESS_STREAM;
+    stop_start_options.stdin_policy = CUBICLE_STDIN_EOF;
+    stop_start_options.argv = kill_argv;
+    stop_start_options.argc = sizeof(kill_argv) / sizeof(kill_argv[0]);
+    cubicle_process_info_t stopped;
+    memset(&stopped, 0, sizeof(stopped));
+    assert(cubicle_process_start(client, &stop_start_options, &stopped) ==
+           CUBICLE_OK);
+
+    // Endpoint test for workspace.stop
+    assert(cubicle_workspace_stop(client, stop_workspace.id, NULL) ==
+           CUBICLE_OK);
+    memset(&waited, 0, sizeof(waited));
+    assert(cubicle_process_wait(client, stopped.id, 5000, &waited) ==
+           CUBICLE_OK);
+    assert(waited.state == CUBICLE_PROCESS_COMPLETED);
+    assert(cubicle_process_remove(client, stopped.id) == CUBICLE_OK);
+
+    cubicle_workspace_delete_options_t delete_options;
+    memset(&delete_options, 0, sizeof(delete_options));
+    delete_options.remove_retained_processes = true;
+    // Endpoint test for workspace.delete
+    assert(cubicle_workspace_delete(client, stop_workspace.id,
+                                    &delete_options) == CUBICLE_OK);
+    assert(cubicle_workspace_delete(client, workspace.id,
+                                    &delete_options) == CUBICLE_OK);
 
     cubicle_client_disconnect(client);
 
