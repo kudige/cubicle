@@ -139,6 +139,32 @@ def params_for_command(args):
             "rows": args.rows,
             "cols": args.cols,
         }
+    if command == "controller-status":
+        return "controller.status", {}
+    if command == "controller-attach":
+        return "controller.attach", {
+            "token": args.token,
+            "channels": args.channels,
+            "mode": args.mode,
+        }
+    if command == "controller-read":
+        return "controller.read", {
+            "stream": args.stream,
+            "offset": args.offset,
+            "maximum_length": args.maximum_length,
+        }
+    if command == "controller-write":
+        return "controller.write", {
+            "channel": args.channel,
+            "data": args.data,
+        }
+    if command == "controller-resize":
+        return "controller.resize", {
+            "rows": args.rows,
+            "columns": args.columns,
+        }
+    if command == "controller-detach":
+        return "controller.detach", {}
     if command == "events-list":
         params = {
             "after_sequence": args.after,
@@ -245,6 +271,33 @@ def build_parser():
     attachment_request.add_argument("--tty-offset", type=int, default=0)
     attachment_request.add_argument("--rows", type=int, default=0)
     attachment_request.add_argument("--cols", type=int, default=0)
+
+    subparsers.add_parser("controller-status")
+
+    controller_attach = subparsers.add_parser("controller-attach")
+    controller_attach.add_argument("token")
+    controller_attach.add_argument("--channels", type=int, required=True)
+    controller_attach.add_argument("--mode", choices=("observer",
+                                                      "interactive"),
+                                   default="observer")
+
+    controller_read = subparsers.add_parser("controller-read")
+    controller_read.add_argument("stream", choices=("stdout", "stderr",
+                                                    "tty"))
+    controller_read.add_argument("--offset", type=int, required=True)
+    controller_read.add_argument("--max", dest="maximum_length", type=int,
+                                 default=65536)
+
+    controller_write = subparsers.add_parser("controller-write")
+    controller_write.add_argument("data")
+    controller_write.add_argument("--channel", choices=("stdin", "tty"),
+                                  default="stdin")
+
+    controller_resize = subparsers.add_parser("controller-resize")
+    controller_resize.add_argument("rows", type=int)
+    controller_resize.add_argument("columns", type=int)
+
+    subparsers.add_parser("controller-detach")
 
     events_list = subparsers.add_parser("events-list")
     events_list.add_argument("--workspace")

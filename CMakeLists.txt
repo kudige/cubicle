@@ -69,6 +69,7 @@ add_executable(cubicle-controller
 )
 
 target_link_libraries(cubicle-controller PRIVATE cubicle_common)
+target_include_directories(cubicle-controller PRIVATE third_party/yyjson)
 
 target_compile_options(cubicle-controller PRIVATE
     -Wall
@@ -306,6 +307,15 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_control_socket_path_test.sh
+)
+
+add_test(
+    NAME cubicle-controller-api-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_api_test.sh
 )
 
 add_test(

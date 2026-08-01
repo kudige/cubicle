@@ -2,8 +2,13 @@
 
 #include "internal.h"
 
+#include "../common/json.h"
+#include "../common/rpc_internal.h"
+
+#include "cubicle/rpc.h"
 #include "cubicle/util.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -143,12 +148,59 @@ static int enqueue_error_response(control_client_t *client, const char *message)
     return enqueue_response(client, response, (size_t)length);
 }
 
+static int enqueue_api_frame(control_client_t *client, const char *json)
+{
+    size_t length = strlen(json);
+    if (length > UINT32_MAX ||
+        length + sizeof(uint32_t) > sizeof(client->response)) {
+        errno = ENOBUFS;
+        return -1;
+    }
+
+    uint32_t length_network = htonl((uint32_t)length);
+    client->kind = CONTROL_CLIENT_RESPONDING;
+    return enqueue_response(client, (const char *)&length_network,
+                            sizeof(length_network)) == 0 &&
+                   enqueue_response(client, json, length) == 0
+               ? 0
+               : -1;
+}
+
+static int enqueue_api_error(control_client_t *client,
+                             const char *request_id,
+                             cubicle_error_code_t code,
+                             const char *message,
+                             int retryable,
+                             int system_errno)
+{
+    char response[2048];
+    if (cubicle_rpc_error(response, sizeof(response), request_id, code,
+                          message, retryable, system_errno) < 0) {
+        return -1;
+    }
+    return enqueue_api_frame(client, response);
+}
+
+static int enqueue_api_success(control_client_t *client,
+                               const char *request_id,
+                               const char *result)
+{
+    char response[4096];
+    if (cubicle_rpc_success(response, sizeof(response), request_id,
+                            result) < 0) {
+        return -1;
+    }
+    return enqueue_api_frame(client, response);
+}
+
 void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS])
 {
     for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
         clients[i].fd = -1;
         clients[i].kind = CONTROL_CLIENT_EMPTY;
         clients[i].request_length = 0;
+        clients[i].framed_request = 0;
+        clients[i].framed_length = 0;
         clients[i].response_length = 0;
         clients[i].response_offset = 0;
     }
@@ -170,6 +222,8 @@ void close_control_client(control_client_t *client, controller_state_t *state)
     client->fd = -1;
     client->kind = CONTROL_CLIENT_EMPTY;
     client->request_length = 0;
+    client->framed_request = 0;
+    client->framed_length = 0;
     client->response_length = 0;
     client->response_offset = 0;
 }
@@ -461,6 +515,364 @@ static int write_events_after_response(control_client_t *client,
     return 0;
 }
 
+static int read_stream_json(const controller_state_t *state,
+                            const char *stream,
+                            uint64_t offset,
+                            uint64_t maximum_length,
+                            char *result,
+                            size_t result_size)
+{
+    if (maximum_length > 8192) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    const char *file_name = stream_file_name(stream);
+    long long available_offset = stream_available_offset(state, stream);
+    if (file_name == NULL || available_offset < 0 ||
+        offset > (uint64_t)available_offset) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char path[PATH_MAX];
+    if (make_state_file_path(path, state->dir, file_name) < 0) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    uint64_t available = (uint64_t)available_offset - offset;
+    size_t read_length = available < maximum_length ? (size_t)available
+                                                    : (size_t)maximum_length;
+    char data[8193];
+    size_t total = 0;
+    while (total < read_length) {
+        ssize_t nread = pread(fd, data + total, read_length - total,
+                              (off_t)(offset + total));
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        total += (size_t)nread;
+    }
+    close(fd);
+    data[total] = '\0';
+
+    char escaped_data[65536];
+    if (cubicle_json_escape(escaped_data, sizeof(escaped_data), data) < 0) {
+        return -1;
+    }
+
+    int length = snprintf(result, result_size,
+                          "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":\"%s\",\"length\":%zu}",
+                          (unsigned long long)offset,
+                          (unsigned long long)(offset + total),
+                          offset + total >= (uint64_t)available_offset
+                              ? "true"
+                              : "false",
+                          escaped_data, total);
+    if (length < 0 || (size_t)length >= result_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+static int dispatch_api_request(control_client_t *client,
+                                controller_state_t *state,
+                                pid_t child_pid,
+                                int child_stdin_fd,
+                                int resize_fd,
+                                terminal_size_state_t *terminal_size,
+                                int process_completed,
+                                int child_result)
+{
+    cubicle_rpc_request_envelope_t envelope;
+    char request_id[64] = "";
+    if (cubicle_rpc_decode_request(&envelope, client->request) < 0) {
+        return enqueue_api_error(client, request_id, CUBICLE_ERR_PROTOCOL,
+                                 "invalid request envelope", false, 0);
+    }
+    snprintf(request_id, sizeof(request_id), "%s", envelope.request_id);
+    yyjson_val *params = envelope.params;
+
+#define CONTROLLER_API_RETURN(expression) do { \
+        int cubicle_controller_result__ = (expression); \
+        cubicle_rpc_request_envelope_cleanup(&envelope); \
+        return cubicle_controller_result__; \
+    } while (0)
+
+    if (strcmp(envelope.method, "controller.status") == 0) {
+        char result[512];
+        int length;
+        if (process_completed) {
+            length = snprintf(
+                result, sizeof(result),
+                "{\"state\":\"completed\",\"pid\":%ld,\"pgid\":%ld,\"result\":%d,\"stdout_offset\":%lld,\"stderr_offset\":%lld,\"tty_offset\":%lld}",
+                (long)child_pid, (long)child_pid, child_result,
+                state->stdout_offset, state->stderr_offset,
+                state->stdout_offset);
+        } else {
+            length = snprintf(
+                result, sizeof(result),
+                "{\"state\":\"running\",\"pid\":%ld,\"pgid\":%ld,\"stdout_offset\":%lld,\"stderr_offset\":%lld,\"tty_offset\":%lld}",
+                (long)child_pid, (long)child_pid, state->stdout_offset,
+                state->stderr_offset, state->stdout_offset);
+        }
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            CONTROLLER_API_RETURN(-1);
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+    }
+
+    if (strcmp(envelope.method, "controller.read") == 0 ||
+        strcmp(envelope.method, "controller.read_output") == 0) {
+        char stream[32];
+        uint64_t offset = 0;
+        uint64_t maximum_length = 0;
+        cubicle_validation_error_t error;
+        if (cubicle_json_get_required_string(params, "stream", stream,
+                                             sizeof(stream), &error) < 0 ||
+            cubicle_json_get_required_u64(params, "offset", &offset,
+                                          &error) < 0 ||
+            cubicle_json_get_required_u64(params, "maximum_length",
+                                          &maximum_length, &error) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "invalid read request", false, 0));
+        }
+        char result[131072];
+        if (read_stream_json(state, stream, offset, maximum_length, result,
+                             sizeof(result)) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "read failed", false, errno));
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+    }
+
+    if (strcmp(envelope.method, "controller.write") == 0) {
+        char data[4096];
+        cubicle_validation_error_t error;
+        if (process_completed) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_STATE,
+                "process completed", false, 0));
+        }
+        if (child_stdin_fd < 0 ||
+            cubicle_json_get_required_string(params, "data", data,
+                                             sizeof(data), &error) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "invalid write request", false, 0));
+        }
+        if (write_best_effort(child_stdin_fd, data, strlen(data)) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "write failed", true,
+                errno));
+        }
+        char event[128];
+        int event_length = snprintf(event, sizeof(event),
+                                    "type=input length=%zu", strlen(data));
+        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
+            append_event(state, event);
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.resize") == 0) {
+        uint64_t rows = 0;
+        uint64_t columns = 0;
+        cubicle_validation_error_t error;
+        if (process_completed) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_STATE,
+                "process completed", false, 0));
+        }
+        if (resize_fd < 0 ||
+            cubicle_json_get_required_u64(params, "rows", &rows, &error) < 0 ||
+            cubicle_json_get_required_u64(params, "columns", &columns,
+                                          &error) < 0 ||
+            rows == 0 || rows > UINT16_MAX ||
+            columns == 0 || columns > UINT16_MAX) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "invalid resize request", false, 0));
+        }
+        if (terminal_size != NULL && terminal_size->known &&
+            terminal_size->rows == (unsigned short)rows &&
+            terminal_size->columns == (unsigned short)columns) {
+            CONTROLLER_API_RETURN(enqueue_api_success(client, request_id,
+                                                      "{}"));
+        }
+        struct winsize size;
+        memset(&size, 0, sizeof(size));
+        size.ws_row = (unsigned short)rows;
+        size.ws_col = (unsigned short)columns;
+        if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                errno));
+        }
+        if (terminal_size != NULL) {
+            terminal_size->rows = (unsigned short)rows;
+            terminal_size->columns = (unsigned short)columns;
+            terminal_size->known = 1;
+        }
+        kill(-child_pid, SIGWINCH);
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.attach") == 0) {
+        char token[CUBICLE_TOKEN_MAX];
+        uint64_t channels = 0;
+        cubicle_validation_error_t error;
+        if (cubicle_json_get_required_string(params, "token", token,
+                                             sizeof(token), &error) < 0 ||
+            strncmp(token, "local:", 6) != 0 ||
+            cubicle_json_get_required_u64(params, "channels", &channels,
+                                          &error) < 0 ||
+            channels == 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_PERMISSION_DENIED,
+                "invalid attachment token", false, 0));
+        }
+        char result[512];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"accepted_channels\":%llu,\"stdout_offset\":%lld,\"stderr_offset\":%lld,\"tty_offset\":%lld}",
+            (unsigned long long)channels, state->stdout_offset,
+            state->stderr_offset, state->stdout_offset);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            CONTROLLER_API_RETURN(-1);
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+    }
+
+    if (strcmp(envelope.method, "controller.detach") == 0) {
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.signal") == 0) {
+        uint64_t signal_number = 0;
+        cubicle_validation_error_t error;
+        if (process_completed ||
+            cubicle_json_get_required_u64(params, "signal_number",
+                                          &signal_number, &error) < 0 ||
+            signal_number == 0 ||
+            signal_number >= CUBICLE_MAX_SIGNAL_NUMBER) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "invalid signal request", false, 0));
+        }
+        if (kill(-child_pid, (int)signal_number) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "signal failed", true,
+                errno));
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.terminate") == 0) {
+        if (process_completed) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_STATE,
+                "process completed", false, 0));
+        }
+        if (kill(-child_pid, SIGTERM) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "terminate failed", true,
+                errno));
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.events_after") == 0) {
+        uint64_t after_sequence = 0;
+        uint64_t limit = 0;
+        cubicle_validation_error_t error;
+        if (cubicle_json_get_required_u64(params, "after_sequence",
+                                          &after_sequence, &error) < 0 ||
+            cubicle_json_get_required_u64(params, "limit", &limit,
+                                          &error) < 0 ||
+            limit > 1024) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
+                "invalid events request", false, 0));
+        }
+        char path[PATH_MAX];
+        if (make_state_file_path(path, state->dir, "events.log") < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "events path failed",
+                true, errno));
+        }
+        FILE *file = fopen(path, "r");
+        char result[8192];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result), "{\"events\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            if (file != NULL) {
+                fclose(file);
+            }
+            CONTROLLER_API_RETURN(-1);
+        }
+        used = (size_t)written;
+        size_t count = 0;
+        if (file != NULL) {
+            char line[1024];
+            while (fgets(line, sizeof(line), file) != NULL && count < limit) {
+                long long sequence = -1;
+                if (sscanf(line, "seq=%lld", &sequence) != 1 ||
+                    sequence <= (long long)after_sequence) {
+                    continue;
+                }
+                line[strcspn(line, "\n")] = '\0';
+                char escaped[2048];
+                if (cubicle_json_escape(escaped, sizeof(escaped), line) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s{\"sequence\":%lld,\"payload\":\"%s\"}",
+                                   count == 0 ? "" : ",", sequence, escaped);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    CONTROLLER_API_RETURN(enqueue_api_error(
+                        client, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "events response too large", false, 0));
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+        written = snprintf(result + used, sizeof(result) - used,
+                           "],\"count\":%zu}", count);
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "events response too large", false, 0));
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+    }
+
+    CONTROLLER_API_RETURN(enqueue_api_error(client, request_id,
+                                           CUBICLE_ERR_UNSUPPORTED,
+                                           "method is not implemented",
+                                           false, 0));
+#undef CONTROLLER_API_RETURN
+}
+
 static int send_attach_catchup(control_client_t *client,
                                const controller_state_t *state,
                                const char *stream, long long start)
@@ -688,6 +1100,24 @@ static int finish_control_request(control_client_t *client,
     return 0;
 }
 
+static int finish_api_request(control_client_t *client,
+                              controller_state_t *state,
+                              pid_t child_pid,
+                              int child_stdin_fd,
+                              int resize_fd,
+                              terminal_size_state_t *terminal_size,
+                              int process_completed,
+                              int child_result)
+{
+    memmove(client->request, client->request + sizeof(uint32_t),
+            client->framed_length);
+    client->request[client->framed_length] = '\0';
+    client->request_length = client->framed_length;
+    return dispatch_api_request(client, state, child_pid, child_stdin_fd,
+                                resize_fd, terminal_size, process_completed,
+                                child_result);
+}
+
 int flush_control_client_response(control_client_t *client,
                                   controller_state_t *state)
 {
@@ -765,6 +1195,8 @@ int accept_control_clients(int listen_fd,
         clients[slot].fd = client_fd;
         clients[slot].kind = CONTROL_CLIENT_READING;
         clients[slot].request_length = 0;
+        clients[slot].framed_request = 0;
+        clients[slot].framed_length = 0;
         clients[slot].response_length = 0;
         clients[slot].response_offset = 0;
         clients[slot].request[0] = '\0';
@@ -798,6 +1230,11 @@ int read_control_client_request(control_client_t *client,
         }
 
         if (result == 0) {
+            if (client->framed_request) {
+                close_control_client(client, state);
+                return 0;
+            }
+
             if (client->request_length == 0) {
                 close_control_client(client, state);
                 return 0;
@@ -812,6 +1249,52 @@ int read_control_client_request(control_client_t *client,
         }
 
         for (ssize_t i = 0; i < result; ++i) {
+            if (client->request_length == 0 && buffer[i] == '\0') {
+                client->framed_request = 1;
+            }
+
+            if (client->framed_request) {
+                if (client->request_length + 1 >= sizeof(client->request)) {
+                    if (enqueue_api_error(client, "",
+                                          CUBICLE_ERR_RESOURCE_LIMIT,
+                                          "request too large", false,
+                                          0) < 0) {
+                        close_control_client(client, state);
+                    }
+                    return 0;
+                }
+                client->request[client->request_length++] = buffer[i];
+
+                if (client->request_length == sizeof(uint32_t)) {
+                    uint32_t length_network = 0;
+                    memcpy(&length_network, client->request,
+                           sizeof(length_network));
+                    client->framed_length = ntohl(length_network);
+                    if (client->framed_length == 0 ||
+                        client->framed_length >=
+                            sizeof(client->request) - sizeof(uint32_t)) {
+                        if (enqueue_api_error(client, "",
+                                              CUBICLE_ERR_RESOURCE_LIMIT,
+                                              "invalid frame length", false,
+                                              0) < 0) {
+                            close_control_client(client, state);
+                        }
+                        return 0;
+                    }
+                }
+
+                if (client->framed_length > 0 &&
+                    client->request_length ==
+                        sizeof(uint32_t) + client->framed_length) {
+                    return finish_api_request(client, state, child_pid,
+                                              child_stdin_fd, resize_fd,
+                                              terminal_size,
+                                              process_completed,
+                                              child_result);
+                }
+                continue;
+            }
+
             if (buffer[i] == '\n') {
                 return finish_control_request(client, state, child_pid,
                                               child_stdin_fd, resize_fd,
@@ -827,7 +1310,7 @@ int read_control_client_request(control_client_t *client,
                 return 0;
             }
 
-            if (client->request_length + 1 >= sizeof(client->request)) {
+            if (client->request_length + 1 >= CUBICLE_LINE_REQUEST_MAX) {
                 if (enqueue_error_response(client, "request_too_long") < 0) {
                     close_control_client(client, state);
                 }

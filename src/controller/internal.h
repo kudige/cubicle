@@ -14,7 +14,8 @@
 
 #define CUBICLE_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_MAX_CONTROL_CLIENTS 32
-#define CUBICLE_REQUEST_MAX 256
+#define CUBICLE_LINE_REQUEST_MAX 256
+#define CUBICLE_REQUEST_MAX 8192
 #define CUBICLE_RESPONSE_MAX 65792
 
 typedef enum control_client_kind {
@@ -63,6 +64,8 @@ typedef struct control_client {
     control_client_kind_t kind;
     char request[CUBICLE_REQUEST_MAX];
     size_t request_length;
+    int framed_request;
+    size_t framed_length;
     char response[CUBICLE_RESPONSE_MAX];
     size_t response_length;
     size_t response_offset;
