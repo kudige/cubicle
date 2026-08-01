@@ -59,11 +59,13 @@ The package installs:
 ```text
 /usr/bin/cube
 /usr/bin/cubicle-manager
-/usr/bin/cubicle-controller
+/usr/libexec/cubicle/cubicle-controller
+/usr/lib/cubicle/config.cfg
 ```
 
 After installing a new package, restart any running `cubicle-manager` daemon so
 the installed `cube` and manager support the same API surface.
+The runtime package depends on `libeconf`.
 
 ## Pacman package
 
@@ -77,6 +79,8 @@ sudo pacman -U ./build/cubicle-0.1.0-1-*.pkg.tar.*
 ```
 
 The package installs the same runtime binaries as the Debian package.
+Install `libeconf` before installing the pacman package if your pacman frontend
+does not resolve local package dependencies automatically.
 
 ## Coverage
 

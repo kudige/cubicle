@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 project(cubicle VERSION 0.1.0 LANGUAGES C)
 
 include(GNUInstallDirs)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -31,6 +33,7 @@ endif()
 
 add_library(cubicle_common
     src/client/error.c
+    src/common/config.c
     src/common/json.c
     src/common/log.c
     src/common/process.c
@@ -41,6 +44,7 @@ add_library(cubicle_common
 
 target_include_directories(cubicle_common PUBLIC include)
 target_include_directories(cubicle_common PRIVATE third_party/yyjson)
+target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF)
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -95,8 +99,17 @@ target_compile_options(cube PRIVATE
 install(TARGETS
     cube
     cubicle-manager
-    cubicle-controller
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(TARGETS
+    cubicle-controller
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/cubicle
+)
+
+install(FILES
+    packaging/config.cfg
+    DESTINATION lib/cubicle
 )
 
 enable_testing()
@@ -128,6 +141,20 @@ target_compile_options(cubicle-util-test PRIVATE
 )
 
 add_test(NAME cubicle-util-test COMMAND cubicle-util-test)
+
+add_executable(cubicle-config-test
+    tests/config_test.c
+)
+
+target_link_libraries(cubicle-config-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-config-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-config-test COMMAND cubicle-config-test)
 
 add_executable(cubicle-rpc-test
     tests/rpc_test.c
@@ -293,6 +320,16 @@ add_test(
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             CUBICLE_TERMINAL_RECORDER=${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_event_recorder.py
             python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/cube_tty_attach_test.py
+)
+
+add_test(
+    NAME cubicle-config-runtime-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_runtime_test.sh
 )
 
 add_test(
@@ -534,6 +571,7 @@ if(CUBICLE_ENABLE_COVERAGE)
             cubicle-controller
             cube
             cubicle-process-test
+            cubicle-config-test
             cubicle-rpc-test
             cubicle-util-test
             cubicle-rpc-test

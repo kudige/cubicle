@@ -78,6 +78,12 @@ int make_state_file_path(char path[PATH_MAX], const char *dir,
     return 0;
 }
 
+int make_log_file_path(char path[PATH_MAX], const controller_state_t *state,
+                       const char *name)
+{
+    return make_state_file_path(path, state->log_dir, name);
+}
+
 void initialize_empty_controller_state(controller_state_t *state)
 {
     memset(state, 0, sizeof(*state));
@@ -113,17 +119,27 @@ static int state_file_present(const char *dir, const char *name)
     return -1;
 }
 
-static int durable_state_files_present(const char *dir)
+static int durable_state_files_present(const char *state_dir,
+                                       const char *log_dir)
 {
-    const char *files[] = {
-        "metadata",
+    const char *state_files[] = {
+        "metadata"
+    };
+    const char *log_files[] = {
         "events.log",
         "stdout.log",
         "stderr.log",
     };
 
-    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
-        int present = state_file_present(dir, files[i]);
+    for (size_t i = 0; i < sizeof(state_files) / sizeof(state_files[0]); ++i) {
+        int present = state_file_present(state_dir, state_files[i]);
+        if (present != 0) {
+            return present;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(log_files) / sizeof(log_files[0]); ++i) {
+        int present = state_file_present(log_dir, log_files[i]);
         if (present != 0) {
             return present;
         }
@@ -168,6 +184,7 @@ int append_event(controller_state_t *state, const char *event)
 
 int initialize_controller_state(controller_state_t *state,
                                        const char *requested_dir,
+                                       const char *requested_log_dir,
                                        pid_t child_pid,
                                        char **command,
                                        cubicle_process_mode_t mode,
@@ -195,11 +212,31 @@ int initialize_controller_state(controller_state_t *state,
         }
     }
 
+    if (requested_log_dir != NULL) {
+        int result = snprintf(state->log_dir, sizeof(state->log_dir), "%s",
+                              requested_log_dir);
+        if (result < 0 || (size_t)result >= sizeof(state->log_dir)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+    } else {
+        int result = snprintf(state->log_dir, sizeof(state->log_dir), "%s",
+                              state->dir);
+        if (result < 0 || (size_t)result >= sizeof(state->log_dir)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+    }
+
     if (create_state_directory(state->dir) < 0) {
         return -1;
     }
 
-    if (durable_state_files_present(state->dir) != 0) {
+    if (create_state_directory(state->log_dir) < 0) {
+        return -1;
+    }
+
+    if (durable_state_files_present(state->dir, state->log_dir) != 0) {
         return -1;
     }
 
@@ -235,11 +272,11 @@ int initialize_controller_state(controller_state_t *state,
     }
     close(metadata_fd);
 
-    state->events_fd = open_state_file(state->dir, "events.log",
+    state->events_fd = open_state_file(state->log_dir, "events.log",
                                        O_WRONLY | O_CREAT | O_EXCL | O_APPEND);
-    state->stdout_fd = open_state_file(state->dir, "stdout.log",
+    state->stdout_fd = open_state_file(state->log_dir, "stdout.log",
                                        O_WRONLY | O_CREAT | O_EXCL);
-    state->stderr_fd = open_state_file(state->dir, "stderr.log",
+    state->stderr_fd = open_state_file(state->log_dir, "stderr.log",
                                        O_WRONLY | O_CREAT | O_EXCL);
 
     if (state->events_fd < 0 || state->stdout_fd < 0 || state->stderr_fd < 0) {

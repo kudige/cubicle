@@ -402,17 +402,29 @@
   - manager process start and framed process.start accept term
   - cube run --term, cube connect, and cube logs handle terminal output with separately retained stderr
   - controller, manager, and cube E2E tests cover term stdout/stderr separation
+- Started configuration deployment support:
+  - added libeconf-backed read-only configuration loading
+  - packaged defaults define state_dir, runtime_dir, log_dir, listen socket, controller binary, and client manager endpoint
+  - manager can split persistent state, runtime sockets, and controller logs
+  - cube can use configured manager endpoint and run defaults
+  - cube config show, paths, and validate expose read-only diagnostics
 
 ## Next
 
-1. Continue implementing the cube CLI specification.
+1. Continue configuration implementation from docs/configuration-spec.md.
+   - Add drop-in source tracking and effective value origins.
+   - Add XDG user config loading.
+   - Add atomic cube defaults show/set/reset.
+   - Harden ownership and permission policy for configured directories.
+
+2. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
    - Add foreground cube run attach behavior through manager-issued attachment grants.
    - Harden post-exit connect draining through manager-retained output fallback.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.
 
-2. Continue JSON protocol hardening.
+3. Continue JSON protocol hardening.
      - replace remaining protocol-facing textual JSON result extraction in libcubicle compatibility/client helpers
      - introduce a structured writer or yyjson-backed writer wrapper for responses and requests currently assembled by snprintf
      - add method schemas and malicious/boundary fixtures under schemas/v0 and tests/fixtures

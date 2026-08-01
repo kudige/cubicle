@@ -3,6 +3,7 @@
 #include "../common/json.h"
 #include "../common/rpc_internal.h"
 
+#include "cubicle/config.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
 
@@ -80,6 +81,11 @@ static int process_mode_uses_terminal(const char *mode)
     return strcmp(mode, "tty") == 0 || strcmp(mode, "term") == 0;
 }
 
+static const char *cube_mode_name(cubicle_process_mode_t mode)
+{
+    return cubicle_process_mode_name(mode);
+}
+
 static void print_usage(FILE *stream)
 {
     fprintf(stream,
@@ -90,6 +96,7 @@ static void print_usage(FILE *stream)
             "  cube ps\n"
             "  cube logs [--follow] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
+            "  cube config show|paths|validate\n"
             "  cube cleanup\n"
             "  cube connect [--ro] NAME\n"
             "  cube stop NAME\n"
@@ -167,14 +174,80 @@ static int command_requires_manager(const char *command)
            strcmp(command, "defaults") == 0;
 }
 
-static const char *resolve_manager_socket(const cube_options_t *options)
+static const char *resolve_manager_socket(const cube_options_t *options,
+                                          const cubicle_config_t *config,
+                                          char *configured_socket,
+                                          size_t configured_socket_size)
 {
     if (options->manager_socket != NULL &&
         options->manager_socket[0] != '\0') {
         return options->manager_socket;
     }
     const char *environment = getenv("CUBICLE_MANAGER_SOCKET");
-    return environment != NULL && environment[0] != '\0' ? environment : NULL;
+    if (environment != NULL && environment[0] != '\0') {
+        return environment;
+    }
+    if (cubicle_config_unix_uri_path(config->client_manager_uri,
+                                     configured_socket,
+                                     configured_socket_size) < 0) {
+        return NULL;
+    }
+    return configured_socket;
+}
+
+static int command_config(const cubicle_config_t *config,
+                          const char *config_error,
+                          int argc,
+                          char **argv,
+                          int command_index)
+{
+    if (command_index + 1 >= argc) {
+        fprintf(stderr, "cube: config requires show, paths, or validate\n");
+        return 2;
+    }
+
+    const char *subcommand = argv[command_index + 1];
+    if (strcmp(subcommand, "validate") == 0) {
+        if (config_error != NULL && config_error[0] != '\0') {
+            fprintf(stderr, "cube: configuration error: %s\n", config_error);
+            return 1;
+        }
+        printf("configuration valid\n");
+        return 0;
+    }
+
+    if (config_error != NULL && config_error[0] != '\0') {
+        fprintf(stderr, "cube: configuration error: %s\n", config_error);
+        return 1;
+    }
+
+    if (strcmp(subcommand, "paths") == 0) {
+        printf("source=%s\n", config->source);
+        printf("manager.state_dir=%s\n", config->manager_state_dir);
+        printf("manager.runtime_dir=%s\n", config->manager_runtime_dir);
+        printf("manager.log_dir=%s\n", config->manager_log_dir);
+        printf("manager.controller_binary=%s\n", config->controller_binary);
+        return 0;
+    }
+
+    if (strcmp(subcommand, "show") == 0) {
+        printf("source=%s\n", config->source);
+        printf("installation.bindir=%s\n", config->bindir);
+        printf("installation.libexecdir=%s\n", config->libexecdir);
+        printf("manager.state_dir=%s\n", config->manager_state_dir);
+        printf("manager.runtime_dir=%s\n", config->manager_runtime_dir);
+        printf("manager.listen=%s\n", config->manager_listen_uri);
+        printf("manager.controller_binary=%s\n", config->controller_binary);
+        printf("manager.log_dir=%s\n", config->manager_log_dir);
+        printf("client.manager=%s\n", config->client_manager_uri);
+        printf("defaults.launch=%s\n",
+               cubicle_launch_default_name(config->default_launch));
+        printf("defaults.mode=%s\n", cube_mode_name(config->default_mode));
+        return 0;
+    }
+
+    fprintf(stderr, "cube: unknown config command '%s'\n", subcommand);
+    return 2;
 }
 
 static int write_all(int fd, const void *buffer, size_t length)
@@ -2131,14 +2204,15 @@ static int wait_for_process(const char *manager_socket,
 
 static int process_run(const char *manager_socket,
                        const cube_options_t *options,
+                       const cubicle_config_t *config,
                        int argc,
                        char **argv,
                        int command_index)
 {
     cube_run_options_t run_options = {
         .name = NULL,
-        .mode = "stream",
-        .background = 0,
+        .mode = cube_mode_name(config->default_mode),
+        .background = config->default_launch == CUBICLE_LAUNCH_BACKGROUND,
         .generated_name = 0,
     };
 
@@ -2367,16 +2441,37 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    cubicle_config_t config;
+    char config_error[512] = "";
+    int config_loaded = cubicle_config_load(&config, config_error,
+                                            sizeof(config_error)) == 0;
+    if (!config_loaded) {
+        cubicle_config_defaults(&config);
+    }
+
+    if (strcmp(command, "config") == 0) {
+        return command_config(&config, config_error, argc, argv,
+                              command_index);
+    }
+
+    if (!config_loaded) {
+        fprintf(stderr, "cube: configuration error: %s\n", config_error);
+        return 2;
+    }
+
     if (!command_requires_manager(command)) {
         fprintf(stderr, "cube: unknown command '%s'\n", command);
         return 2;
     }
 
-    const char *manager_socket = resolve_manager_socket(&options);
+    char configured_socket[PATH_MAX];
+    const char *manager_socket = resolve_manager_socket(&options, &config,
+                                                        configured_socket,
+                                                        sizeof(configured_socket));
     if (manager_socket == NULL) {
         fprintf(stderr, "cube: manager socket is not configured\n");
         fprintf(stderr,
-                "hint: pass --manager-socket PATH or set CUBICLE_MANAGER_SOCKET\n");
+                "hint: pass --manager-socket PATH, set CUBICLE_MANAGER_SOCKET, or configure client.manager\n");
         return 2;
     }
 
@@ -2386,7 +2481,7 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(command, "run") == 0) {
-        return process_run(manager_socket, &options, argc, argv,
+        return process_run(manager_socket, &options, &config, argc, argv,
                            command_index);
     }
 

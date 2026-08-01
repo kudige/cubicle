@@ -1,0 +1,326 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include "cubicle/config.h"
+
+#include <errno.h>
+#include <libeconf.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void set_error(char *error, size_t error_size, const char *message)
+{
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size, "%s", message);
+    }
+}
+
+static int copy_string(char *destination,
+                       size_t destination_size,
+                       const char *value,
+                       const char *name,
+                       char *error,
+                       size_t error_size)
+{
+    if (value == NULL || value[0] == '\0') {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s must not be empty", name);
+        }
+        return -1;
+    }
+
+    int length = snprintf(destination, destination_size, "%s", value);
+    if (length < 0 || (size_t)length >= destination_size) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s is too long", name);
+        }
+        return -1;
+    }
+
+    return 0;
+}
+
+static int is_absolute_path(const char *path)
+{
+    return path != NULL && path[0] == '/';
+}
+
+static int validate_absolute_path(const char *path,
+                                  const char *name,
+                                  char *error,
+                                  size_t error_size)
+{
+    if (!is_absolute_path(path)) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s must be an absolute path", name);
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int parse_launch(const char *value,
+                        cubicle_launch_default_t *launch,
+                        char *error,
+                        size_t error_size)
+{
+    if (strcmp(value, "foreground") == 0) {
+        *launch = CUBICLE_LAUNCH_FOREGROUND;
+        return 0;
+    }
+    if (strcmp(value, "background") == 0) {
+        *launch = CUBICLE_LAUNCH_BACKGROUND;
+        return 0;
+    }
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size,
+                 "defaults.launch must be foreground or background");
+    }
+    return -1;
+}
+
+static int parse_mode(const char *value,
+                      cubicle_process_mode_t *mode,
+                      char *error,
+                      size_t error_size)
+{
+    if (strcmp(value, "stream") == 0) {
+        *mode = CUBICLE_PROCESS_STREAM;
+        return 0;
+    }
+    if (strcmp(value, "tty") == 0) {
+        *mode = CUBICLE_PROCESS_TTY;
+        return 0;
+    }
+    if (strcmp(value, "term") == 0) {
+        *mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+        return 0;
+    }
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size,
+                 "defaults.mode must be stream, tty, or term");
+    }
+    return -1;
+}
+
+void cubicle_config_defaults(cubicle_config_t *config)
+{
+    memset(config, 0, sizeof(*config));
+    snprintf(config->bindir, sizeof(config->bindir), "/usr/bin");
+    snprintf(config->libexecdir, sizeof(config->libexecdir),
+             "/usr/libexec/cubicle");
+    snprintf(config->manager_state_dir, sizeof(config->manager_state_dir),
+             "/var/lib/cubicle");
+    snprintf(config->manager_runtime_dir, sizeof(config->manager_runtime_dir),
+             "/run/cubicle");
+    snprintf(config->manager_log_dir, sizeof(config->manager_log_dir),
+             "/var/log/cubicle");
+    snprintf(config->manager_listen_uri, sizeof(config->manager_listen_uri),
+             "unix:///run/cubicle/manager.sock");
+    snprintf(config->controller_binary, sizeof(config->controller_binary),
+             "/usr/libexec/cubicle/cubicle-controller");
+    snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
+             "unix:///run/cubicle/manager.sock");
+    config->default_launch = CUBICLE_LAUNCH_FOREGROUND;
+    config->default_mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+    snprintf(config->source, sizeof(config->source), "built-in defaults");
+}
+
+static int get_optional_string(econf_file *file,
+                               const char *group,
+                               const char *key,
+                               char *destination,
+                               size_t destination_size,
+                               char *error,
+                               size_t error_size)
+{
+    char *value = NULL;
+    econf_err result = econf_getStringValue(file, group, key, &value);
+    if (result == ECONF_NOKEY || result == ECONF_NOGROUP) {
+        return 0;
+    }
+    if (result != ECONF_SUCCESS) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s.%s: %s", group, key,
+                     econf_errString(result));
+        }
+        return -1;
+    }
+
+    int copy_result = copy_string(destination, destination_size, value, key,
+                                  error, error_size);
+    free(value);
+    return copy_result;
+}
+
+static int apply_econf_file(cubicle_config_t *config,
+                            econf_file *file,
+                            char *error,
+                            size_t error_size)
+{
+    if (get_optional_string(file, "installation", "bindir",
+                            config->bindir, sizeof(config->bindir),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "installation", "libexecdir",
+                            config->libexecdir, sizeof(config->libexecdir),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "manager", "state_dir",
+                            config->manager_state_dir,
+                            sizeof(config->manager_state_dir),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "manager", "runtime_dir",
+                            config->manager_runtime_dir,
+                            sizeof(config->manager_runtime_dir),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "manager", "log_dir",
+                            config->manager_log_dir,
+                            sizeof(config->manager_log_dir),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "manager", "listen",
+                            config->manager_listen_uri,
+                            sizeof(config->manager_listen_uri),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "manager", "controller_binary",
+                            config->controller_binary,
+                            sizeof(config->controller_binary),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "client", "manager",
+                            config->client_manager_uri,
+                            sizeof(config->client_manager_uri),
+                            error, error_size) < 0 ||
+        get_optional_string(file, "client", "server_identity",
+                            config->client_server_identity,
+                            sizeof(config->client_server_identity),
+                            error, error_size) < 0) {
+        return -1;
+    }
+
+    char value[64];
+    value[0] = '\0';
+    if (get_optional_string(file, "defaults", "launch", value, sizeof(value),
+                            error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_launch(value, &config->default_launch, error, error_size) < 0)) {
+        return -1;
+    }
+
+    value[0] = '\0';
+    if (get_optional_string(file, "defaults", "mode", value, sizeof(value),
+                            error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_mode(value, &config->default_mode, error, error_size) < 0)) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
+{
+    const char prefix[] = "unix://";
+    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    const char *socket_path = uri + strlen(prefix);
+    if (!is_absolute_path(socket_path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    int result = snprintf(path, path_size, "%s", socket_path);
+    if (result < 0 || (size_t)result >= path_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+int cubicle_config_validate(const cubicle_config_t *config,
+                            char *error,
+                            size_t error_size)
+{
+    char endpoint_path[CUBICLE_PATH_MAX];
+    if (validate_absolute_path(config->bindir, "installation.bindir",
+                               error, error_size) < 0 ||
+        validate_absolute_path(config->libexecdir, "installation.libexecdir",
+                               error, error_size) < 0 ||
+        validate_absolute_path(config->manager_state_dir, "manager.state_dir",
+                               error, error_size) < 0 ||
+        validate_absolute_path(config->manager_runtime_dir,
+                               "manager.runtime_dir",
+                               error, error_size) < 0 ||
+        validate_absolute_path(config->manager_log_dir, "manager.log_dir",
+                               error, error_size) < 0 ||
+        validate_absolute_path(config->controller_binary,
+                               "manager.controller_binary",
+                               error, error_size) < 0 ||
+        cubicle_config_unix_uri_path(config->manager_listen_uri,
+                                     endpoint_path,
+                                     sizeof(endpoint_path)) < 0) {
+        if (error != NULL && error_size > 0 && error[0] == '\0') {
+            snprintf(error, error_size,
+                     "manager.listen must be an absolute unix:// endpoint");
+        }
+        return -1;
+    }
+
+    if (cubicle_config_unix_uri_path(config->client_manager_uri,
+                                     endpoint_path,
+                                     sizeof(endpoint_path)) < 0) {
+        set_error(error, error_size,
+                  "client.manager must be an absolute unix:// endpoint");
+        return -1;
+    }
+
+    return 0;
+}
+
+int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size)
+{
+    if (error != NULL && error_size > 0) {
+        error[0] = '\0';
+    }
+    cubicle_config_defaults(config);
+
+    const char *override_path = getenv("CUBICLE_CONFIG");
+    econf_file *file = NULL;
+    econf_err result;
+    if (override_path != NULL && override_path[0] != '\0') {
+        result = econf_readFile(&file, override_path, "=", "#");
+        if (result != ECONF_SUCCESS) {
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size, "%s: %s", override_path,
+                         econf_errString(result));
+            }
+            return -1;
+        }
+        snprintf(config->source, sizeof(config->source), "%s", override_path);
+    } else {
+        result = econf_readConfig(&file, "cubicle", "/usr/lib", "config",
+                                  "cfg", "=", "#");
+        if (result == ECONF_NOFILE) {
+            return cubicle_config_validate(config, error, error_size);
+        }
+        if (result != ECONF_SUCCESS) {
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size, "system config: %s",
+                         econf_errString(result));
+            }
+            return -1;
+        }
+        snprintf(config->source, sizeof(config->source),
+                 "system configuration");
+    }
+
+    if (apply_econf_file(config, file, error, error_size) < 0) {
+        econf_free(file);
+        return -1;
+    }
+    econf_free(file);
+    return cubicle_config_validate(config, error, error_size);
+}
+
+const char *cubicle_launch_default_name(cubicle_launch_default_t launch)
+{
+    return launch == CUBICLE_LAUNCH_BACKGROUND ? "background" : "foreground";
+}

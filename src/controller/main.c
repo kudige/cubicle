@@ -15,7 +15,7 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
             program);
 }
 
@@ -120,6 +120,7 @@ int main(int argc, char **argv)
 
     const char *mode = NULL;
     const char *state_dir = NULL;
+    const char *log_dir = NULL;
     const char *control_socket = NULL;
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
@@ -152,6 +153,11 @@ int main(int argc, char **argv)
 
         if (strcmp(argv[i], "--state-dir") == 0 && i + 1 < argc) {
             state_dir = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--log-dir") == 0 && i + 1 < argc) {
+            log_dir = argv[++i];
             continue;
         }
 
@@ -191,15 +197,15 @@ int main(int argc, char **argv)
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY) {
-        return run_tty(&argv[command_index], state_dir, control_socket,
+        return run_tty(&argv[command_index], state_dir, log_dir, control_socket,
                        stdin_policy, completed_retention_ms);
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
-        return run_term(&argv[command_index], state_dir, control_socket,
+        return run_term(&argv[command_index], state_dir, log_dir, control_socket,
                         stdin_policy, completed_retention_ms);
     }
 
-    return run_stream(&argv[command_index], state_dir, control_socket,
+    return run_stream(&argv[command_index], state_dir, log_dir, control_socket,
                       stdin_policy, completed_retention_ms);
 }

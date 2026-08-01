@@ -297,7 +297,7 @@ static int read_stream_range(control_client_t *client,
     }
 
     char path[PATH_MAX];
-    if (make_state_file_path(path, state->dir, file_name) < 0) {
+    if (make_log_file_path(path, state, file_name) < 0) {
         return enqueue_error_response(client, "state_path_too_long");
     }
 
@@ -363,7 +363,7 @@ static int enqueue_stream_bytes(control_client_t *client,
     }
 
     char path[PATH_MAX];
-    if (make_state_file_path(path, state->dir, file_name) < 0) {
+    if (make_log_file_path(path, state, file_name) < 0) {
         return -1;
     }
 
@@ -414,7 +414,7 @@ static int write_file_response(control_client_t *client,
                                const char *file_name)
 {
     char path[PATH_MAX];
-    if (make_state_file_path(path, state->dir, file_name) < 0) {
+    if (make_log_file_path(path, state, file_name) < 0) {
         return enqueue_error_response(client, "state_path_too_long");
     }
 
@@ -475,7 +475,7 @@ static int write_events_after_response(control_client_t *client,
     }
 
     char path[PATH_MAX];
-    if (make_state_file_path(path, state->dir, "events.log") < 0) {
+    if (make_log_file_path(path, state, "events.log") < 0) {
         return enqueue_error_response(client, "state_path_too_long");
     }
 
@@ -545,7 +545,7 @@ static int read_stream_json(const controller_state_t *state,
     }
 
     char path[PATH_MAX];
-    if (make_state_file_path(path, state->dir, file_name) < 0) {
+    if (make_log_file_path(path, state, file_name) < 0) {
         return -1;
     }
 
@@ -853,7 +853,7 @@ static int dispatch_api_request(control_client_t *client,
                 "invalid events request", false, 0));
         }
         char path[PATH_MAX];
-        if (make_state_file_path(path, state->dir, "events.log") < 0) {
+        if (make_log_file_path(path, state, "events.log") < 0) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_IO, "events path failed",
                 true, errno));

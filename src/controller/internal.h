@@ -44,6 +44,7 @@ typedef struct stream_pipe {
 
 typedef struct controller_state {
     char dir[PATH_MAX];
+    char log_dir[PATH_MAX];
     char controller_id[33];
     int events_fd;
     int stdout_fd;
@@ -77,11 +78,14 @@ int write_best_effort(int fd, const char *buffer, size_t length);
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
                          const char *name);
+int make_log_file_path(char path[PATH_MAX], const controller_state_t *state,
+                       const char *name);
 void initialize_empty_controller_state(controller_state_t *state);
 void close_controller_state(controller_state_t *state);
 int append_event(controller_state_t *state, const char *event);
 int initialize_controller_state(controller_state_t *state,
                                 const char *requested_dir,
+                                const char *requested_log_dir,
                                 pid_t child_pid,
                                 char **command,
                                 cubicle_process_mode_t mode,
@@ -117,14 +121,17 @@ int forward_attached_stdin(control_client_t *client,
                            int child_stdin_fd);
 
 int run_stream(char **command, const char *state_dir,
+               const char *log_dir,
                const char *control_socket,
                stdin_policy_t stdin_policy,
                int completed_retention_ms);
 int run_tty(char **command, const char *state_dir,
+            const char *log_dir,
             const char *control_socket,
             stdin_policy_t stdin_policy,
             int completed_retention_ms);
 int run_term(char **command, const char *state_dir,
+             const char *log_dir,
              const char *control_socket,
              stdin_policy_t stdin_policy,
              int completed_retention_ms);
