@@ -228,6 +228,41 @@
   - daemon socket accept loop is nonblocking
   - daemon owns periodic workspace event aggregation
   - daemon advances workspace event cursors without requiring foreground poll
+- Hardened protocol JSON parsing:
+  - replaced protocol JSON scanning with vendored yyjson parsing
+  - added parser resource limits for document size, depth, object members, arrays, strings, methods, argv, and env arrays
+  - reject duplicate object keys at every object level
+  - reject ambiguous integer forms for unsigned protocol fields
+  - reject malformed strings, invalid UTF-8, and isolated Unicode surrogates through the strict parser
+- Added typed RPC envelope validation:
+  - requests validate protocol major/minor, request IDs, method names, params objects, and top-level fields
+  - responses validate request correlation, success/result/error combinations, and top-level fields
+  - client response handling now consumes the parsed response envelope
+- Added checked JSON decoder helpers:
+  - required and optional string/u64/bool/object/array accessors
+  - null rejection for optional fields unless explicitly handled
+  - ASCII identifier validation for protocol identities
+  - structured validation error details with field path, expected type, and message
+- Converted client response decoders to checked JSON accessors:
+  - endpoint, page, workspace, process, key, and event result decoding now reject present-but-invalid optional fields
+  - unknown process modes/states and event types fail decoding instead of silently defaulting
+- Converted implemented manager daemon API params to parsed typed accessors:
+  - workspace.create
+  - workspace.get
+  - process.get
+  - process.list
+  - events.list
+  - process.read_output
+  - real manager E2E tests now cover invalid typed params over the Unix socket
+- Hardened structured RPC error decoding:
+  - shared parsed error-object decoder
+  - public RPC error helper rejects success responses, result/error conflicts, null errors, invalid field types, and errno overflow
+  - libcubicle client uses parsed envelope errors instead of ad hoc field reads
+- Added protocol sanitizer and fuzz smoke support:
+  - opt-in ASan/UBSan CMake build flag
+  - fuzz-json-parser target
+  - fuzz-rpc-envelope target
+  - standalone fuzz smoke mode for environments without libFuzzer linkage
 - Updated README.md with current build, test, and controller usage notes.
 
 ## Next
@@ -241,6 +276,13 @@
    - Keep existing foreground CLI paths working until API-backed CLI commands replace them.
    - Move toward transactional storage behind the daemon authority.
    - Add fixtures and conformance tests for API behavior.
+   - Continue JSON protocol hardening:
+     - replace remaining protocol-facing textual JSON result extraction in libcubicle compatibility/client helpers
+     - introduce a structured writer or yyjson-backed writer wrapper for responses and requests currently assembled by snprintf
+     - add method schemas and malicious/boundary fixtures under schemas/v0 and tests/fixtures
+     - add additional fuzz targets for process.start, process info, attachment grants, events, and RPC errors
+     - define deterministic non-JSON signed transcript/grant encoding before authentication grants are implemented
+     - make sanitizer and malformed-message runs mandatory in CI
 
 2. Add provisional user-facing CLI commands.
    - work
