@@ -30,8 +30,9 @@ workspace_id=${workspace_id%% name=*}
     --control-socket "$tmpdir/controller.sock" \
     --process-id process-1 >/dev/null
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
-    --control-socket "$socket_path" --event-interval-ms 50 &
+"$CUBICLE_MANAGER" --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    daemon --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -77,6 +78,59 @@ cube workspace select "Project A" >/dev/null
 selected_ps_output=$(cube ps)
 printf "%s\n" "$selected_ps_output" | grep -q '^build	stream	running$'
 
+api() {
+    python3 "$CUBICLE_API_CLIENT" --raw "$socket_path" "$@"
+}
+
+json_id() {
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
+}
+
+signal_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name signal-me sleep 30 | json_id)
+output=$(cube signal signal-me TERM)
+if [ "$output" != "Process signal-me signaled" ]; then
+    echo "unexpected process signal output: $output" >&2
+    exit 1
+fi
+api process-wait "$signal_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
+stop_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name stop-me sleep 30 | json_id)
+output=$(cube stop stop-me)
+if [ "$output" != "Process stop-me stopped" ]; then
+    echo "unexpected process stop output: $output" >&2
+    exit 1
+fi
+api process-wait "$stop_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
+kill_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-me sleep 30 | json_id)
+json_kill_output=$(cube --json kill kill-me)
+if [ "$json_kill_output" != "{}" ]; then
+    echo "unexpected process kill JSON output: $json_kill_output" >&2
+    exit 1
+fi
+api process-wait "$kill_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
+remove_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name remove-me /bin/true | json_id)
+api process-wait "$remove_process_id" --timeout-ms 2000 | grep -q '"success":true'
+output=$(cube remove remove-me)
+if [ "$output" != "Process remove-me removed" ]; then
+    echo "unexpected process remove output: $output" >&2
+    exit 1
+fi
+set +e
+cube inspect remove-me >"$tmpdir/removed-inspect.out" 2>"$tmpdir/removed-inspect.err"
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "removed process inspect should exit 1, got $status" >&2
+    exit 1
+fi
+grep -q 'process not found' "$tmpdir/removed-inspect.err"
+
 set +e
 XDG_STATE_HOME="$tmpdir/empty-state" CUBICLE_MANAGER_SOCKET="$socket_path" \
     "$CUBE" ps >"$tmpdir/no-workspace.out" 2>"$tmpdir/no-workspace.err"
@@ -97,6 +151,16 @@ if [ "$status" -ne 2 ]; then
     exit 1
 fi
 grep -q 'inspect requires a process name' "$tmpdir/inspect-missing.err"
+
+set +e
+cube signal build NOPE >"$tmpdir/signal-invalid.out" 2>"$tmpdir/signal-invalid.err"
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "cube signal with invalid signal should exit 2, got $status" >&2
+    exit 1
+fi
+grep -q 'invalid signal' "$tmpdir/signal-invalid.err"
 
 shutdown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown)
 printf "%s" "$shutdown_response" | grep -q '"success": true'

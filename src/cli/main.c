@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -723,6 +724,147 @@ static int process_inspect(const char *manager_socket,
     return 0;
 }
 
+static int signal_number_for_name(const char *signal_name, int *signal_number)
+{
+    struct signal_alias {
+        const char *name;
+        int number;
+    };
+    static const struct signal_alias aliases[] = {
+        {"HUP", SIGHUP},   {"SIGHUP", SIGHUP},
+        {"INT", SIGINT},   {"SIGINT", SIGINT},
+        {"QUIT", SIGQUIT}, {"SIGQUIT", SIGQUIT},
+        {"TERM", SIGTERM}, {"SIGTERM", SIGTERM},
+        {"KILL", SIGKILL}, {"SIGKILL", SIGKILL},
+        {"USR1", SIGUSR1}, {"SIGUSR1", SIGUSR1},
+        {"USR2", SIGUSR2}, {"SIGUSR2", SIGUSR2},
+    };
+
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(signal_name, &end, 10);
+    if (errno == 0 && end != signal_name && *end == '\0' &&
+        parsed > 0 && parsed < 128) {
+        *signal_number = (int)parsed;
+        return 0;
+    }
+
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
+        if (strcmp(signal_name, aliases[i].name) == 0) {
+            *signal_number = aliases[i].number;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int resolve_process_id(const char *manager_socket,
+                              const cube_options_t *options,
+                              const char *process_name,
+                              char *process_id,
+                              size_t process_id_size)
+{
+    char workspace[CUBICLE_NAME_MAX];
+    int has_workspace = resolve_workspace_argument(options, workspace,
+                                                   sizeof(workspace)) == 0;
+    if (!valid_name(process_name)) {
+        fprintf(stderr, "cube: invalid process name\n");
+        return 2;
+    }
+
+    char escaped_process[CUBICLE_NAME_MAX * 2];
+    if (cubicle_json_escape(escaped_process, sizeof(escaped_process),
+                            process_name) < 0) {
+        fprintf(stderr, "cube: process name is too long\n");
+        return 2;
+    }
+
+    char params[2048];
+    if (has_workspace) {
+        char escaped_workspace[CUBICLE_NAME_MAX * 2];
+        if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                                workspace) < 0) {
+            fprintf(stderr, "cube: workspace name is too long\n");
+            return 2;
+        }
+        snprintf(params, sizeof(params),
+                 "{\"process\":\"%s\",\"workspace_id\":\"%s\"}",
+                 escaped_process, escaped_workspace);
+    } else {
+        snprintf(params, sizeof(params), "{\"process\":\"%s\"}",
+                 escaped_process);
+    }
+
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "process.get", params, &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+    if (json_string_field(document.root, "id", process_id,
+                          process_id_size) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int process_lifecycle_action(const char *manager_socket,
+                                    const cube_options_t *options,
+                                    const char *process_name,
+                                    const char *method,
+                                    const char *message,
+                                    int signal_number)
+{
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    int resolve_result = resolve_process_id(manager_socket, options,
+                                            process_name, process_id,
+                                            sizeof(process_id));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[512];
+    if (strcmp(method, "process.signal") == 0) {
+        snprintf(params, sizeof(params),
+                 "{\"process_id\":\"%s\",\"signal_number\":%d}",
+                 escaped_process_id, signal_number);
+    } else {
+        snprintf(params, sizeof(params), "{\"process_id\":\"%s\"}",
+                 escaped_process_id);
+    }
+
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, method, params, &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+    } else {
+        printf("Process %s %s\n", process_name, message);
+    }
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     cube_options_t options;
@@ -775,6 +917,53 @@ int main(int argc, char **argv)
         }
         return process_inspect(manager_socket, &options,
                                argv[command_index + 1]);
+    }
+
+    if (strcmp(command, "signal") == 0) {
+        if (command_index + 3 != argc) {
+            fprintf(stderr, "cube: signal requires a process name and signal\n");
+            return 2;
+        }
+        int signal_number = 0;
+        if (signal_number_for_name(argv[command_index + 2],
+                                   &signal_number) < 0) {
+            fprintf(stderr, "cube: invalid signal\n");
+            return 2;
+        }
+        return process_lifecycle_action(manager_socket, &options,
+                                        argv[command_index + 1],
+                                        "process.signal", "signaled",
+                                        signal_number);
+    }
+
+    if (strcmp(command, "stop") == 0) {
+        if (command_index + 2 != argc) {
+            fprintf(stderr, "cube: stop requires a process name\n");
+            return 2;
+        }
+        return process_lifecycle_action(manager_socket, &options,
+                                        argv[command_index + 1],
+                                        "process.terminate", "stopped", 0);
+    }
+
+    if (strcmp(command, "kill") == 0) {
+        if (command_index + 2 != argc) {
+            fprintf(stderr, "cube: kill requires a process name\n");
+            return 2;
+        }
+        return process_lifecycle_action(manager_socket, &options,
+                                        argv[command_index + 1],
+                                        "process.kill", "killed", 0);
+    }
+
+    if (strcmp(command, "remove") == 0) {
+        if (command_index + 2 != argc) {
+            fprintf(stderr, "cube: remove requires a process name\n");
+            return 2;
+        }
+        return process_lifecycle_action(manager_socket, &options,
+                                        argv[command_index + 1],
+                                        "process.remove", "removed", 0);
     }
 
     (void)options.json;

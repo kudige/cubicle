@@ -326,12 +326,19 @@
   - selected workspace and --workspace resolution
   - human-readable and --json output
   - daemon-backed E2E coverage for process.list and process.get
+- Added initial cube process lifecycle commands over the manager API:
+  - cube signal NAME SIGNAL
+  - cube stop NAME
+  - cube kill NAME
+  - cube remove NAME
+  - workspace-local process name resolution before process lifecycle calls
+  - daemon-backed E2E coverage using real controller-backed processes
 
 ## Next
 
 1. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
-   - Implement process launch, signal, stop, kill, and remove.
+   - Implement process launch.
    - Add foreground attach/wait behavior through manager-issued attachment grants.
    - Add JSON output contracts for workspace list and lifecycle commands.
    - Add logs and events commands through manager APIs.
