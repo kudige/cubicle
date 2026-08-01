@@ -17,6 +17,8 @@ trap cleanup EXIT
 state_dir="$tmpdir/manager"
 socket_path="$tmpdir/manager.sock"
 xdg_state_home="$tmpdir/xdg-state"
+xdg_runtime_dir="$tmpdir/xdg-runtime"
+mkdir -p "$xdg_runtime_dir"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
     --control-socket "$socket_path" --event-interval-ms 50 &
@@ -36,6 +38,7 @@ fi
 
 cube() {
     XDG_STATE_HOME="$xdg_state_home" \
+        XDG_RUNTIME_DIR="$xdg_runtime_dir" \
         CUBICLE_MANAGER_SOCKET="$socket_path" \
         "$CUBE" "$@"
 }
@@ -61,6 +64,9 @@ if [ "$output" != "Workspace Project A selected" ]; then
     echo "unexpected selected workspace output: $output" >&2
     exit 1
 fi
+
+session_status=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" status)
+printf "%s" "$session_status" | grep -q '"active_client_sessions": 1'
 
 output=$(cube workspace "Project A")
 if [ "$output" != "Workspace Project A selected" ]; then

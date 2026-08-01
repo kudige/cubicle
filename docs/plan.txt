@@ -425,6 +425,7 @@
   - cube now uses signed Unix manager authentication before issuing manager RPCs
   - manager daemon now stores authenticated sessions and verifies auth.resume HMACs
   - libcubicle now caches Unix manager sessions in XDG_RUNTIME_DIR and resumes them with auth.resume
+  - cube now caches Unix manager sessions in XDG_RUNTIME_DIR and resumes them with auth.resume
 
 ## Next
 
@@ -450,7 +451,6 @@
      - make sanitizer and malformed-message runs mandatory in CI
 
 4. Continue authentication/session implementation from docs/auth-session-spec.md.
-   - add session cache/resume use to cube's direct manager RPC helper
    - enforce workspace capability checks and bootstrap owner keys
 
 5. Expand tests.

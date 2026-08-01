@@ -5,6 +5,7 @@
 #include "../common/json.h"
 #include "../common/rpc_internal.h"
 
+#include "cubicle/auth.h"
 #include "cubicle/config.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
@@ -69,6 +70,14 @@ typedef struct cube_attach_offsets {
     uint64_t stderr_offset;
     uint64_t tty_offset;
 } cube_attach_offsets_t;
+
+typedef struct cube_cached_session {
+    cubicle_session_info_t session;
+    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+    uint64_t manager_generation;
+    uid_t peer_uid;
+    gid_t peer_gid;
+} cube_cached_session_t;
 
 static void cleanup_rpc_response(cube_rpc_response_t *response);
 static int json_string_field(yyjson_val *object,
@@ -487,6 +496,236 @@ static int cube_client_private_key_path(char path[PATH_MAX],
     return length < 0 || length >= PATH_MAX ? -1 : 0;
 }
 
+static uint64_t cube_endpoint_hash(const char *text)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char *cursor = (const unsigned char *)text;
+         *cursor != '\0'; ++cursor) {
+        hash ^= (uint64_t)*cursor;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static uint64_t cube_now_ms(void)
+{
+    time_t now = time(NULL);
+    if (now < 0) {
+        return 0;
+    }
+    return (uint64_t)now * 1000ULL;
+}
+
+static int cube_session_cache_path(const char *endpoint,
+                                   char directory[PATH_MAX],
+                                   char path[PATH_MAX])
+{
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    if (runtime_dir == NULL || runtime_dir[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+
+    int length = snprintf(directory, PATH_MAX,
+                          "%s/cubicle/sessions/by-endpoint", runtime_dir);
+    if (length < 0 || length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    length = snprintf(path, PATH_MAX, "%s/%016llx.session", directory,
+                      (unsigned long long)cube_endpoint_hash(endpoint));
+    if (length < 0 || length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int cube_cache_field(const char *data,
+                            const char *key,
+                            char *buffer,
+                            size_t buffer_size)
+{
+    size_t key_length = strlen(key);
+    const char *cursor = data;
+    while (*cursor != '\0') {
+        const char *line_end = strchr(cursor, '\n');
+        size_t line_length =
+            line_end == NULL ? strlen(cursor) : (size_t)(line_end - cursor);
+        if (line_length > key_length && cursor[key_length] == '=' &&
+            strncmp(cursor, key, key_length) == 0) {
+            size_t value_length = line_length - key_length - 1;
+            if (value_length >= buffer_size) {
+                errno = ENOSPC;
+                return -1;
+            }
+            memcpy(buffer, cursor + key_length + 1, value_length);
+            buffer[value_length] = '\0';
+            return 0;
+        }
+        if (line_end == NULL) {
+            break;
+        }
+        cursor = line_end + 1;
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+static int cube_cache_field_u64(const char *data,
+                                const char *key,
+                                uint64_t *value_out)
+{
+    char value[32];
+    char *end = NULL;
+    if (cube_cache_field(data, key, value, sizeof(value)) < 0) {
+        return -1;
+    }
+    errno = 0;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    *value_out = (uint64_t)parsed;
+    return 0;
+}
+
+static int cube_load_cached_session(const char *endpoint,
+                                    cube_cached_session_t *cached)
+{
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+    if (cube_session_cache_path(endpoint, directory, path) < 0) {
+        return -1;
+    }
+
+    struct stat status;
+    if (stat(path, &status) < 0) {
+        return -1;
+    }
+    if (!S_ISREG(status.st_mode) || status.st_uid != getuid() ||
+        (status.st_mode & 0077) != 0 || status.st_size <= 0 ||
+        status.st_size > 4096) {
+        errno = EACCES;
+        return -1;
+    }
+
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return -1;
+    }
+    char data[4097];
+    size_t length = fread(data, 1, sizeof(data) - 1, file);
+    int read_failed = ferror(file);
+    fclose(file);
+    if (read_failed) {
+        errno = EIO;
+        return -1;
+    }
+    data[length] = '\0';
+
+    memset(cached, 0, sizeof(*cached));
+    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    uint64_t value = 0;
+    if (cube_cache_field(data, "session_id", cached->session.session_id,
+                         sizeof(cached->session.session_id)) < 0 ||
+        cube_cache_field(data, "manager_id", cached->session.manager_id,
+                         sizeof(cached->session.manager_id)) < 0 ||
+        cube_cache_field(data, "client_key_id", cached->session.client_key_id,
+                         sizeof(cached->session.client_key_id)) < 0 ||
+        cube_cache_field(data, "resume_secret", resume_secret_hex,
+                         sizeof(resume_secret_hex)) < 0 ||
+        cubicle_auth_hex_decode(resume_secret_hex, cached->resume_secret,
+                                sizeof(cached->resume_secret)) < 0 ||
+        cube_cache_field_u64(data, "protocol_major", &value) < 0) {
+        return -1;
+    }
+    cached->session.protocol_major = (uint32_t)value;
+    if (cube_cache_field_u64(data, "protocol_minor", &value) == 0) {
+        cached->session.protocol_minor = (uint32_t)value;
+    }
+    (void)cube_cache_field_u64(data, "negotiated_capabilities",
+                               &cached->session.negotiated_capabilities);
+    (void)cube_cache_field_u64(data, "authenticated_at_ms",
+                               &cached->session.authenticated_at_ms);
+    (void)cube_cache_field_u64(data, "expires_at_ms",
+                               &cached->session.expires_at_ms);
+    (void)cube_cache_field_u64(data, "manager_generation",
+                               &cached->manager_generation);
+    if (cube_cache_field_u64(data, "peer_uid", &value) == 0) {
+        cached->peer_uid = (uid_t)value;
+    }
+    if (cube_cache_field_u64(data, "peer_gid", &value) == 0) {
+        cached->peer_gid = (gid_t)value;
+    }
+    if (cached->session.expires_at_ms > 0 &&
+        cached->session.expires_at_ms <= cube_now_ms()) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    return 0;
+}
+
+static void cube_save_cached_session(const char *endpoint,
+                                     const cubicle_session_info_t *session,
+                                     const unsigned char *resume_secret,
+                                     uint64_t manager_generation,
+                                     uid_t peer_uid,
+                                     gid_t peer_gid)
+{
+    char directory[PATH_MAX];
+    char path[PATH_MAX];
+    if (cube_session_cache_path(endpoint, directory, path) < 0 ||
+        cubicle_mkdir_p(directory) < 0 ||
+        chmod(directory, 0700) < 0) {
+        return;
+    }
+
+    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    if (cubicle_auth_hex_encode(resume_secret, CUBICLE_AUTH_SECRET_BYTES,
+                                resume_secret_hex,
+                                sizeof(resume_secret_hex)) < 0) {
+        return;
+    }
+
+    char temporary[PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
+                          (long)getpid());
+    if (length < 0 || length >= PATH_MAX) {
+        return;
+    }
+
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        return;
+    }
+    char content[1024];
+    length = snprintf(
+        content, sizeof(content),
+        "session_id=%s\nmanager_id=%s\nclient_key_id=%s\nprotocol_major=%u\nprotocol_minor=%u\nnegotiated_capabilities=%llu\nauthenticated_at_ms=%llu\nexpires_at_ms=%llu\nresume_secret=%s\nmanager_generation=%llu\npeer_uid=%llu\npeer_gid=%llu\n",
+        session->session_id, session->manager_id, session->client_key_id,
+        session->protocol_major, session->protocol_minor,
+        (unsigned long long)session->negotiated_capabilities,
+        (unsigned long long)session->authenticated_at_ms,
+        (unsigned long long)session->expires_at_ms, resume_secret_hex,
+        (unsigned long long)manager_generation,
+        (unsigned long long)peer_uid, (unsigned long long)peer_gid);
+    int write_result =
+        length < 0 || (size_t)length >= sizeof(content) ||
+        cubicle_write_all(fd, content, (size_t)length) < 0 ||
+        fsync(fd) < 0;
+    int close_result = close(fd);
+    if (write_result || close_result < 0) {
+        unlink(temporary);
+        return;
+    }
+    if (rename(temporary, path) < 0) {
+        unlink(temporary);
+    }
+}
+
 static int call_rpc_peer_fd(const char *peer_name,
                             const char *endpoint,
                             int fd,
@@ -592,6 +831,137 @@ static int call_rpc_peer_fd(const char *peer_name,
     return 0;
 }
 
+static int cube_parse_session_info(yyjson_val *object,
+                                   cubicle_session_info_t *session)
+{
+    uint64_t value = 0;
+    memset(session, 0, sizeof(*session));
+    if (json_string_field(object, "session_id", session->session_id,
+                          sizeof(session->session_id)) < 0 ||
+        json_string_field(object, "manager_id", session->manager_id,
+                          sizeof(session->manager_id)) < 0 ||
+        json_string_field(object, "client_key_id", session->client_key_id,
+                          sizeof(session->client_key_id)) < 0 ||
+        cubicle_json_get_u64(object, "protocol_major", &value) < 0) {
+        return -1;
+    }
+    session->protocol_major = (uint32_t)value;
+    if (cubicle_json_get_u64(object, "protocol_minor", &value) == 0) {
+        session->protocol_minor = (uint32_t)value;
+    }
+    (void)cubicle_json_get_u64(object, "negotiated_capabilities",
+                               &session->negotiated_capabilities);
+    (void)cubicle_json_get_u64(object, "authenticated_at_ms",
+                               &session->authenticated_at_ms);
+    (void)cubicle_json_get_u64(object, "expires_at_ms",
+                               &session->expires_at_ms);
+    return 0;
+}
+
+static int resume_manager_fd(const char *endpoint,
+                             int fd,
+                             char session_id[CUBICLE_ID_STRING_LENGTH],
+                             cube_rpc_response_t *response)
+{
+    cube_cached_session_t cached;
+    if (cube_load_cached_session(endpoint, &cached) < 0) {
+        return 1;
+    }
+
+    cubicle_auth_resume_t resume;
+    memset(&resume, 0, sizeof(resume));
+    snprintf(resume.manager_key_id, sizeof(resume.manager_key_id), "%s",
+             cached.session.manager_id);
+    snprintf(resume.session_id, sizeof(resume.session_id), "%s",
+             cached.session.session_id);
+    if (cubicle_auth_random_bytes(resume.client_nonce,
+                                  sizeof(resume.client_nonce)) < 0 ||
+        cubicle_auth_random_bytes(resume.connection_id,
+                                  sizeof(resume.connection_id)) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to create resume nonce");
+        response->code = CUBICLE_ERR_INTERNAL;
+        return -1;
+    }
+    resume.manager_generation = cached.manager_generation;
+    resume.peer_uid = cached.peer_uid;
+    resume.peer_gid = cached.peer_gid;
+
+    unsigned char resume_bytes[512];
+    size_t resume_length = 0;
+    unsigned char authenticator[CUBICLE_AUTH_SECRET_BYTES];
+    char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
+    char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
+    char authenticator_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    if (cubicle_auth_encode_resume(&resume, resume_bytes,
+                                   sizeof(resume_bytes),
+                                   &resume_length) < 0 ||
+        cubicle_auth_hmac_sha256(cached.resume_secret,
+                                 sizeof(cached.resume_secret),
+                                 resume_bytes, resume_length,
+                                 authenticator) < 0 ||
+        cubicle_auth_hex_encode(resume.client_nonce,
+                                sizeof(resume.client_nonce),
+                                client_nonce_hex,
+                                sizeof(client_nonce_hex)) < 0 ||
+        cubicle_auth_hex_encode(resume.connection_id,
+                                sizeof(resume.connection_id),
+                                connection_id_hex,
+                                sizeof(connection_id_hex)) < 0 ||
+        cubicle_auth_hex_encode(authenticator, sizeof(authenticator),
+                                authenticator_hex,
+                                sizeof(authenticator_hex)) < 0) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to create resume authenticator");
+        response->code = CUBICLE_ERR_INTERNAL;
+        return -1;
+    }
+
+    char params[512];
+    int length = snprintf(
+        params, sizeof(params),
+        "{\"session_id\":\"%s\",\"client_nonce\":\"%s\",\"connection_id\":\"%s\",\"authenticator\":\"%s\"}",
+        cached.session.session_id, client_nonce_hex, connection_id_hex,
+        authenticator_hex);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "auth resume request is too large");
+        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
+        return -1;
+    }
+
+    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-resume", "",
+                         "auth.resume", params, response) < 0) {
+        cleanup_rpc_response(response);
+        memset(response, 0, sizeof(*response));
+        return 1;
+    }
+
+    cubicle_json_doc_t session_doc = {0};
+    cubicle_session_info_t resumed;
+    int parse_failed = cubicle_json_parse(&session_doc,
+                                          response->result_json) < 0;
+    if (!parse_failed) {
+        parse_failed = cube_parse_session_info(session_doc.root,
+                                               &resumed) < 0 ||
+                       strcmp(resumed.session_id,
+                              cached.session.session_id) != 0;
+    }
+    cubicle_json_cleanup(&session_doc);
+    cleanup_rpc_response(response);
+    memset(response, 0, sizeof(*response));
+    if (parse_failed) {
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "invalid auth resume response");
+        response->code = CUBICLE_ERR_PROTOCOL;
+        return -1;
+    }
+
+    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "%s",
+             cached.session.session_id);
+    return 0;
+}
+
 static int authenticate_manager_fd(const char *endpoint,
                                    int fd,
                                    char session_id[CUBICLE_ID_STRING_LENGTH],
@@ -600,6 +970,14 @@ static int authenticate_manager_fd(const char *endpoint,
     snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "local-session");
     if (!endpoint_is_unix(endpoint)) {
         return 0;
+    }
+
+    int resume_result = resume_manager_fd(endpoint, fd, session_id, response);
+    if (resume_result == 0) {
+        return 0;
+    }
+    if (resume_result < 0) {
+        return -1;
     }
 
     char key_dir[PATH_MAX];
@@ -752,10 +1130,22 @@ static int authenticate_manager_fd(const char *endpoint,
         return -1;
     }
 
-    cubicle_json_doc_t session_doc;
-    if (cubicle_json_parse(&session_doc, response->result_json) < 0 ||
-        json_string_field(session_doc.root, "session_id", session_id,
-                          CUBICLE_ID_STRING_LENGTH) < 0) {
+    cubicle_json_doc_t session_doc = {0};
+    cubicle_session_info_t session;
+    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
+    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
+    int session_parse_failed =
+        cubicle_json_parse(&session_doc, response->result_json) < 0;
+    if (!session_parse_failed) {
+        session_parse_failed =
+            cube_parse_session_info(session_doc.root, &session) < 0 ||
+            json_string_field(session_doc.root, "resume_secret",
+                              resume_secret_hex,
+                              sizeof(resume_secret_hex)) < 0 ||
+            cubicle_auth_hex_decode(resume_secret_hex, resume_secret,
+                                    sizeof(resume_secret)) < 0;
+    }
+    if (session_parse_failed) {
         cubicle_json_cleanup(&session_doc);
         cleanup_rpc_response(response);
         snprintf(response->error_message, sizeof(response->error_message),
@@ -763,6 +1153,11 @@ static int authenticate_manager_fd(const char *endpoint,
         response->code = CUBICLE_ERR_PROTOCOL;
         return -1;
     }
+    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "%s", session.session_id);
+    cube_save_cached_session(endpoint, &session, resume_secret,
+                             transcript.manager_generation,
+                             transcript.peer_uid,
+                             transcript.peer_gid);
     cubicle_json_cleanup(&session_doc);
     cleanup_rpc_response(response);
     memset(response, 0, sizeof(*response));

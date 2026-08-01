@@ -144,12 +144,19 @@ static cubicle_error_code_t process_wait_with_retry(cubicle_client_t *client,
     cubicle_error_code_t result = CUBICLE_ERR_INTERNAL;
     for (int attempt = 0; attempt < 250; ++attempt) {
         result = cubicle_process_wait(client, process_id, timeout_ms, process);
-        if (result == CUBICLE_OK) {
+        if (result == CUBICLE_OK &&
+            (process->state == CUBICLE_PROCESS_COMPLETED ||
+             process->state == CUBICLE_PROCESS_FAILED ||
+             process->state == CUBICLE_PROCESS_LOST)) {
             return result;
         }
         struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000L};
         nanosleep(&delay, NULL);
     }
+    const cubicle_error_t *error = cubicle_client_last_error(client);
+    fprintf(stderr, "process_wait_with_retry failed for %s: code=%d state=%d error=%s\n",
+            process_id, result, process->state,
+            error == NULL ? "" : error->message);
     return result;
 }
 
