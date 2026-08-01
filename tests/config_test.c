@@ -3,6 +3,7 @@
 #include "cubicle/config.h"
 
 #include <assert.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,11 +36,21 @@ static void test_defaults(void)
 {
     cubicle_config_t config;
     cubicle_config_defaults(&config);
-    assert(strcmp(config.manager_state_dir, "/var/lib/cubicle") == 0);
-    assert(strcmp(config.manager_runtime_dir, "/run/cubicle") == 0);
-    assert(strcmp(config.manager_log_dir, "/var/log/cubicle") == 0);
-    assert(strcmp(config.manager_listen_uri,
-                  "unix:///run/cubicle/manager.sock") == 0);
+    if (geteuid() == 0) {
+        assert(strcmp(config.manager_state_dir, "/var/lib/cubicle") == 0);
+        assert(strcmp(config.manager_runtime_dir, "/run/cubicle") == 0);
+        assert(strcmp(config.manager_log_dir, "/var/log/cubicle") == 0);
+        assert(strcmp(config.manager_listen_uri,
+                      "unix:///run/cubicle/manager.sock") == 0);
+    } else {
+        assert(strstr(config.manager_state_dir, "/cubicle") != NULL);
+        assert(strstr(config.manager_runtime_dir, "/cubicle") != NULL);
+        assert(strstr(config.manager_log_dir, "/cubicle/log") != NULL);
+        assert(strncmp(config.manager_listen_uri, "unix://", 7) == 0);
+        assert(strstr(config.manager_listen_uri, "/manager.sock") != NULL);
+        assert(strcmp(config.client_manager_uri,
+                      config.manager_listen_uri) == 0);
+    }
     assert(strcmp(config.controller_binary,
                   "/usr/libexec/cubicle/cubicle-controller") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);

@@ -116,3 +116,37 @@ CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" logs config-ru
     >"$tmpdir/logs.out" 2>"$tmpdir/logs.err"
 grep -q 'config-out' "$tmpdir/logs.out"
 grep -q 'config-err' "$tmpdir/logs.err"
+
+python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown >/dev/null 2>&1 || true
+wait "$manager_pid" 2>/dev/null || true
+manager_pid=
+
+user_state_home="$tmpdir/user-state"
+user_runtime_dir="$tmpdir/user-run"
+user_socket="$user_runtime_dir/cubicle/manager.sock"
+XDG_STATE_HOME="$user_state_home" XDG_RUNTIME_DIR="$user_runtime_dir" \
+    "$CUBICLE_MANAGER" --controller-bin "$controller_binary" daemon \
+    --event-interval-ms 50 &
+manager_pid=$!
+
+for _ in $(seq 1 100); do
+    if [ -S "$user_socket" ]; then
+        break
+    fi
+    sleep 0.05
+done
+
+if [ ! -S "$user_socket" ]; then
+    echo "manager did not create default per-user socket" >&2
+    exit 1
+fi
+
+XDG_STATE_HOME="$user_state_home" XDG_RUNTIME_DIR="$user_runtime_dir" \
+    "$CUBE" config paths >"$tmpdir/user-config-paths.out"
+grep -q "^manager.state_dir=$user_state_home/cubicle$" "$tmpdir/user-config-paths.out"
+grep -q "^manager.runtime_dir=$user_runtime_dir/cubicle$" "$tmpdir/user-config-paths.out"
+grep -q "^manager.log_dir=$user_state_home/cubicle/log$" "$tmpdir/user-config-paths.out"
+
+kill "$manager_pid" 2>/dev/null || true
+wait "$manager_pid" 2>/dev/null || true
+manager_pid=

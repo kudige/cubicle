@@ -67,6 +67,20 @@ After installing a new package, restart any running `cubicle-manager` daemon so
 the installed `cube` and manager support the same API surface.
 The runtime package depends on `libeconf`.
 
+By default, normal users run their own manager using XDG paths:
+
+```text
+$XDG_STATE_HOME/cubicle
+$XDG_RUNTIME_DIR/cubicle/manager.sock
+$XDG_STATE_HOME/cubicle/log
+```
+
+When XDG variables are unset, state falls back to `~/.local/state/cubicle` and
+runtime falls back to `/run/user/$UID/cubicle`. Running the manager as root keeps
+the system defaults under `/var/lib/cubicle`, `/run/cubicle`, and
+`/var/log/cubicle`. Administrators can force shared system paths through
+`/etc/cubicle/config.cfg`.
+
 ## Pacman package
 
 On Arch-style systems with `makepkg` available, the same CMake install rules can

@@ -408,6 +408,8 @@
   - manager can split persistent state, runtime sockets, and controller logs
   - cube can use configured manager endpoint and run defaults
   - cube config show, paths, and validate expose read-only diagnostics
+  - non-root defaults use per-user XDG state/runtime/log paths and socket
+  - root and explicit system configuration still support shared system-manager paths
 
 ## Next
 

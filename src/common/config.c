@@ -4,9 +4,12 @@
 
 #include <errno.h>
 #include <libeconf.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 static void set_error(char *error, size_t error_size, const char *message)
 {
@@ -103,6 +106,79 @@ static int parse_mode(const char *value,
     return -1;
 }
 
+static const char *user_home_directory(void)
+{
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        return home;
+    }
+
+    struct passwd *entry = getpwuid(geteuid());
+    return entry != NULL ? entry->pw_dir : NULL;
+}
+
+static int set_user_defaults(cubicle_config_t *config)
+{
+    uid_t uid = geteuid();
+    const char *xdg_state_home = getenv("XDG_STATE_HOME");
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    const char *home = user_home_directory();
+
+    int result;
+    if (xdg_state_home != NULL && xdg_state_home[0] != '\0') {
+        result = snprintf(config->manager_state_dir,
+                          sizeof(config->manager_state_dir),
+                          "%s/cubicle", xdg_state_home);
+    } else if (home != NULL && home[0] != '\0') {
+        result = snprintf(config->manager_state_dir,
+                          sizeof(config->manager_state_dir),
+                          "%s/.local/state/cubicle", home);
+    } else {
+        result = snprintf(config->manager_state_dir,
+                          sizeof(config->manager_state_dir),
+                          "/tmp/cubicle-state-%ld", (long)uid);
+    }
+    if (result < 0 || (size_t)result >= sizeof(config->manager_state_dir)) {
+        return -1;
+    }
+
+    result = snprintf(config->manager_log_dir,
+                      sizeof(config->manager_log_dir),
+                      "%s/log", config->manager_state_dir);
+    if (result < 0 || (size_t)result >= sizeof(config->manager_log_dir)) {
+        return -1;
+    }
+
+    if (runtime_dir != NULL && runtime_dir[0] != '\0') {
+        result = snprintf(config->manager_runtime_dir,
+                          sizeof(config->manager_runtime_dir),
+                          "%s/cubicle", runtime_dir);
+    } else {
+        result = snprintf(config->manager_runtime_dir,
+                          sizeof(config->manager_runtime_dir),
+                          "/run/user/%ld/cubicle", (long)uid);
+    }
+    if (result < 0 || (size_t)result >= sizeof(config->manager_runtime_dir)) {
+        return -1;
+    }
+
+    result = snprintf(config->manager_listen_uri,
+                      sizeof(config->manager_listen_uri),
+                      "unix://%s/manager.sock", config->manager_runtime_dir);
+    if (result < 0 || (size_t)result >= sizeof(config->manager_listen_uri)) {
+        return -1;
+    }
+
+    result = snprintf(config->client_manager_uri,
+                      sizeof(config->client_manager_uri),
+                      "%s", config->manager_listen_uri);
+    if (result < 0 || (size_t)result >= sizeof(config->client_manager_uri)) {
+        return -1;
+    }
+
+    return 0;
+}
+
 void cubicle_config_defaults(cubicle_config_t *config)
 {
     memset(config, 0, sizeof(*config));
@@ -121,6 +197,22 @@ void cubicle_config_defaults(cubicle_config_t *config)
              "/usr/libexec/cubicle/cubicle-controller");
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
+    if (geteuid() != 0 && set_user_defaults(config) < 0) {
+        snprintf(config->manager_state_dir, sizeof(config->manager_state_dir),
+                 "/tmp/cubicle-state-%ld", (long)geteuid());
+        snprintf(config->manager_runtime_dir,
+                 sizeof(config->manager_runtime_dir),
+                 "/run/user/%ld/cubicle", (long)geteuid());
+        snprintf(config->manager_log_dir, sizeof(config->manager_log_dir),
+                 "/tmp/cubicle-log-%ld", (long)geteuid());
+        snprintf(config->manager_listen_uri,
+                 sizeof(config->manager_listen_uri),
+                 "unix:///run/user/%ld/cubicle/manager.sock",
+                 (long)geteuid());
+        snprintf(config->client_manager_uri,
+                 sizeof(config->client_manager_uri), "%s",
+                 config->manager_listen_uri);
+    }
     config->default_launch = CUBICLE_LAUNCH_FOREGROUND;
     config->default_mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
     snprintf(config->source, sizeof(config->source), "built-in defaults");
