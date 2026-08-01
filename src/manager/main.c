@@ -1519,6 +1519,22 @@ static int process_event_log_has_exit(const manager_state_t *state,
     return 0;
 }
 
+static void refresh_observed_process_state(const manager_state_t *state,
+                                           cubicle_process_record_t *process)
+{
+    char latest_state[32];
+    snprintf(latest_state, sizeof(latest_state), "%s", process->state);
+    if (!process_is_terminal_state(latest_state) &&
+        controller_status_state(process, latest_state,
+                                sizeof(latest_state)) < 0 &&
+        process_event_log_has_exit(state, process->process_id)) {
+        snprintf(latest_state, sizeof(latest_state), "completed");
+    }
+    if (process_is_terminal_state(latest_state)) {
+        snprintf(process->state, sizeof(process->state), "%s", latest_state);
+    }
+}
+
 static int wait_for_controller_ready(const char *control_socket,
                                      const char *metadata_path,
                                      char *process_state,
@@ -2721,6 +2737,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 ambiguous ? "ambiguous process name" : "process not found",
                 false, 0));
         }
+        refresh_observed_process_state(state, &process);
 
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
@@ -2778,8 +2795,11 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 char item[2048];
                 if (cubicle_parse_process_record(line, &process) != 0 ||
                     (workspace_id_ptr != NULL &&
-                     strcmp(process.workspace_id, workspace_id_ptr) != 0) ||
-                    process_info_json(id, &process, item, sizeof(item)) < 0) {
+                     strcmp(process.workspace_id, workspace_id_ptr) != 0)) {
+                    continue;
+                }
+                refresh_observed_process_state(state, &process);
+                if (process_info_json(id, &process, item, sizeof(item)) < 0) {
                     continue;
                 }
                 written = snprintf(result + used, sizeof(result) - used,

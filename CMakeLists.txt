@@ -219,6 +219,17 @@ add_test(
 )
 
 add_test(
+    NAME cube-tty-attach-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            CUBICLE_TERMINAL_RECORDER=${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_event_recorder.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/cube_tty_attach_test.py
+)
+
+add_test(
     NAME cubicle-manager-registry-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>

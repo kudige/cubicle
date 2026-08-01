@@ -1070,7 +1070,11 @@ static int build_process_start_params(cubicle_json_builder_t *params,
         cubicle_json_builder_append_string(params, run_options->mode) < 0 ||
         cubicle_json_builder_append(params, ",\"stdin_policy\":") < 0 ||
         cubicle_json_builder_append_string(
-            params, run_options->background ? "open" : "eof") < 0 ||
+            params,
+            run_options->background ||
+                    strcmp(run_options->mode, "tty") == 0
+                ? "open"
+                : "eof") < 0 ||
         cubicle_json_builder_append(params, ",\"argv\":[") < 0) {
         return -1;
     }
@@ -1643,7 +1647,8 @@ static int attachment_loop(const char *controller_socket,
                                                 &stderr_end);
             }
         }
-        if (result == 1 && !stdin_open) {
+        if (result == 1 &&
+            (!stdin_open || strcmp(mode, "tty") == 0)) {
             result = 0;
             break;
         }
@@ -1658,7 +1663,8 @@ static int attachment_loop(const char *controller_socket,
         int status_result = controller_is_completed(controller_socket,
                                                    &completed);
         if (status_result == 1 &&
-            stdout_end && stderr_end && tty_end && !stdin_open) {
+            ((stdout_end && stderr_end && tty_end && !stdin_open) ||
+             strcmp(mode, "tty") == 0)) {
             break;
         }
         if (status_result != 0) {
@@ -1726,42 +1732,12 @@ static int attachment_loop(const char *controller_socket,
     return result;
 }
 
-static int process_connect(const char *manager_socket,
-                           const cube_options_t *options,
-                           int argc,
-                           char **argv,
-                           int command_index)
+static int attach_to_process_id(const char *manager_socket,
+                                const char *process_id,
+                                const char *process_name,
+                                const char *mode,
+                                int read_only)
 {
-    int read_only = 0;
-    int argument_index = command_index + 1;
-    while (argument_index < argc) {
-        if (strcmp(argv[argument_index], "--ro") == 0) {
-            read_only = 1;
-            ++argument_index;
-            continue;
-        }
-        if (argv[argument_index][0] == '-' &&
-            argv[argument_index][1] == '-') {
-            fprintf(stderr, "cube: unknown connect option '%s'\n",
-                    argv[argument_index]);
-            return 2;
-        }
-        break;
-    }
-    if (argument_index + 1 != argc) {
-        fprintf(stderr, "cube: connect requires a process name\n");
-        return 2;
-    }
-
-    char process_id[CUBICLE_ID_STRING_LENGTH];
-    char mode[32];
-    int resolve_result = resolve_process_metadata(
-        manager_socket, options, argv[argument_index], process_id,
-        sizeof(process_id), mode, sizeof(mode));
-    if (resolve_result != 0) {
-        return resolve_result;
-    }
-
     unsigned int requested_channels = CUBE_CHANNEL_STDOUT | CUBE_CHANNEL_STDERR;
     if (strcmp(mode, "tty") == 0) {
         requested_channels = CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT;
@@ -1801,8 +1777,48 @@ static int process_connect(const char *manager_socket,
     }
     (void)offsets;
 
-    return attachment_loop(controller_socket, accepted_channels,
-                           argv[argument_index], mode, read_only);
+    return attachment_loop(controller_socket, accepted_channels, process_name,
+                           mode, read_only);
+}
+
+static int process_connect(const char *manager_socket,
+                           const cube_options_t *options,
+                           int argc,
+                           char **argv,
+                           int command_index)
+{
+    int read_only = 0;
+    int argument_index = command_index + 1;
+    while (argument_index < argc) {
+        if (strcmp(argv[argument_index], "--ro") == 0) {
+            read_only = 1;
+            ++argument_index;
+            continue;
+        }
+        if (argv[argument_index][0] == '-' &&
+            argv[argument_index][1] == '-') {
+            fprintf(stderr, "cube: unknown connect option '%s'\n",
+                    argv[argument_index]);
+            return 2;
+        }
+        break;
+    }
+    if (argument_index + 1 != argc) {
+        fprintf(stderr, "cube: connect requires a process name\n");
+        return 2;
+    }
+
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char mode[32];
+    int resolve_result = resolve_process_metadata(
+        manager_socket, options, argv[argument_index], process_id,
+        sizeof(process_id), mode, sizeof(mode));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+
+    return attach_to_process_id(manager_socket, process_id,
+                                argv[argument_index], mode, read_only);
 }
 
 static int wait_for_process(const char *manager_socket,
@@ -1905,12 +1921,6 @@ static int process_run(const char *manager_socket,
         fprintf(stderr, "cube: invalid process name\n");
         return 2;
     }
-    if (!run_options.background && strcmp(run_options.mode, "tty") == 0) {
-        fprintf(stderr,
-                "cube: foreground tty attach is not implemented yet; use --bg --tty or --stream\n");
-        return 2;
-    }
-
     char workspace[CUBICLE_NAME_MAX];
     if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
@@ -2000,6 +2010,11 @@ static int process_run(const char *manager_socket,
         return 0;
     }
     cleanup_rpc_response(&start_response);
+
+    if (strcmp(mode, "tty") == 0) {
+        return attach_to_process_id(manager_socket, process_id, process_name,
+                                    mode, 0);
+    }
 
     cube_rpc_response_t wait_response;
     int wait_result = wait_for_process(manager_socket, process_id,

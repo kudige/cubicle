@@ -130,7 +130,7 @@ process_get_response=$(send_manager_rpc process.get "{\"process\":\"$process_id\
 printf "%s" "$process_get_response" | grep -q '"success": true'
 printf "%s" "$process_get_response" | grep -q "\"id\": \"$process_id\""
 printf "%s" "$process_get_response" | grep -q '"friendly_name": "daemon-1"'
-printf "%s" "$process_get_response" | grep -q '"state": "running"'
+printf "%s" "$process_get_response" | grep -q '"state": "completed"'
 
 # Endpoint test for process.get workspace-local name lookup
 process_name_response=$(send_manager_rpc process.get "{\"process\":\"daemon-1\",\"workspace_id\":\"$workspace_id\"}")

@@ -371,6 +371,12 @@
 - Fixed stream connect terminal rendering:
   - stream-mode cube connect no longer puts the local terminal in raw mode
   - pseudo-terminal regression coverage ensures newline output returns to column zero
+- Fixed process list state after lifecycle actions:
+  - process.get and process.list synthesize terminal state from controller status/event logs
+  - regression coverage verifies cube ps reports a killed process as completed
+- Continued TTY attachment implementation:
+  - foreground cube run --tty now starts the managed process and immediately attaches through a manager-issued grant
+  - pseudo-terminal coverage verifies foreground TTY input reaches the child and exits cleanly
 
 ## Next
 

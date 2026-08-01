@@ -222,6 +222,19 @@ if [ "$json_kill_output" != "{}" ]; then
 fi
 api process-wait "$kill_process_id" --timeout-ms 2000 | grep -q '"success":true'
 
+kill_ps_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-ps-me sleep 30 | json_id)
+cube kill kill-ps-me >/dev/null
+for _ in $(seq 1 100); do
+    cube ps >"$tmpdir/after-kill-ps.out"
+    if grep -q '^kill-ps-me	stream	completed$' "$tmpdir/after-kill-ps.out"; then
+        break
+    fi
+    sleep 0.05
+done
+grep -q '^kill-ps-me	stream	completed$' "$tmpdir/after-kill-ps.out"
+api process-wait "$kill_ps_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
 remove_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name remove-me /bin/true | json_id)
 api process-wait "$remove_process_id" --timeout-ms 2000 | grep -q '"success":true'
@@ -288,21 +301,6 @@ if [ "$status" -ne 2 ]; then
     exit 1
 fi
 grep -q 'term mode is not implemented yet' "$tmpdir/run-term.err"
-
-set +e
-timeout 2 env XDG_STATE_HOME="$xdg_state_home" \
-    CUBICLE_MANAGER_SOCKET="$socket_path" \
-    "$CUBE" run --tty sleep 30 \
-    >"$tmpdir/run-tty-fg.out" 2>"$tmpdir/run-tty-fg.err"
-status=$?
-set -e
-if [ "$status" -ne 2 ]; then
-    echo "cube foreground tty run should exit 2, got $status" >&2
-    exit 1
-fi
-grep -q 'foreground tty attach is not implemented yet' "$tmpdir/run-tty-fg.err"
-cube ps >"$tmpdir/after-tty-fg-ps.out"
-grep -q '^Workspace Project A$' "$tmpdir/after-tty-fg-ps.out"
 
 set +e
 cube logs --follow build >"$tmpdir/logs-follow.out" 2>"$tmpdir/logs-follow.err"
