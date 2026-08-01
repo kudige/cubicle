@@ -89,6 +89,56 @@ def params_for_command(args):
         if args.workspace is not None:
             params["workspace_id"] = args.workspace
         return "process.list", params
+    if command == "process-start":
+        params = {
+            "workspace_id": args.workspace,
+            "mode": args.mode,
+            "stdin_policy": args.stdin_policy,
+            "argv": args.argv,
+        }
+        if args.friendly_name is not None:
+            params["friendly_name"] = args.friendly_name
+        if args.tty_rows is not None:
+            params["tty_rows"] = args.tty_rows
+        if args.tty_cols is not None:
+            params["tty_cols"] = args.tty_cols
+        return "process.start", params
+    if command == "process-signal":
+        return "process.signal", {
+            "process_id": args.process,
+            "signal_number": args.signal,
+        }
+    if command == "process-terminate":
+        return "process.terminate", {
+            "process_id": args.process,
+            "grace_period_ms": args.grace_period_ms,
+            "force_after_grace": args.force_after_grace,
+        }
+    if command == "workspace-key-add":
+        return "workspace.key.add", {
+            "workspace_id": args.workspace,
+            "public_key": args.public_key,
+            "label": args.label,
+            "capabilities": args.capabilities,
+        }
+    if command == "workspace-key-list":
+        return "workspace.key.list", {"workspace_id": args.workspace}
+    if command == "workspace-key-revoke":
+        return "workspace.key.revoke", {
+            "workspace_id": args.workspace,
+            "key_id": args.key,
+        }
+    if command == "attachment-request":
+        return "attachment.request", {
+            "process_id": args.process,
+            "channels": args.channels,
+            "mode": args.mode,
+            "stdout_offset": args.stdout_offset,
+            "stderr_offset": args.stderr_offset,
+            "tty_offset": args.tty_offset,
+            "rows": args.rows,
+            "cols": args.cols,
+        }
     if command == "events-list":
         params = {
             "after_sequence": args.after,
@@ -149,6 +199,52 @@ def build_parser():
 
     process_list = subparsers.add_parser("process-list")
     process_list.add_argument("--workspace")
+
+    process_start = subparsers.add_parser("process-start")
+    process_start.add_argument("--workspace", required=True)
+    process_start.add_argument("--friendly-name")
+    process_start.add_argument("--mode", choices=("stream", "tty"),
+                               default="stream")
+    process_start.add_argument("--stdin-policy", choices=("open", "eof"),
+                               default="open")
+    process_start.add_argument("--tty-rows", type=int)
+    process_start.add_argument("--tty-cols", type=int)
+    process_start.add_argument("argv", nargs="+")
+
+    process_signal = subparsers.add_parser("process-signal")
+    process_signal.add_argument("process")
+    process_signal.add_argument("signal", type=int)
+
+    process_terminate = subparsers.add_parser("process-terminate")
+    process_terminate.add_argument("process")
+    process_terminate.add_argument("--grace-period-ms", type=int, default=0)
+    process_terminate.add_argument("--force-after-grace",
+                                   action="store_true")
+
+    workspace_key_add = subparsers.add_parser("workspace-key-add")
+    workspace_key_add.add_argument("workspace")
+    workspace_key_add.add_argument("public_key")
+    workspace_key_add.add_argument("--label", default="")
+    workspace_key_add.add_argument("--capabilities", type=int, default=0)
+
+    workspace_key_list = subparsers.add_parser("workspace-key-list")
+    workspace_key_list.add_argument("workspace")
+
+    workspace_key_revoke = subparsers.add_parser("workspace-key-revoke")
+    workspace_key_revoke.add_argument("workspace")
+    workspace_key_revoke.add_argument("key")
+
+    attachment_request = subparsers.add_parser("attachment-request")
+    attachment_request.add_argument("process")
+    attachment_request.add_argument("--channels", type=int, required=True)
+    attachment_request.add_argument("--mode", choices=("observer",
+                                                       "interactive"),
+                                    default="observer")
+    attachment_request.add_argument("--stdout-offset", type=int, default=0)
+    attachment_request.add_argument("--stderr-offset", type=int, default=0)
+    attachment_request.add_argument("--tty-offset", type=int, default=0)
+    attachment_request.add_argument("--rows", type=int, default=0)
+    attachment_request.add_argument("--cols", type=int, default=0)
 
     events_list = subparsers.add_parser("events-list")
     events_list.add_argument("--workspace")

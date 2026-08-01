@@ -423,6 +423,20 @@ int main(void)
     assert(memcmp(chunk.data, "hello\n", 6) == 0);
     cubicle_output_chunk_free(&chunk);
 
+    cubicle_attachment_request_t attachment_request;
+    memset(&attachment_request, 0, sizeof(attachment_request));
+    attachment_request.process_id = process_id;
+    attachment_request.channels = CUBICLE_CHANNEL_STDOUT;
+    attachment_request.mode = CUBICLE_ATTACHMENT_OBSERVER;
+    cubicle_attachment_grant_t grant;
+    memset(&grant, 0, sizeof(grant));
+    // Endpoint test for attachment.request
+    assert(cubicle_attachment_request(client, &attachment_request, &grant) ==
+           CUBICLE_OK);
+    assert(strcmp(grant.process_id, process_id) == 0);
+    assert((grant.granted_channels & CUBICLE_CHANNEL_STDOUT) != 0);
+    assert(strncmp(grant.endpoint.uri, "unix://", 7) == 0);
+
     cubicle_event_query_t query;
     memset(&query, 0, sizeof(query));
     query.workspace_id = workspace_id;

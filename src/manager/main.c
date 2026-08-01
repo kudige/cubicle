@@ -844,6 +844,36 @@ static int terminate_controller(const cubicle_process_record_t *process)
                                    response, sizeof(response));
 }
 
+static int channel_mask_string(uint64_t channels, char *buffer,
+                               size_t buffer_size)
+{
+    const struct {
+        uint64_t bit;
+        const char *name;
+    } entries[] = {
+        {CUBICLE_CHANNEL_STDIN, "stdin"},
+        {CUBICLE_CHANNEL_STDOUT, "stdout"},
+        {CUBICLE_CHANNEL_STDERR, "stderr"},
+        {CUBICLE_CHANNEL_TTY, "tty"},
+    };
+
+    size_t used = 0;
+    buffer[0] = '\0';
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
+        if ((channels & entries[i].bit) == 0) {
+            continue;
+        }
+        int written = snprintf(buffer + used, buffer_size - used, "%s%s",
+                               used == 0 ? "" : ",", entries[i].name);
+        if (written < 0 || (size_t)written >= buffer_size - used) {
+            errno = ENOSPC;
+            return -1;
+        }
+        used += (size_t)written;
+    }
+    return used == 0 ? -1 : 0;
+}
+
 static int command_workspace_create(const manager_state_t *state, const char *name)
 {
     if (validate_field(name, "workspace name") < 0) {
@@ -2708,6 +2738,103 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "key not found", false, 0));
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "attachment.request") == 0) {
+        char process_id[128];
+        char mode[32] = "observer";
+        uint64_t channels = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id",
+                                             process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "channels", &channels,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "mode", mode,
+                                             sizeof(mode),
+                                             &validation_error) < 0 ||
+            channels == 0 ||
+            (channels & ~(uint64_t)(CUBICLE_CHANNEL_STDIN |
+                                    CUBICLE_CHANNEL_STDOUT |
+                                    CUBICLE_CHANNEL_STDERR |
+                                    CUBICLE_CHANNEL_TTY)) != 0 ||
+            (strcmp(mode, "observer") != 0 &&
+             strcmp(mode, "interactive") != 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid attachment request",
+                                             false, 0));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        uint64_t granted_channels = channels;
+        if (strcmp(process.mode,
+                   cubicle_process_mode_name(CUBICLE_PROCESS_TTY)) == 0) {
+            if ((granted_channels & CUBICLE_CHANNEL_STDOUT) != 0) {
+                granted_channels |= CUBICLE_CHANNEL_TTY;
+            }
+        } else {
+            granted_channels &= ~((uint64_t)CUBICLE_CHANNEL_TTY);
+        }
+        if (granted_channels == 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "no requested channels are available",
+                                             false, 0));
+        }
+
+        char grant_id[CUBICLE_ID_STRING_LENGTH];
+        if (cubicle_generate_hex_id(grant_id, sizeof(grant_id)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to allocate grant id",
+                                             false, errno));
+        }
+        char granted_channels_text[64];
+        if (channel_mask_string(granted_channels, granted_channels_text,
+                                sizeof(granted_channels_text)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode channels",
+                                             false, errno));
+        }
+
+        char endpoint_uri[CUBICLE_ENDPOINT_URI_MAX];
+        int uri_length = snprintf(endpoint_uri, sizeof(endpoint_uri),
+                                  "unix://%s", process.control_socket);
+        if (uri_length < 0 || (size_t)uri_length >= sizeof(endpoint_uri)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "controller endpoint too long",
+                                             false, 0));
+        }
+
+        uint64_t expires_at_ms = now_ms + 60000;
+        char result[2048];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"grant_id\":\"%s\",\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"process_id\":\"%s\",\"client_key_id\":\"local-bootstrap\",\"endpoint\":{\"uri\":\"%s\",\"server_identity\":\"local-controller\"},\"token\":\"local:%s:%s\",\"issued_at_ms\":%llu,\"expires_at_ms\":%llu,\"connection_limit\":1,\"granted_channels\":\"%s\",\"mode\":\"%s\"}",
+            grant_id, id, process.workspace_id, process.process_id,
+            endpoint_uri, grant_id, process.process_id,
+            (unsigned long long)now_ms,
+            (unsigned long long)expires_at_ms, granted_channels_text, mode);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "attachment grant too large",
+                                             false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "events.list") == 0) {
