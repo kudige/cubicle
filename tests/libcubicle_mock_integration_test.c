@@ -112,6 +112,15 @@ static void assert_log_contains(const char *log_path, const char *needle)
     free(log);
 }
 
+static void assert_log_contains_all(const char *log_path,
+                                    const char *const *needles,
+                                    size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        assert_log_contains(log_path, needles[i]);
+    }
+}
+
 static void run_manager_integration(const char *directory)
 {
     char manager_socket[256];
@@ -124,7 +133,7 @@ static void run_manager_integration(const char *directory)
     snprintf(controller_uri, sizeof(controller_uri), "unix://%s", controller_socket);
 
     pid_t manager_pid = start_server(manager_socket, manager_log, "manager",
-                                     "normal", controller_uri, 9);
+                                     "normal", controller_uri, 25);
     cubicle_client_t *client = connect_client(manager_socket);
 
     cubicle_manager_ping_result_t ping;
@@ -137,6 +146,9 @@ static void run_manager_integration(const char *directory)
     assert(cubicle_manager_status(client, &status) == CUBICLE_OK);
     assert(status.workspace_count == 2);
 
+    // Endpoint test for manager.reconcile
+    assert(cubicle_manager_reconcile(client) == CUBICLE_OK);
+
     cubicle_workspace_create_options_t create = {
         .name = "default",
         .request = { .idempotency_key = "idem-1", .timeout_ms = 42 },
@@ -146,6 +158,12 @@ static void run_manager_integration(const char *directory)
     assert(cubicle_workspace_create(client, &create, &workspace) == CUBICLE_OK);
     assert(strcmp(workspace.id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0);
 
+    cubicle_workspace_info_t fetched_workspace;
+    // Endpoint test for workspace.get
+    assert(cubicle_workspace_get(client, workspace.id, &fetched_workspace) ==
+           CUBICLE_OK);
+    assert(strcmp(fetched_workspace.name, "default") == 0);
+
     cubicle_workspace_info_t *workspaces = NULL;
     size_t workspace_count = 0;
     cubicle_page_info_t page;
@@ -154,6 +172,51 @@ static void run_manager_integration(const char *directory)
                                   &page) == CUBICLE_OK);
     assert(workspace_count == 1 && page.has_more);
     cubicle_workspace_list_free(workspaces);
+
+    // Endpoint test for workspace.rename
+    assert(cubicle_workspace_rename(client, workspace.id, "renamed", NULL) ==
+           CUBICLE_OK);
+
+    cubicle_workspace_stop_options_t stop = {
+        .grace_period_ms = 250,
+        .force_after_grace = true,
+    };
+    // Endpoint test for workspace.stop
+    assert(cubicle_workspace_stop(client, workspace.id, &stop) == CUBICLE_OK);
+
+    cubicle_workspace_delete_options_t delete_options = {
+        .stop_running_processes = true,
+        .remove_retained_processes = true,
+    };
+    // Endpoint test for workspace.delete
+    assert(cubicle_workspace_delete(client, workspace.id, &delete_options) ==
+           CUBICLE_OK);
+
+    unsigned char key[] = { 0xab, 0xcd };
+    cubicle_workspace_key_info_t key_info;
+    // Endpoint test for workspace.key.add
+    assert(cubicle_workspace_key_add(client, workspace.id, key, sizeof(key),
+                                     "owner", CUBICLE_CAP_PROCESS_START,
+                                     &key_info) == CUBICLE_OK);
+    assert(strcmp(key_info.fingerprint, "fp") == 0);
+
+    cubicle_workspace_key_info_t *keys = NULL;
+    size_t key_count = 0;
+    // Endpoint test for workspace.key.list
+    assert(cubicle_workspace_key_list(client, workspace.id, &keys,
+                                      &key_count) == CUBICLE_OK);
+    assert(key_count == 1);
+    cubicle_workspace_key_list_free(keys);
+
+    // Endpoint test for workspace.key.update
+    assert(cubicle_workspace_key_set_capabilities(client, workspace.id,
+                                                  key_info.key_id,
+                                                  CUBICLE_CAP_PROCESS_READ) ==
+           CUBICLE_OK);
+
+    // Endpoint test for workspace.key.revoke
+    assert(cubicle_workspace_key_revoke(client, workspace.id,
+                                        key_info.key_id) == CUBICLE_OK);
 
     const char *argv[] = { "echo", "ok" };
     cubicle_process_start_options_t start = {
@@ -168,12 +231,46 @@ static void run_manager_integration(const char *directory)
     assert(cubicle_process_start(client, &start, &process) == CUBICLE_OK);
     assert(process.state == CUBICLE_PROCESS_RUNNING);
 
+    cubicle_process_info_t fetched_process;
+    // Endpoint test for process.get
+    assert(cubicle_process_get(client, process.id, workspace.id,
+                               &fetched_process) == CUBICLE_OK);
+    assert(strcmp(fetched_process.id, process.id) == 0);
+
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    // Endpoint test for process.list
+    assert(cubicle_process_list(client, NULL, &processes, &process_count,
+                                NULL) == CUBICLE_OK);
+    assert(process_count == 1);
+    cubicle_process_list_free(processes);
+
     cubicle_output_chunk_t chunk;
     // Endpoint test for process.read_output
     assert(cubicle_process_read_output(client, process.id, CUBICLE_STREAM_STDOUT,
                                        5, 16, &chunk) == CUBICLE_OK);
     assert(chunk.length == 5 && memcmp(chunk.data, "hello", 5) == 0);
     cubicle_output_chunk_free(&chunk);
+
+    cubicle_process_terminate_options_t terminate = {
+        .grace_period_ms = 100,
+        .force_after_grace = true,
+    };
+    // Endpoint test for process.terminate
+    assert(cubicle_process_terminate(client, process.id, &terminate) ==
+           CUBICLE_OK);
+
+    // Endpoint test for process.kill
+    assert(cubicle_process_kill(client, process.id) == CUBICLE_OK);
+
+    cubicle_process_info_t waited_process;
+    // Endpoint test for process.wait
+    assert(cubicle_process_wait(client, process.id, 1000, &waited_process) ==
+           CUBICLE_OK);
+    assert(strcmp(waited_process.id, process.id) == 0);
+
+    // Endpoint test for process.remove
+    assert(cubicle_process_remove(client, process.id) == CUBICLE_OK);
 
     cubicle_attachment_request_t attachment_request = {
         .process_id = process.id,
@@ -197,17 +294,72 @@ static void run_manager_integration(const char *directory)
     // Endpoint test for process.signal
     assert(cubicle_process_signal(client, process.id, 15) == CUBICLE_OK);
 
+    // Endpoint test for manager.shutdown
+    assert(cubicle_manager_shutdown(client, false) == CUBICLE_OK);
+
     cubicle_client_disconnect(client);
     expect_server_exit(manager_pid);
 
-    assert_log_contains(manager_log, "\"method\":\"manager.ping\"");
-    assert_log_contains(manager_log, "\"method\":\"workspace.create\"");
+    const char *const expected_methods[] = {
+        "\"method\":\"manager.ping\"",
+        "\"method\":\"manager.status\"",
+        "\"method\":\"manager.reconcile\"",
+        "\"method\":\"manager.shutdown\"",
+        "\"method\":\"workspace.create\"",
+        "\"method\":\"workspace.get\"",
+        "\"method\":\"workspace.list\"",
+        "\"method\":\"workspace.rename\"",
+        "\"method\":\"workspace.stop\"",
+        "\"method\":\"workspace.delete\"",
+        "\"method\":\"workspace.key.add\"",
+        "\"method\":\"workspace.key.list\"",
+        "\"method\":\"workspace.key.update\"",
+        "\"method\":\"workspace.key.revoke\"",
+        "\"method\":\"process.start\"",
+        "\"method\":\"process.get\"",
+        "\"method\":\"process.list\"",
+        "\"method\":\"process.signal\"",
+        "\"method\":\"process.terminate\"",
+        "\"method\":\"process.kill\"",
+        "\"method\":\"process.wait\"",
+        "\"method\":\"process.remove\"",
+        "\"method\":\"process.read_output\"",
+        "\"method\":\"attachment.request\"",
+        "\"method\":\"events.list\"",
+    };
+    assert_log_contains_all(manager_log, expected_methods,
+                            sizeof(expected_methods) /
+                                sizeof(expected_methods[0]));
     assert_log_contains(manager_log, "\"idempotency_key\":\"idem-1\"");
-    assert_log_contains(manager_log, "\"method\":\"process.start\"");
     assert_log_contains(manager_log, "\"argv\":[\"echo\",\"ok\"]");
-    assert_log_contains(manager_log, "\"method\":\"attachment.request\"");
-    assert_log_contains(manager_log, "\"method\":\"events.list\"");
     assert_log_contains(manager_log, "\"signal_number\":15");
+    assert_log_contains(manager_log, "\"force_after_grace\":true");
+}
+
+static void send_controller_request(cubicle_transport_t *transport,
+                                    const char *method,
+                                    const char *params)
+{
+    char request[512];
+    int length = snprintf(request, sizeof(request),
+                          "{\"request_id\":\"raw-%s\",\"method\":\"%s\",\"params\":%s}",
+                          method, method, params);
+    assert(length > 0 && (size_t)length < sizeof(request));
+
+    cubicle_error_t error;
+    memset(&error, 0, sizeof(error));
+    void *response = NULL;
+    size_t response_length = 0;
+    assert(transport->vtable->request(transport, request, (size_t)length,
+                                      &response, &response_length,
+                                      &error) == CUBICLE_OK);
+    assert(response_length > 0);
+    char *response_text = calloc(response_length + 1, 1);
+    assert(response_text != NULL);
+    memcpy(response_text, response, response_length);
+    assert(strstr(response_text, "\"success\":true") != NULL);
+    free(response_text);
+    transport->vtable->response_free(transport, response);
 }
 
 static void run_controller_integration(const char *directory)
@@ -219,7 +371,7 @@ static void run_controller_integration(const char *directory)
 
     pid_t controller_pid = start_server(controller_socket, controller_log,
                                         "controller", "normal",
-                                        "unix:///unused.sock", 1);
+                                        "unix:///unused.sock", 5);
 
     cubicle_transport_t *transport = NULL;
     assert(cubicle_transport_unix_create(&transport) == CUBICLE_OK);
@@ -229,26 +381,32 @@ static void run_controller_integration(const char *directory)
     memset(&error, 0, sizeof(error));
     assert(transport->vtable->connect(transport, &endpoint, &error) == CUBICLE_OK);
 
-    const char request[] =
-        "{\"request_id\":\"raw-1\",\"method\":\"controller.status\",\"params\":{}}";
-    void *response = NULL;
-    size_t response_length = 0;
     // Endpoint test for controller.status
-    assert(transport->vtable->request(transport, request, sizeof(request) - 1,
-                                      &response, &response_length,
-                                      &error) == CUBICLE_OK);
-    assert(response_length > 0);
-    char *response_text = calloc(response_length + 1, 1);
-    assert(response_text != NULL);
-    memcpy(response_text, response, response_length);
-    assert(strstr(response_text, "\"success\":true") != NULL);
-    assert(strstr(response_text, "controller_id") != NULL);
-    free(response_text);
-    transport->vtable->response_free(transport, response);
+    send_controller_request(transport, "controller.status", "{}");
+    // Endpoint test for controller.read
+    send_controller_request(transport, "controller.read",
+                            "{\"stream\":\"stdout\",\"offset\":0,\"maximum_length\":5}");
+    // Endpoint test for controller.write
+    send_controller_request(transport, "controller.write",
+                            "{\"stream\":\"stdin\",\"data\":\"hello\"}");
+    // Endpoint test for controller.resize
+    send_controller_request(transport, "controller.resize",
+                            "{\"rows\":40,\"cols\":120}");
+    // Endpoint test for controller.detach
+    send_controller_request(transport, "controller.detach", "{}");
     transport->vtable->destroy(transport);
     expect_server_exit(controller_pid);
 
-    assert_log_contains(controller_log, "\"method\":\"controller.status\"");
+    const char *const expected_controller_methods[] = {
+        "\"method\":\"controller.status\"",
+        "\"method\":\"controller.read\"",
+        "\"method\":\"controller.write\"",
+        "\"method\":\"controller.resize\"",
+        "\"method\":\"controller.detach\"",
+    };
+    assert_log_contains_all(controller_log, expected_controller_methods,
+                            sizeof(expected_controller_methods) /
+                                sizeof(expected_controller_methods[0]));
 }
 
 static void run_error_scenario(const char *directory, const char *scenario,
