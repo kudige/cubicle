@@ -46,6 +46,16 @@ if [ "$output" != "Workspace Project A created and selected" ]; then
     exit 1
 fi
 
+json_create_output=$(cube --json workspace create "Project JSON")
+printf "%s" "$json_create_output" | grep -q '"name":"Project JSON"'
+printf "%s" "$json_create_output" | grep -q '"id"'
+
+json_current_output=$(cube --json workspace)
+printf "%s" "$json_current_output" | grep -q '"workspace":"Project JSON"'
+
+json_select_output=$(cube --json workspace select "Project A")
+printf "%s" "$json_select_output" | grep -q '"name":"Project A"'
+
 output=$(cube workspace)
 if [ "$output" != "Workspace Project A selected" ]; then
     echo "unexpected selected workspace output: $output" >&2
@@ -68,6 +78,23 @@ list_output=$(cube workspace list)
 printf "%s\n" "$list_output" | grep -q '^WORKSPACE ID	NAME$'
 printf "%s\n" "$list_output" | grep -q '	Project A$'
 printf "%s\n" "$list_output" | grep -q '	Project B$'
+
+json_list_output=$(cube --json workspace list)
+printf "%s" "$json_list_output" | grep -q '"workspaces"'
+printf "%s" "$json_list_output" | grep -q '"name":"Project A"'
+printf "%s" "$json_list_output" | grep -q '"name":"Project B"'
+
+json_stop_output=$(cube --json workspace stop "Project JSON")
+if [ "$json_stop_output" != "{}" ]; then
+    echo "unexpected workspace stop JSON output: $json_stop_output" >&2
+    exit 1
+fi
+
+json_delete_output=$(cube --json workspace delete "Project JSON")
+if [ "$json_delete_output" != "{}" ]; then
+    echo "unexpected workspace delete JSON output: $json_delete_output" >&2
+    exit 1
+fi
 
 output=$(cube workspace stop "Project B")
 if [ "$output" != "Workspace Project B stopped" ]; then

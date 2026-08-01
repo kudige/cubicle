@@ -356,13 +356,16 @@
   - cube events lists retained workspace events through the manager API
   - cube --json events prints the raw API result for scripting
   - follow modes fail fast until subscription-backed CLI loops are implemented
+- Added cube workspace JSON output contracts:
+  - cube --json workspace reports the selected workspace name
+  - cube --json workspace create/select/list/stop/delete return manager API results
 
 ## Next
 
 1. Continue implementing the cube CLI specification.
    - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
    - Add foreground attach behavior through manager-issued attachment grants.
-   - Add JSON output contracts for workspace list and lifecycle commands.
+   - Add JSON output contracts for remaining lifecycle commands.
    - Add follow mode for logs and events through manager APIs.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.

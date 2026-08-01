@@ -462,6 +462,7 @@ static int valid_name(const char *name)
 }
 
 static int workspace_create_or_select(const char *manager_socket,
+                                      const cube_options_t *options,
                                       const char *name)
 {
     if (!valid_name(name)) {
@@ -480,34 +481,46 @@ static int workspace_create_or_select(const char *manager_socket,
     cube_rpc_response_t response;
     int selected_existing = call_manager(manager_socket, "workspace.get",
                                          params, &response) == 0;
-    cleanup_rpc_response(&response);
 
     if (!selected_existing) {
+        cleanup_rpc_response(&response);
         snprintf(params, sizeof(params), "{\"name\":\"%s\"}", escaped_name);
         if (call_manager(manager_socket, "workspace.create", params,
                          &response) < 0) {
             return print_rpc_error(&response);
         }
-        cleanup_rpc_response(&response);
     }
 
     if (store_selected_workspace(name) < 0) {
+        cleanup_rpc_response(&response);
         fprintf(stderr, "cube: failed to persist selected workspace: %s\n",
                 strerror(errno));
         return 2;
     }
 
-    printf("Workspace %s %s\n", name,
-           selected_existing ? "selected" : "created and selected");
+    if (options->json) {
+        printf("%s\n", response.result_json);
+    } else {
+        printf("Workspace %s %s\n", name,
+               selected_existing ? "selected" : "created and selected");
+    }
+    cleanup_rpc_response(&response);
     return 0;
 }
 
-static int workspace_list(const char *manager_socket)
+static int workspace_list(const char *manager_socket,
+                          const cube_options_t *options)
 {
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "workspace.list", "{}",
                      &response) < 0) {
         return print_rpc_error(&response);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+        cleanup_rpc_response(&response);
+        return 0;
     }
 
     cubicle_json_doc_t document;
@@ -543,18 +556,29 @@ static int workspace_list(const char *manager_socket)
     return 0;
 }
 
-static int workspace_show_current(void)
+static int workspace_show_current(const cube_options_t *options)
 {
     char workspace[CUBICLE_NAME_MAX];
     if (read_selected_workspace(workspace, sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
-    printf("Workspace %s selected\n", workspace);
+    if (options->json) {
+        char escaped_workspace[CUBICLE_NAME_MAX * 2];
+        if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                                workspace) < 0) {
+            fprintf(stderr, "cube: workspace name is too long\n");
+            return 2;
+        }
+        printf("{\"workspace\":\"%s\"}\n", escaped_workspace);
+    } else {
+        printf("Workspace %s selected\n", workspace);
+    }
     return 0;
 }
 
 static int workspace_simple_action(const char *manager_socket,
+                                   const cube_options_t *options,
                                    const char *method,
                                    const char *workspace)
 {
@@ -583,9 +607,13 @@ static int workspace_simple_action(const char *manager_socket,
     if (call_manager(manager_socket, method, params, &response) < 0) {
         return print_rpc_error(&response);
     }
+    if (options->json) {
+        printf("%s\n", response.result_json);
+    } else {
+        printf("Workspace %s %s\n", workspace,
+               strcmp(method, "workspace.stop") == 0 ? "stopped" : "deleted");
+    }
     cleanup_rpc_response(&response);
-    printf("Workspace %s %s\n", workspace,
-           strcmp(method, "workspace.stop") == 0 ? "stopped" : "deleted");
     return 0;
 }
 
@@ -602,6 +630,7 @@ static int resolve_workspace_argument(const cube_options_t *options,
 }
 
 static int command_workspace(const char *manager_socket,
+                             const cube_options_t *options,
                              int argc,
                              char **argv,
                              int command_index)
@@ -609,27 +638,32 @@ static int command_workspace(const char *manager_socket,
     int remaining = argc - command_index - 1;
     char **arguments = &argv[command_index + 1];
     if (remaining == 0) {
-        return workspace_show_current();
+        return workspace_show_current(options);
     }
     if (remaining == 1 && strcmp(arguments[0], "list") == 0) {
-        return workspace_list(manager_socket);
+        return workspace_list(manager_socket, options);
     }
     if (remaining == 2 && strcmp(arguments[0], "create") == 0) {
-        return workspace_create_or_select(manager_socket, arguments[1]);
+        return workspace_create_or_select(manager_socket, options,
+                                          arguments[1]);
     }
     if (remaining == 2 && strcmp(arguments[0], "select") == 0) {
-        return workspace_create_or_select(manager_socket, arguments[1]);
+        return workspace_create_or_select(manager_socket, options,
+                                          arguments[1]);
     }
     if (remaining == 2 && strcmp(arguments[0], "stop") == 0) {
-        return workspace_simple_action(manager_socket, "workspace.stop",
+        return workspace_simple_action(manager_socket, options,
+                                       "workspace.stop",
                                        arguments[1]);
     }
     if (remaining == 2 && strcmp(arguments[0], "delete") == 0) {
-        return workspace_simple_action(manager_socket, "workspace.delete",
+        return workspace_simple_action(manager_socket, options,
+                                       "workspace.delete",
                                        arguments[1]);
     }
     if (remaining == 1) {
-        return workspace_create_or_select(manager_socket, arguments[0]);
+        return workspace_create_or_select(manager_socket, options,
+                                          arguments[0]);
     }
 
     fprintf(stderr, "cube: invalid workspace command\n");
@@ -1490,7 +1524,8 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(command, "workspace") == 0) {
-        return command_workspace(manager_socket, argc, argv, command_index);
+        return command_workspace(manager_socket, &options, argc, argv,
+                                 command_index);
     }
 
     if (strcmp(command, "run") == 0) {
