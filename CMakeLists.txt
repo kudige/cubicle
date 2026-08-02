@@ -99,8 +99,21 @@ target_compile_options(cube PRIVATE
     -Wpedantic
 )
 
+add_executable(desk
+    src/desk/main.c
+)
+
+target_link_libraries(desk PRIVATE cubicle_common)
+
+target_compile_options(desk PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 install(TARGETS
     cube
+    desk
     cubicle-manager
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
