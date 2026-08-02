@@ -47,6 +47,18 @@ if [ ! -S "$socket_path" ]; then
     exit 1
 fi
 
+for _ in $(seq 1 100); do
+    if python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+
+if ! python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+    echo "manager daemon did not become ready" >&2
+    exit 1
+fi
+
 cube() {
     XDG_STATE_HOME="$xdg_state_home" \
         CUBICLE_MANAGER_SOCKET="$socket_path" \

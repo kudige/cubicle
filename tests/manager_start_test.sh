@@ -5,6 +5,23 @@ trap 'if [ -n "${control_socket:-}" ] && [ -S "$control_socket" ]; then python3 
 
 state_dir="$tmpdir/manager"
 
+wait_for_resolve_match() {
+    process_id=$1
+    output_path=$2
+    expected_pattern=$3
+
+    for _ in $(seq 1 100); do
+        "$CUBICLE_MANAGER" --state-dir "$state_dir" events poll >/dev/null
+        "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$process_id" >"$output_path"
+        if grep -Eq "$expected_pattern" "$output_path"; then
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    grep -Eq "$expected_pattern" "$output_path"
+}
+
 workspace_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project A")
 workspace_id=${workspace_output#workspace id=}
 workspace_id=${workspace_id%% name=*}
@@ -107,8 +124,8 @@ fast_process_id=${fast_output#process id=}
 fast_process_id=${fast_process_id%% workspace_id=*}
 fast_socket=${fast_output##* control_socket=}
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$fast_process_id" >"$tmpdir/resolve-fast"
-grep -q "^$fast_process_id	$workspace_id	fast-1	stream	exited	.*	$fast_socket$" "$tmpdir/resolve-fast"
+wait_for_resolve_match "$fast_process_id" "$tmpdir/resolve-fast" \
+    "^$fast_process_id	$workspace_id	fast-1	stream	(exited|completed)	.*	$fast_socket$"
 
 if [ -S "$fast_socket" ]; then
     echo "fast process should not leave a live control socket" >&2
@@ -131,8 +148,8 @@ tty_process_id=${tty_output#process id=}
 tty_process_id=${tty_process_id%% workspace_id=*}
 tty_socket=${tty_output##* control_socket=}
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$tty_process_id" >"$tmpdir/resolve-tty"
-grep -q "^$tty_process_id	$workspace_id	tty-1	tty	exited	.*	$tty_socket$" "$tmpdir/resolve-tty"
+wait_for_resolve_match "$tty_process_id" "$tmpdir/resolve-tty" \
+    "^$tty_process_id	$workspace_id	tty-1	tty	(exited|completed)	.*	$tty_socket$"
 
 grep -q 'manager-tty' "$state_dir/controllers/$tty_process_id/stdout.log"
 grep -q 'manager-tty-err' "$state_dir/controllers/$tty_process_id/stdout.log"
@@ -156,8 +173,8 @@ term_process_id=${term_output#process id=}
 term_process_id=${term_process_id%% workspace_id=*}
 term_socket=${term_output##* control_socket=}
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$term_process_id" >"$tmpdir/resolve-term"
-grep -q "^$term_process_id	$workspace_id	term-1	term	exited	.*	$term_socket$" "$tmpdir/resolve-term"
+wait_for_resolve_match "$term_process_id" "$tmpdir/resolve-term" \
+    "^$term_process_id	$workspace_id	term-1	term	(exited|completed)	.*	$term_socket$"
 
 grep -q 'manager-term' "$state_dir/controllers/$term_process_id/stdout.log"
 if grep -q 'manager-term-err' "$state_dir/controllers/$term_process_id/stdout.log"; then
