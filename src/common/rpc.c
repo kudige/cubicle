@@ -194,6 +194,66 @@ int cubicle_json_builder_append_string(cubicle_json_builder_t *builder,
                : -1;
 }
 
+int cubicle_json_builder_append_string_n(cubicle_json_builder_t *builder,
+                                         const void *value,
+                                         size_t value_length)
+{
+    if (builder == NULL || (value == NULL && value_length > 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (cubicle_json_builder_append(builder, "\"") < 0) {
+        return -1;
+    }
+
+    const unsigned char *cursor = value;
+    for (size_t i = 0; i < value_length; ++i) {
+        char escaped[8];
+        const char *chunk = NULL;
+        switch (cursor[i]) {
+        case '"':
+            chunk = "\\\"";
+            break;
+        case '\\':
+            chunk = "\\\\";
+            break;
+        case '\b':
+            chunk = "\\b";
+            break;
+        case '\f':
+            chunk = "\\f";
+            break;
+        case '\n':
+            chunk = "\\n";
+            break;
+        case '\r':
+            chunk = "\\r";
+            break;
+        case '\t':
+            chunk = "\\t";
+            break;
+        default:
+            if (cursor[i] < 0x20) {
+                snprintf(escaped, sizeof(escaped), "\\u%04x", cursor[i]);
+                chunk = escaped;
+            } else {
+                if (cubicle_json_builder_reserve(builder, 1) < 0) {
+                    return -1;
+                }
+                builder->data[builder->length++] = (char)cursor[i];
+                builder->data[builder->length] = '\0';
+                continue;
+            }
+            break;
+        }
+        if (cubicle_json_builder_append(builder, chunk) < 0) {
+            return -1;
+        }
+    }
+
+    return cubicle_json_builder_append(builder, "\"");
+}
+
 int cubicle_json_escape(char *buffer, size_t buffer_size, const char *value)
 {
     if (buffer == NULL || buffer_size == 0 || value == NULL) {

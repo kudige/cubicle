@@ -1,9 +1,114 @@
 #include "internal.h"
 
+#include "cubicle/transport_tcp.h"
+#include "cubicle/transport_unix.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static cubicle_error_code_t attachment_set_error(cubicle_attachment_t *attachment,
+                                                 cubicle_error_code_t code,
+                                                 int system_errno,
+                                                 const char *message)
+{
+    return set_error(attachment == NULL ? NULL : &attachment->last_error,
+                     code, system_errno, false, message);
+}
+
+static cubicle_error_code_t create_controller_client(
+    const cubicle_attachment_grant_t *grant,
+    cubicle_client_t **client_out,
+    cubicle_error_t *error)
+{
+    cubicle_transport_t *transport = NULL;
+    cubicle_error_code_t code;
+
+    if (strncmp(grant->endpoint.uri, "tcp://", 6) == 0) {
+        code = cubicle_transport_tcp_create(&transport);
+    } else {
+        code = cubicle_transport_unix_create(&transport);
+    }
+    if (code != CUBICLE_OK) {
+        set_error(error, code, 0, false, "failed to create controller transport");
+        return code;
+    }
+
+    cubicle_client_t *client = calloc(1, sizeof(*client));
+    if (client == NULL) {
+        transport->vtable->destroy(transport);
+        return set_error(error, CUBICLE_ERR_INTERNAL, ENOMEM, false,
+                         "failed to allocate controller client");
+    }
+
+    client->endpoint = grant->endpoint;
+    client->transport = transport;
+    snprintf(client->session.session_id, sizeof(client->session.session_id),
+             "local-session");
+    client->session.protocol_major = 0;
+    client->session.protocol_minor = 1;
+
+    code = transport->vtable->connect(transport, &client->endpoint,
+                                      &client->last_error);
+    if (code != CUBICLE_OK) {
+        if (error != NULL) {
+            *error = client->last_error;
+        }
+        transport->vtable->destroy(transport);
+        free(client);
+        return code;
+    }
+
+    *client_out = client;
+    if (error != NULL) {
+        memset(error, 0, sizeof(*error));
+    }
+    return CUBICLE_OK;
+}
+
+static cubicle_stream_kind_t attachment_read_stream(
+    const cubicle_attachment_t *attachment)
+{
+    if ((attachment->channels & CUBICLE_CHANNEL_TTY) != 0) {
+        return CUBICLE_STREAM_TTY;
+    }
+    if ((attachment->channels & CUBICLE_CHANNEL_STDOUT) != 0) {
+        return CUBICLE_STREAM_STDOUT;
+    }
+    return CUBICLE_STREAM_STDERR;
+}
+
+static uint64_t *attachment_stream_offset(cubicle_attachment_t *attachment,
+                                          cubicle_stream_kind_t stream)
+{
+    if (stream == CUBICLE_STREAM_TTY) {
+        return &attachment->tty_offset;
+    }
+    if (stream == CUBICLE_STREAM_STDERR) {
+        return &attachment->stderr_offset;
+    }
+    return &attachment->stdout_offset;
+}
+
+static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
+                                           const char *method,
+                                           const char *params,
+                                           char **response_out)
+{
+    cubicle_client_t *client = NULL;
+    cubicle_error_code_t code = create_controller_client(
+        &attachment->grant, &client, &attachment->last_error);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    code = rpc_object(client, method, params, response_out);
+    if (code != CUBICLE_OK) {
+        attachment->last_error = *cubicle_client_last_error(client);
+    }
+    cubicle_client_disconnect(client);
+    return code;
+}
 
 cubicle_error_code_t cubicle_attachment_request(cubicle_client_t *client,
     const cubicle_attachment_request_t *request,
@@ -40,38 +145,216 @@ cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t
     const cubicle_attachment_options_t *options, cubicle_attachment_t **attachment_out)
 {
     (void)options;
-    if (grant == NULL || attachment_out == NULL || grant->grant_id[0] == '\0') return CUBICLE_ERR_INVALID_ARGUMENT;
-    return CUBICLE_ERR_UNSUPPORTED;
+    if (grant == NULL || attachment_out == NULL || grant->grant_id[0] == '\0') {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+
+    cubicle_attachment_t *attachment = calloc(1, sizeof(*attachment));
+    if (attachment == NULL) {
+        return CUBICLE_ERR_INTERNAL;
+    }
+
+    attachment->grant = *grant;
+
+    char params[2048];
+    cubicle_json_builder_t builder = {0};
+    if (cubicle_json_builder_append(&builder, "{\"token\":") < 0 ||
+        cubicle_json_builder_append_string(&builder, grant->token) < 0 ||
+        cubicle_json_builder_appendf(
+            &builder, ",\"channels\":%u,\"mode\":",
+            (unsigned int)grant->granted_channels) < 0 ||
+        cubicle_json_builder_append_string(&builder,
+            grant->mode == CUBICLE_ATTACHMENT_INTERACTIVE ? "interactive"
+                                                          : "observer") < 0 ||
+        cubicle_json_builder_append(&builder, "}") < 0 ||
+        snprintf(params, sizeof(params), "%s", builder.data) < 0 ||
+        strlen(builder.data) >= sizeof(params)) {
+        cubicle_json_builder_cleanup(&builder);
+        cubicle_attachment_disconnect(attachment);
+        return CUBICLE_ERR_RESOURCE_LIMIT;
+    }
+    cubicle_json_builder_cleanup(&builder);
+
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment,
+                                               "controller.attach", params,
+                                               &response);
+    if (code != CUBICLE_OK) {
+        cubicle_attachment_disconnect(attachment);
+        return code;
+    }
+
+    const char *result = json_object_field(response, "result");
+    uint64_t value = 0;
+    if (result == NULL ||
+        json_u64_field(result, "accepted_channels", &value) < 0) {
+        free(response);
+        cubicle_attachment_disconnect(attachment);
+        return CUBICLE_ERR_PROTOCOL;
+    }
+    attachment->channels = (cubicle_channel_mask_t)value;
+    attachment->mode = grant->mode;
+    if (json_u64_field(result, "stdout_offset", &attachment->stdout_offset) < 0) {
+        attachment->stdout_offset = 0;
+    }
+    if (json_u64_field(result, "stderr_offset", &attachment->stderr_offset) < 0) {
+        attachment->stderr_offset = 0;
+    }
+    if (json_u64_field(result, "tty_offset", &attachment->tty_offset) < 0) {
+        attachment->tty_offset = 0;
+    }
+    free(response);
+
+    *attachment_out = attachment;
+    return CUBICLE_OK;
 }
 
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length)
 {
-    (void)buffer; (void)length;
-    if (attachment == NULL) return -1;
-    set_error(&attachment->last_error, CUBICLE_ERR_UNSUPPORTED, 0, false, "attachment read is not implemented");
-    return -1;
+    if (attachment == NULL || buffer == NULL || length == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if ((attachment->channels & (CUBICLE_CHANNEL_TTY | CUBICLE_CHANNEL_STDOUT |
+                                 CUBICLE_CHANNEL_STDERR)) == 0) {
+        (void)attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
+                                   "attachment is not readable");
+        errno = EINVAL;
+        return -1;
+    }
+
+    cubicle_stream_kind_t stream = attachment_read_stream(attachment);
+    uint64_t *offset = attachment_stream_offset(attachment, stream);
+    size_t maximum_length = length > 8192 ? 8192 : length;
+    char params[256];
+    int params_length = snprintf(
+        params, sizeof(params),
+        "{\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":%zu}",
+        stream_name(stream), (unsigned long long)*offset, maximum_length);
+    if (params_length < 0 || (size_t)params_length >= sizeof(params)) {
+        (void)attachment_set_error(attachment, CUBICLE_ERR_RESOURCE_LIMIT, 0,
+                                   "read request is too large");
+        errno = ENOSPC;
+        return -1;
+    }
+
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment, "controller.read",
+                                               params, &response);
+    if (code != CUBICLE_OK) {
+        errno = EIO;
+        return -1;
+    }
+
+    const char *result = json_object_field(response, "result");
+    uint64_t next_offset = 0;
+    if (result == NULL ||
+        json_u64_field(result, "next_offset", &next_offset) < 0 ||
+        next_offset < *offset) {
+        free(response);
+        (void)attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                   "invalid read response");
+        errno = EPROTO;
+        return -1;
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, result) < 0) {
+        free(response);
+        (void)attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                   "invalid read response");
+        errno = EPROTO;
+        return -1;
+    }
+    yyjson_val *data_value = yyjson_obj_get(document.root, "data");
+    const char *text = yyjson_is_str(data_value) ? yyjson_get_str(data_value)
+                                                : NULL;
+    size_t data_length = yyjson_is_str(data_value)
+                             ? yyjson_get_len(data_value)
+                             : 0;
+    if (text == NULL || data_length > length) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        (void)attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                   "invalid read data");
+        errno = EPROTO;
+        return -1;
+    }
+    memcpy(buffer, text, data_length);
+    cubicle_json_cleanup(&document);
+    free(response);
+    *offset = next_offset;
+    return (ssize_t)data_length;
 }
 
 ssize_t cubicle_attachment_write(cubicle_attachment_t *attachment, const void *buffer, size_t length)
 {
-    (void)buffer; (void)length;
-    if (attachment == NULL) return -1;
-    set_error(&attachment->last_error, CUBICLE_ERR_UNSUPPORTED, 0, false, "attachment write is not implemented");
-    return -1;
+    if (attachment == NULL || (buffer == NULL && length > 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if ((attachment->channels & CUBICLE_CHANNEL_STDIN) == 0) {
+        (void)attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
+                                   "attachment is not writable");
+        errno = EINVAL;
+        return -1;
+    }
+    if (length == 0) {
+        return 0;
+    }
+
+    size_t chunk_length = length > 4095 ? 4095 : length;
+    cubicle_json_builder_t params = {0};
+    if (cubicle_json_builder_append(&params, "{\"data\":") < 0 ||
+        cubicle_json_builder_append_string_n(&params, buffer,
+                                             chunk_length) < 0 ||
+        cubicle_json_builder_append(&params, "}") < 0) {
+        cubicle_json_builder_cleanup(&params);
+        (void)attachment_set_error(attachment, CUBICLE_ERR_RESOURCE_LIMIT, 0,
+                                   "write chunk is too large");
+        errno = ENOSPC;
+        return -1;
+    }
+
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment, "controller.write",
+                                               params.data, &response);
+    cubicle_json_builder_cleanup(&params);
+    free(response);
+    if (code != CUBICLE_OK) {
+        errno = EIO;
+        return -1;
+    }
+    return (ssize_t)chunk_length;
 }
 
 cubicle_error_code_t cubicle_attachment_resize(cubicle_attachment_t *attachment,
                                                unsigned int rows, unsigned int cols)
 {
-    (void)rows; (void)cols;
-    if (attachment == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    return set_error(&attachment->last_error, CUBICLE_ERR_UNSUPPORTED, 0, false, "attachment resize is not implemented");
+    if (attachment == NULL || rows == 0 || cols == 0) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    char params[128];
+    int length = snprintf(params, sizeof(params),
+                          "{\"rows\":%u,\"columns\":%u}", rows, cols);
+    if (length < 0 || (size_t)length >= sizeof(params)) {
+        return attachment_set_error(attachment, CUBICLE_ERR_RESOURCE_LIMIT, 0,
+                                    "resize request is too large");
+    }
+
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment,
+                                               "controller.resize", params,
+                                               &response);
+    free(response);
+    return code;
 }
 
 cubicle_error_code_t cubicle_attachment_close_input(cubicle_attachment_t *attachment)
 {
     if (attachment == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
-    return set_error(&attachment->last_error, CUBICLE_ERR_UNSUPPORTED, 0, false, "attachment close input is not implemented");
+    attachment->channels &= (cubicle_channel_mask_t)~CUBICLE_CHANNEL_STDIN;
+    return CUBICLE_OK;
 }
 
 const cubicle_error_t *cubicle_attachment_last_error(const cubicle_attachment_t *attachment)
@@ -81,6 +364,8 @@ const cubicle_error_t *cubicle_attachment_last_error(const cubicle_attachment_t 
 
 void cubicle_attachment_disconnect(cubicle_attachment_t *attachment)
 {
+    if (attachment == NULL) {
+        return;
+    }
     free(attachment);
 }
-

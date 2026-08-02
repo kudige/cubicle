@@ -100,10 +100,21 @@ target_compile_options(cube PRIVATE
 )
 
 add_executable(desk
+    src/client/attachment.c
+    src/client/auth.c
+    src/client/client.c
+    src/client/decode.c
+    src/client/events.c
+    src/client/process.c
+    src/client/rpc_client.c
+    src/client/transport_tcp.c
+    src/client/transport_unix.c
+    src/client/workspace.c
     src/desk/main.c
 )
 
 target_link_libraries(desk PRIVATE cubicle_common)
+target_include_directories(desk PRIVATE third_party/yyjson)
 
 target_compile_options(desk PRIVATE
     -Wall
