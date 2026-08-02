@@ -62,12 +62,18 @@ typedef enum desk_active_cube {
     DESK_ACTIVE_CUBE_THREE = 3
 } desk_active_cube_t;
 
+typedef struct desk_cell {
+    char ch;
+    char sgr[64];
+} desk_cell_t;
+
 typedef struct desk_grid {
-    char *cells;
+    desk_cell_t *cells;
     int rows;
     int cols;
     int cursor_row;
     int cursor_col;
+    char current_sgr[64];
     bool escape_active;
     bool csi_active;
     char csi[64];
@@ -592,10 +598,15 @@ static void desk_render_cube_one(const desk_terminal_t *terminal,
 static void grid_clear(desk_grid_t *grid)
 {
     if (grid->cells != NULL) {
-        memset(grid->cells, ' ', (size_t)grid->rows * (size_t)grid->cols);
+        size_t count = (size_t)grid->rows * (size_t)grid->cols;
+        for (size_t i = 0; i < count; ++i) {
+            grid->cells[i].ch = ' ';
+            grid->cells[i].sgr[0] = '\0';
+        }
     }
     grid->cursor_row = 0;
     grid->cursor_col = 0;
+    grid->current_sgr[0] = '\0';
 }
 
 static int grid_resize(desk_grid_t *grid, int rows, int cols)
@@ -608,7 +619,7 @@ static int grid_resize(desk_grid_t *grid, int rows, int cols)
         return 0;
     }
 
-    char *cells = malloc((size_t)rows * (size_t)cols);
+    desk_cell_t *cells = malloc((size_t)rows * (size_t)cols * sizeof(*cells));
     if (cells == NULL) {
         return -1;
     }
@@ -630,15 +641,23 @@ static void grid_cleanup(desk_grid_t *grid)
 static void grid_scroll(desk_grid_t *grid)
 {
     if (grid->rows <= 1) {
-        memset(grid->cells, ' ', (size_t)grid->cols);
+        for (int col = 0; col < grid->cols; ++col) {
+            grid->cells[col].ch = ' ';
+            grid->cells[col].sgr[0] = '\0';
+        }
         grid->cursor_row = 0;
         grid->cursor_col = 0;
         return;
     }
     memmove(grid->cells, grid->cells + grid->cols,
-            (size_t)(grid->rows - 1) * (size_t)grid->cols);
-    memset(grid->cells + (size_t)(grid->rows - 1) * (size_t)grid->cols,
-           ' ', (size_t)grid->cols);
+            (size_t)(grid->rows - 1) * (size_t)grid->cols *
+                sizeof(*grid->cells));
+    desk_cell_t *last_row =
+        grid->cells + (size_t)(grid->rows - 1) * (size_t)grid->cols;
+    for (int col = 0; col < grid->cols; ++col) {
+        last_row[col].ch = ' ';
+        last_row[col].sgr[0] = '\0';
+    }
     grid->cursor_row = grid->rows - 1;
 }
 
@@ -682,8 +701,11 @@ static void grid_put_char(desk_grid_t *grid, unsigned char ch)
         grid->cursor_col < 0 || grid->cursor_col >= grid->cols) {
         return;
     }
-    grid->cells[(size_t)grid->cursor_row * (size_t)grid->cols +
-                (size_t)grid->cursor_col] = (char)ch;
+    desk_cell_t *cell =
+        &grid->cells[(size_t)grid->cursor_row * (size_t)grid->cols +
+                     (size_t)grid->cursor_col];
+    cell->ch = (char)ch;
+    snprintf(cell->sgr, sizeof(cell->sgr), "%s", grid->current_sgr);
     if (grid->cursor_col + 1 >= grid->cols) {
         grid_newline(grid);
     } else {
@@ -704,6 +726,48 @@ static int parse_csi_number(const char *text, int default_value)
     return (int)parsed;
 }
 
+static void grid_clear_cell(desk_grid_t *grid, int row, int col)
+{
+    if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
+        return;
+    }
+    desk_cell_t *cell =
+        &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
+    cell->ch = ' ';
+    cell->sgr[0] = '\0';
+}
+
+static void grid_clear_line_range(desk_grid_t *grid, int start_col,
+                                  int end_col)
+{
+    if (grid->cursor_row < 0 || grid->cursor_row >= grid->rows) {
+        return;
+    }
+    if (start_col < 0) {
+        start_col = 0;
+    }
+    if (end_col >= grid->cols) {
+        end_col = grid->cols - 1;
+    }
+    for (int col = start_col; col <= end_col; ++col) {
+        grid_clear_cell(grid, grid->cursor_row, col);
+    }
+}
+
+static void grid_set_sgr(desk_grid_t *grid)
+{
+    if (grid->csi[0] == '\0' || strcmp(grid->csi, "0") == 0) {
+        grid->current_sgr[0] = '\0';
+        return;
+    }
+
+    int length = snprintf(grid->current_sgr, sizeof(grid->current_sgr),
+                          "\x1b[%sm", grid->csi);
+    if (length < 0 || (size_t)length >= sizeof(grid->current_sgr)) {
+        grid->current_sgr[0] = '\0';
+    }
+}
+
 static void grid_apply_csi(desk_grid_t *grid)
 {
     if (grid->csi_length == 0) {
@@ -717,11 +781,18 @@ static void grid_apply_csi(desk_grid_t *grid)
         return;
     }
     if (command == 'K') {
-        if (grid->cursor_row >= 0 && grid->cursor_row < grid->rows) {
-            memset(grid->cells +
-                       (size_t)grid->cursor_row * (size_t)grid->cols,
-                   ' ', (size_t)grid->cols);
+        int mode = parse_csi_number(grid->csi, 0);
+        if (mode == 1) {
+            grid_clear_line_range(grid, 0, grid->cursor_col);
+        } else if (mode == 2) {
+            grid_clear_line_range(grid, 0, grid->cols - 1);
+        } else {
+            grid_clear_line_range(grid, grid->cursor_col, grid->cols - 1);
         }
+        return;
+    }
+    if (command == 'm') {
+        grid_set_sgr(grid);
         return;
     }
     if (command == 'H' || command == 'f') {
@@ -801,7 +872,7 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_grid_t *grid,
                                   const char *title)
 {
-    char frame[16384];
+    char frame[65536];
     size_t used = 0;
     desk_layout_t layout;
 
@@ -810,10 +881,12 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
     }
 
     append_text(frame, sizeof(frame), &used, "\x1b[3;1H");
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
     append_cell_text(frame, sizeof(frame), &used, title, layout.left_width);
 
     for (int row = 0; row < grid->rows; ++row) {
         char cursor[32];
+        char active_sgr[64] = "";
         int terminal_row = row + 4;
         int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;1H",
                                      terminal_row);
@@ -822,17 +895,30 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
         }
         for (int col = 0; col < layout.left_width; ++col) {
             char ch = ' ';
+            const char *sgr = "";
             if (row < grid->rows && col < grid->cols) {
-                ch = grid->cells[(size_t)row * (size_t)grid->cols +
+                const desk_cell_t *cell =
+                    &grid->cells[(size_t)row * (size_t)grid->cols +
                                  (size_t)col];
+                ch = cell->ch;
+                sgr = cell->sgr;
+            }
+            if (strcmp(active_sgr, sgr) != 0) {
+                append_text(frame, sizeof(frame), &used,
+                            sgr[0] == '\0' ? "\x1b[0m" : sgr);
+                snprintf(active_sgr, sizeof(active_sgr), "%s", sgr);
             }
             if (used + 1 < sizeof(frame)) {
                 frame[used++] = ch;
                 frame[used] = '\0';
             }
         }
+        if (active_sgr[0] != '\0') {
+            append_text(frame, sizeof(frame), &used, "\x1b[0m");
+        }
     }
 
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)write_all(STDOUT_FILENO, frame, used);
 }
 
