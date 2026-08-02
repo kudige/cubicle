@@ -107,6 +107,7 @@ int read_control_client_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result);

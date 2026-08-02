@@ -384,7 +384,7 @@ fi
 grep -q 'invalid signal' "$tmpdir/signal-invalid.err"
 
 cube run --fg --term --name term-run sh -c \
-    'test -t 0 && test -t 1 && ! test -t 2; printf "term-out\n"; printf "term-err\n" >&2; sleep 0.2' \
+    'test -t 0 && test -t 1 && test -t 2; printf "term-out\n"; printf "term-err\n" >&2; sleep 0.2' \
     >"$tmpdir/term-run.out" 2>"$tmpdir/term-run.err"
 grep -q 'term-out' "$tmpdir/term-run.out"
 grep -q 'term-err' "$tmpdir/term-run.err"
