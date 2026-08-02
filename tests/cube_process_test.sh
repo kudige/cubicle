@@ -295,6 +295,60 @@ done
 grep -q '^kill-ps-me	stream	completed$' "$tmpdir/after-kill-ps.out"
 api process-wait "$kill_ps_process_id" --timeout-ms 2000 | grep -q '"success":true'
 
+kill_cleanup_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-cleanup-me sleep 30 | json_id)
+kill_cleanup_output=$(cube kill --cleanup kill-cleanup-me)
+printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me killed$'
+printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me removed$'
+set +e
+api process-get "$kill_cleanup_process_id" >"$tmpdir/kill-cleanup-get.out" 2>&1
+status=$?
+set -e
+if [ "$status" -eq 0 ]; then
+    echo "kill --cleanup should remove killed process" >&2
+    exit 1
+fi
+
+kill_all_one_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-all-one sleep 30 | json_id)
+kill_all_two_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-all-two sleep 30 | json_id)
+kill_all_output=$(cube kill --all --cleanup)
+printf "%s\n" "$kill_all_output" | grep -q '^Killed 2 processes$'
+printf "%s\n" "$kill_all_output" | grep -q '^Removed 2 processes$'
+set +e
+api process-get "$kill_all_one_process_id" >"$tmpdir/kill-all-one-get.out" 2>&1
+first_status=$?
+api process-get "$kill_all_two_process_id" >"$tmpdir/kill-all-two-get.out" 2>&1
+second_status=$?
+set -e
+if [ "$first_status" -eq 0 ] || [ "$second_status" -eq 0 ]; then
+    echo "kill --all --cleanup should remove killed processes" >&2
+    exit 1
+fi
+
+kill_config_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-config-cleanup sleep 30 | json_id)
+config_path="$tmpdir/kill-cleanup.cfg"
+cat >"$config_path" <<EOF
+[client]
+manager=unix://$socket_path
+
+[defaults]
+kill_cleanup=true
+EOF
+kill_config_output=$(XDG_STATE_HOME="$xdg_state_home" CUBICLE_CONFIG="$config_path" "$CUBE" kill kill-config-cleanup)
+printf "%s\n" "$kill_config_output" | grep -q '^Process kill-config-cleanup killed$'
+printf "%s\n" "$kill_config_output" | grep -q '^Process kill-config-cleanup removed$'
+set +e
+api process-get "$kill_config_process_id" >"$tmpdir/kill-config-get.out" 2>&1
+status=$?
+set -e
+if [ "$status" -eq 0 ]; then
+    echo "configured kill cleanup should remove killed process" >&2
+    exit 1
+fi
+
 remove_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name remove-me /bin/true | json_id)
 api process-wait "$remove_process_id" --timeout-ms 2000 | grep -q '"success":true'

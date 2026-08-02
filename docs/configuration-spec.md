@@ -250,12 +250,16 @@ For local Unix endpoints, `server_identity` may be empty only when trust is esta
 [defaults]
 launch=foreground
 mode=tty
+kill_cleanup=false
 ```
 
 Keys:
 
 - `launch`: `foreground` or `background`.
 - `mode`: `stream`, `tty`, or `term`.
+- `kill_cleanup`: `true` or `false`; when true, `cube kill NAME` behaves like
+  `cube kill --cleanup NAME` unless overridden by a future explicit no-cleanup
+  option.
 
 The packaged production default should eventually be:
 
@@ -263,6 +267,7 @@ The packaged production default should eventually be:
 [defaults]
 launch=foreground
 mode=term
+kill_cleanup=false
 ```
 
 Until term mode exists, package defaults should use `tty`; if TTY is not yet available, use `stream`.

@@ -473,7 +473,7 @@ Core lifecycle commands:
 ```console
 cube signal NAME SIGNAL
 cube stop NAME
-cube kill NAME
+cube kill [--all] [--cleanup] [NAME]
 cube push [--close] NAME
 cube remove NAME
 cube cleanup
@@ -484,6 +484,11 @@ Recommended semantics:
 - `signal`: send the named/numbered signal to the managed process group.
 - `stop`: request graceful termination, then optionally force after configured grace.
 - `kill`: immediate forceful termination.
+- `kill --all`: immediate forceful termination for all running processes in
+  the selected workspace.
+- `kill --cleanup`: after a successful kill, wait briefly for the killed
+  process to exit and remove that process record. `defaults.kill_cleanup` may
+  make this behavior the default.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--close`.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
@@ -556,6 +561,7 @@ A simple initial representation:
 [defaults]
 launch = "foreground"
 mode = "tty"
+kill_cleanup = false
 ```
 
 Suggested user configuration location:
@@ -736,7 +742,7 @@ Implement:
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
 - `cube stop NAME`
-- `cube kill NAME`
+- `cube kill [--all] [--cleanup] [NAME]`
 - `cube remove NAME`
 - `cube cleanup`
 - explicit `--workspace NAME`

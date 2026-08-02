@@ -22,7 +22,7 @@ cube logs [--follow] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
 cube stop NAME
-cube kill NAME
+cube kill [--all] [--cleanup] [NAME]
 cube signal NAME SIGNAL
 cube remove NAME
 cube cleanup
@@ -289,6 +289,18 @@ cube connect --ro build
 `cube kill NAME`
 : Request forceful termination through the manager.
 
+`cube kill --cleanup NAME`
+: Request forceful termination, wait briefly for the process to exit, then
+  remove that process record.
+
+`cube kill --all`
+: Request forceful termination for all running processes in the selected
+  workspace.
+
+`cube kill --all --cleanup`
+: Kill all running processes in the selected workspace, then remove the killed
+  process records after they exit.
+
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,
   `TERM`, `KILL`, `USR1`, or `USR2`; names may also include the `SIG` prefix,
@@ -307,6 +319,8 @@ Examples:
 ```sh
 cube stop server
 cube kill stuck-build
+cube kill --cleanup stuck-build
+cube kill --all --cleanup
 cube signal worker TERM
 cube signal worker 15
 cube remove old-build
@@ -400,6 +414,7 @@ server_identity=
 [defaults]
 launch=foreground
 mode=term
+kill_cleanup=false
 ```
 
 Examples:

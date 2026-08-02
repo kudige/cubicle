@@ -3,6 +3,8 @@ set -eu
 rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
 rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"
 rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
+rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
+rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
 rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"
@@ -31,14 +33,33 @@ if [ -s "$PWD/cube-help.err" ]; then
     exit 1
 fi
 grep -q 'Usage:' "$PWD/cube-help.out"
-grep -q 'cube workspace NAME' "$PWD/cube-help.out"
+grep -q 'cube workspace \[NAME\]' "$PWD/cube-help.out"
 grep -q 'cube run \[--fg|--bg\] \[--stream|--tty|--term\]' "$PWD/cube-help.out"
+grep -q 'cube inspect NAME' "$PWD/cube-help.out"
 grep -q 'cube logs \[--follow\] NAME' "$PWD/cube-help.out"
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
+grep -q 'cube signal NAME SIGNAL' "$PWD/cube-help.out"
+grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME\]' "$PWD/cube-help.out"
+grep -q 'cube remove NAME' "$PWD/cube-help.out"
 grep -q 'cube config show|paths|validate' "$PWD/cube-help.out"
 grep -q 'cube cleanup' "$PWD/cube-help.out"
-grep -q 'cube access list|add|set-role|remove' "$PWD/cube-help.out"
+grep -q 'cube access list|add|set-role|remove|revoke' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
+
+"$CUBE" kill --help >"$PWD/cube-kill-help.out" 2>"$PWD/cube-kill-help.err"
+if [ -s "$PWD/cube-kill-help.err" ]; then
+    echo "cube kill help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube kill \[--cleanup\] NAME' "$PWD/cube-kill-help.out"
+grep -q 'cube kill --all \[--cleanup\]' "$PWD/cube-kill-help.out"
+
+"$CUBE" connect --help >"$PWD/cube-connect-help.out" 2>"$PWD/cube-connect-help.err"
+if [ -s "$PWD/cube-connect-help.err" ]; then
+    echo "cube connect help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-connect-help.out"
 
 set +e
 "$CUBE" --manager-socket "$PWD/missing-manager.sock" ps \
@@ -78,6 +99,8 @@ grep -q "unknown command 'wat'" "$PWD/cube-unknown.err"
 rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
 rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"
 rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
+rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
+rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
 rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"
