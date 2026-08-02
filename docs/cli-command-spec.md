@@ -58,6 +58,9 @@ Connected to [CScope]. Detach with Ctrl-\\ d
 
 $ cube connect --ro bash
 Connected read-only to [bash]. Detach with Ctrl-\\ d
+
+$ printf 'make test\n' | cube push shell
+Pushed input to [shell]
 ```
 
 ## 3. Launch command shape
@@ -386,7 +389,64 @@ cube connect --in NAME
 
 These should not complicate Phase 2.
 
-### 6.3 Detach sequence
+### 6.3 Non-interactive input push
+
+```console
+cube push [--close] NAME
+```
+
+`cube push` reads all bytes from its own stdin and writes them to the managed
+process stdin without creating an interactive terminal attachment.
+
+Default semantics:
+
+- request an input-capable attachment grant from the manager,
+- connect directly or by relay to the process controller,
+- copy `cube` stdin to the process stdin or PTY input,
+- return after all local stdin has been written,
+- do not read or display process output,
+- do not stop, detach, or otherwise alter process lifecycle.
+
+By default, `cube push NAME` leaves the managed process stdin open after the
+write completes. This allows one-shot input injection into a still-running
+process without causing EOF:
+
+```console
+printf 'status\n' | cube push shell
+```
+
+`--close` writes all input and then closes the managed process stdin:
+
+```console
+printf 'quit\n' | cube push --close worker
+```
+
+Close semantics:
+
+- for stream processes, close the controller-side stdin pipe after all bytes
+  are written;
+- for TTY and term processes, send the bytes to the PTY input and then request
+  the controller's closest supported input-close/EOF action;
+- if the process mode or controller cannot represent input close, fail clearly
+  instead of pretending EOF was delivered.
+
+`cube push` is not a replacement for `cube connect`:
+
+- it does not put the local terminal in raw mode,
+- it does not forward resize events,
+- it does not consume attachment escape sequences,
+- it is suitable for scripts, pasted command batches, and feeding data from
+  files.
+
+Examples:
+
+```console
+cat commands.txt | cube push repl
+printf '\003' | cube push terminal
+cube push --close build < input.txt
+```
+
+### 6.4 Detach sequence
 
 Phase 2 implements exactly one client escape sequence:
 
@@ -414,6 +474,7 @@ Core lifecycle commands:
 cube signal NAME SIGNAL
 cube stop NAME
 cube kill NAME
+cube push [--close] NAME
 cube remove NAME
 cube cleanup
 ```
@@ -423,6 +484,8 @@ Recommended semantics:
 - `signal`: send the named/numbered signal to the managed process group.
 - `stop`: request graceful termination, then optionally force after configured grace.
 - `kill`: immediate forceful termination.
+- `push`: copy local stdin into process stdin, optionally closing stdin after
+  the write with `--close`.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
 - `cleanup`: remove retained terminal process state in the current workspace; skip live processes.
 
@@ -649,6 +712,7 @@ Usage:
   cube run [OPTIONS] COMMAND [ARG...]
   cube ps
   cube connect [--ro] NAME
+  cube push [--close] NAME
   cube stop NAME
 
 Run and reconnect to persistent processes inside Cubicle workspaces.
@@ -711,9 +775,13 @@ Implement:
 
 - `cube connect NAME`
 - `cube connect --ro NAME`
+- `cube push NAME`
+- `cube push --close NAME`
 - manager attachment-grant request
 - direct/relay controller connection according to grant
 - interactive input forwarding
+- non-interactive stdin push without output attachment
+- optional stdin close after push
 - output forwarding
 - TTY resize propagation
 - exactly one escape command:

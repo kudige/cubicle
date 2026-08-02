@@ -41,7 +41,7 @@ grep -q 'cube access list|add|set-role|remove' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
 
 set +e
-env -u CUBICLE_MANAGER_SOCKET "$CUBE" ps \
+"$CUBE" --manager-socket "$PWD/missing-manager.sock" ps \
     >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
 status=$?
 set -e
