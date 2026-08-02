@@ -167,7 +167,7 @@ term_output=$("$CUBICLE_MANAGER" \
     --friendly-name term-1 \
     --mode term \
     --stdin-policy eof \
-    -- sh -c 'test -t 0 && test -t 1 && ! test -t 2; printf "manager-term\n"; printf "manager-term-err\n" >&2')
+    -- sh -c 'test -t 0 && test -t 1 && test -t 2 && printf "manager-term\n"; printf "manager-term-err\n" >&2')
 
 term_process_id=${term_output#process id=}
 term_process_id=${term_process_id%% workspace_id=*}
