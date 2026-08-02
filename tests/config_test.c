@@ -56,7 +56,7 @@ static void test_defaults(void)
     assert(config.manager_socket_mode == 0660);
     assert(strcmp(config.manager_socket_group, "") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
-    assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
+    assert(config.default_mode == CUBICLE_PROCESS_TTY);
     assert(config.default_kill_cleanup == 0);
 }
 

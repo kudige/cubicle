@@ -153,8 +153,9 @@ cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
 : Use one PTY for terminal-style stdin/stdout/stderr.
 
 `--term`
-: Use a PTY for stdin/stdout and capture stderr separately. This is the
-  packaged default mode.
+: Use terminal-style split capture. In the current implementation,
+  stdin/stderr share the controlling PTY and stdout is captured through a
+  second PTY.
 
 `--name NAME`
 : Set the process friendly name. Without `--name`, `cube` derives a name from
@@ -413,7 +414,7 @@ server_identity=
 
 [defaults]
 launch=foreground
-mode=term
+mode=tty
 kill_cleanup=false
 ```
 

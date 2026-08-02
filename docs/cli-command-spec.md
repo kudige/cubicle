@@ -22,7 +22,7 @@ The CLI should hide manager/controller implementation details. Users work with:
 4. Defaults are policy-driven, not inferred from executable names.
 5. The initial built-in launch default is foreground.
 6. The initial built-in mode default is TTY when available, otherwise stream during development.
-7. Once term mode is implemented, the production built-in mode default becomes term.
+7. Term mode remains explicit; the production built-in mode default is TTY.
 8. Closing or detaching a terminal does not stop the managed process.
 9. Workspace and process names are the primary user-facing identifiers.
 10. Advanced protocol, controller, endpoint, and grant details remain hidden.
@@ -823,7 +823,8 @@ Do not include command-specific matching yet.
 
 ### Phase 4 — Term mode
 
-Goal: provide the intended production default combining terminal interactivity with separately captured stderr.
+Goal: provide an explicit mode combining terminal interactivity with separately
+captured streams. The default mode remains `tty`.
 
 Implement:
 
@@ -834,7 +835,7 @@ Implement:
 - read-only combined display
 - terminal resize behaviour
 - tests for `isatty(stdout)`, non-TTY stderr, ordering expectations, backpressure, and EOF
-- migration of the built-in production mode default from TTY to term
+- explicit term-mode selection without changing the TTY production default
 
 Configured users who explicitly selected TTY or stream remain unchanged.
 
@@ -958,8 +959,8 @@ The following are intentional and should not be changed casually:
 - `cube COMMAND...` is the common launch form,
 - default launch policy is configurable and initially foreground,
 - default mode is configurable and never inferred from executable names,
-- TTY is the Phase 1 default,
-- term becomes the production built-in default after implementation,
+- TTY is the production built-in default,
+- term is an explicit mode for split terminal stream capture,
 - explicit CLI options always override defaults and rules,
 - attachment is separate from process lifetime,
 - Phase 2 starts with only one detach escape sequence,

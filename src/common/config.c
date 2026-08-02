@@ -262,7 +262,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
                  config->manager_listen_uri);
     }
     config->default_launch = CUBICLE_LAUNCH_FOREGROUND;
-    config->default_mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+    config->default_mode = CUBICLE_PROCESS_TTY;
     config->default_kill_cleanup = 0;
     snprintf(config->source, sizeof(config->source), "built-in defaults");
 }
