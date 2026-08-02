@@ -2659,7 +2659,14 @@ static int command_events_poll(const manager_state_t *state, int argc, char **ar
         }
     }
 
-    return poll_workspace_events(state, workspace, stdout);
+    if (poll_workspace_events(state, workspace, stdout) != 0) {
+        return 1;
+    }
+    if (reconcile_process_records(state) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        return 1;
+    }
+    return 0;
 }
 
 static int command_events_list(const manager_state_t *state, int argc, char **argv)
@@ -5517,6 +5524,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     memset(&sessions, 0, sizeof(sessions));
     while (!shutdown_requested) {
         if (poll_workspace_events(state, NULL, NULL) != 0) {
+            manager_log_error(errno);
+        }
+        if (reconcile_process_records(state) < 0) {
             manager_log_error(errno);
         }
 
