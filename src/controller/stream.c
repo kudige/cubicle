@@ -869,8 +869,8 @@ static int run_pty_mode(char **command, const char *state_dir,
 {
     int master_fd = -1;
     int slave_fd = -1;
-    int stderr_master_fd = -1;
-    int stderr_slave_fd = -1;
+    int stdout_master_fd = -1;
+    int stdout_slave_fd = -1;
     int capture_stderr =
         process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
 
@@ -879,7 +879,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         return 1;
     }
     if (capture_stderr &&
-        open_pty_pair(&stderr_master_fd, &stderr_slave_fd) < 0) {
+        open_pty_pair(&stdout_master_fd, &stdout_slave_fd) < 0) {
         close_if_open(&master_fd);
         close_if_open(&slave_fd);
         return 1;
@@ -890,51 +890,51 @@ static int run_pty_mode(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         close_if_open(&master_fd);
         close_if_open(&slave_fd);
-        close_if_open(&stderr_master_fd);
-        close_if_open(&stderr_slave_fd);
+        close_if_open(&stdout_master_fd);
+        close_if_open(&stdout_slave_fd);
         return 1;
     }
 
     if (child_pid == 0) {
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         if (setsid() < 0) {
             _exit(127);
         }
         ioctl(slave_fd, TIOCSCTTY, 0);
 
         if (dup2(slave_fd, STDIN_FILENO) < 0 ||
-            dup2(slave_fd, STDOUT_FILENO) < 0 ||
-            dup2(capture_stderr ? stderr_slave_fd : slave_fd,
-                 STDERR_FILENO) < 0) {
+            dup2(capture_stderr ? stdout_slave_fd : slave_fd,
+                 STDOUT_FILENO) < 0 ||
+            dup2(slave_fd, STDERR_FILENO) < 0) {
             _exit(127);
         }
 
         close_if_open(&slave_fd);
-        close_if_open(&stderr_slave_fd);
+        close_if_open(&stdout_slave_fd);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
 
     close_if_open(&slave_fd);
-    close_if_open(&stderr_slave_fd);
+    close_if_open(&stdout_slave_fd);
 
     if (set_nonblocking(master_fd) < 0 ||
-        (capture_stderr && set_nonblocking(stderr_master_fd) < 0)) {
+        (capture_stderr && set_nonblocking(stdout_master_fd) < 0)) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         return 1;
     }
 
     terminal_size_state_t terminal_size = {.rows = 0, .columns = 0, .known = 0};
-    if (apply_terminal_window_size(master_fd, stderr_master_fd,
+    if (apply_terminal_window_size(master_fd, stdout_master_fd,
                                    &terminal_size) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         return 1;
     }
 
@@ -956,7 +956,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
@@ -973,20 +973,20 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
     cubicle_log(CUBICLE_LOG_INFO, "controller", "control socket initialized");
 
     stream_pipe_t pipes[2] = {
-        {.fd = master_fd,
+        {.fd = capture_stderr ? stdout_master_fd : master_fd,
          .output_fd = STDOUT_FILENO,
          .log_fd = state.stdout_fd,
          .name = "stdout",
          .offset = &state.stdout_offset,
          .open = 1},
-        {.fd = capture_stderr ? stderr_master_fd : -1,
+        {.fd = capture_stderr ? master_fd : -1,
          .output_fd = STDERR_FILENO,
          .log_fd = state.stderr_fd,
          .name = "stderr",
@@ -1004,7 +1004,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         close_if_open(&control_fd);
         close_if_open(&master_fd);
-        close_if_open(&stderr_master_fd);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
@@ -1023,7 +1023,7 @@ static int run_pty_mode(char **command, const char *state_dir,
     int input_fd = stdin_policy == STDIN_POLICY_OPEN ? master_fd : -1;
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
                                           input_fd, local_input_fd, master_fd,
-                                          stderr_master_fd,
+                                          stdout_master_fd,
                                           &terminal_size,
                                           &child_reaped, &child_result);
 
