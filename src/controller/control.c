@@ -107,13 +107,18 @@ int open_control_socket(const char *path)
         return -1;
     }
 
+    if (set_cloexec(fd) < 0 ||
+        set_nonblocking(fd) < 0) {
+        close(fd);
+        return -1;
+    }
+
     struct sockaddr_un address;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
     snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
 
-    if (set_nonblocking(fd) < 0 ||
-        bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
         chmod(path, 0600) < 0 ||
         listen(fd, 16) < 0) {
         close(fd);
@@ -1211,6 +1216,10 @@ int accept_control_clients(int listen_fd,
                 return 0;
             }
 
+            return -1;
+        }
+        if (set_cloexec(client_fd) < 0) {
+            close(client_fd);
             return -1;
         }
 

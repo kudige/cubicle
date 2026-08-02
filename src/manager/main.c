@@ -284,6 +284,16 @@ static int set_fd_nonblocking(int fd)
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+static int set_fd_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+    if (flags < 0) {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
 static int lock_state_file(const manager_state_t *state, const char *file_name)
 {
     char path[PATH_MAX];
@@ -396,6 +406,10 @@ static int is_live_unix_socket(const char *path)
     if (fd < 0) {
         return -1;
     }
+    if (set_fd_cloexec(fd) < 0) {
+        close(fd);
+        return -1;
+    }
 
     struct sockaddr_un address;
     memset(&address, 0, sizeof(address));
@@ -442,6 +456,10 @@ static int open_manager_socket(const char *path, mode_t socket_mode,
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
+        return -1;
+    }
+    if (set_fd_cloexec(fd) < 0) {
+        close(fd);
         return -1;
     }
 
@@ -541,6 +559,12 @@ static int open_manager_tcp_listener(const char *uri)
                     address->ai_protocol);
         if (fd < 0) {
             saved_errno = errno;
+            continue;
+        }
+        if (set_fd_cloexec(fd) < 0) {
+            saved_errno = errno;
+            close(fd);
+            fd = -1;
             continue;
         }
 
@@ -5521,6 +5545,12 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                     continue;
                 }
                 manager_log_error(errno);
+                result = 1;
+                break;
+            }
+            if (set_fd_cloexec(client_fd) < 0) {
+                manager_log_error(errno);
+                close(client_fd);
                 result = 1;
                 break;
             }

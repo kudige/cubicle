@@ -74,6 +74,7 @@ typedef struct control_client {
 
 void close_if_open(int *fd);
 int set_nonblocking(int fd);
+int set_cloexec(int fd);
 int write_best_effort(int fd, const char *buffer, size_t length);
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
