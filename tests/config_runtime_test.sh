@@ -39,7 +39,7 @@ launch=background
 mode=term
 EOF
 
-CUBICLE_CONFIG="$config_file" "$CUBICLE_MANAGER" daemon --event-interval-ms 50 &
+CUBICLE_CONFIG="$config_file" "$CUBICLE_MANAGER" daemon --foreground --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -132,7 +132,7 @@ user_state_home="$tmpdir/user-state"
 user_runtime_dir="$tmpdir/user-run"
 user_socket="$user_runtime_dir/cubicle/manager.sock"
 XDG_STATE_HOME="$user_state_home" XDG_RUNTIME_DIR="$user_runtime_dir" \
-    "$CUBICLE_MANAGER" --controller-bin "$controller_binary" daemon \
+    "$CUBICLE_MANAGER" --controller-bin "$controller_binary" daemon --foreground \
     --event-interval-ms 50 &
 manager_pid=$!
 

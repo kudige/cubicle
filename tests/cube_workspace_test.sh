@@ -21,7 +21,7 @@ xdg_runtime_dir="$tmpdir/xdg-runtime"
 xdg_config_home="$tmpdir/xdg-config"
 mkdir -p "$xdg_runtime_dir"
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
+"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --foreground \
     --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 

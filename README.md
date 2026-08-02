@@ -90,6 +90,10 @@ python3 tests/api_client.py tcp://127.0.0.1:7777 ping
 cube --manager-socket tcp://127.0.0.1:7777 workspace LAN
 ```
 
+`cubicle-manager daemon` detaches from the current terminal after startup.
+Use `cubicle-manager daemon --foreground` when running under a supervisor or
+test harness that should own the manager process directly.
+
 Do not expose this mode to untrusted networks. It provides no authentication or
 transport encryption.
 

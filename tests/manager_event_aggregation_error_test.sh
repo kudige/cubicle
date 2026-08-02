@@ -37,7 +37,7 @@ EOF
 mkdir "$state_dir/workspace-events.log"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
-    --control-socket "$socket_path" --event-interval-ms 50 \
+    --foreground --control-socket "$socket_path" --event-interval-ms 50 \
     2>"$tmpdir/manager.err" &
 manager_pid=$!
 

@@ -138,7 +138,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N]\n"
+            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--foreground] [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
@@ -5351,11 +5351,54 @@ static int handle_manager_connection(const manager_state_t *state,
     return 0;
 }
 
+static int daemonize_manager(void)
+{
+    fflush(NULL);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid > 0) {
+        _exit(0);
+    }
+
+    if (setsid() < 0) {
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid > 0) {
+        _exit(0);
+    }
+
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull < 0) {
+        return -1;
+    }
+    if (dup2(devnull, STDIN_FILENO) < 0 ||
+        dup2(devnull, STDOUT_FILENO) < 0 ||
+        dup2(devnull, STDERR_FILENO) < 0) {
+        int saved_errno = errno;
+        close(devnull);
+        errno = saved_errno;
+        return -1;
+    }
+    if (devnull > STDERR_FILENO) {
+        close(devnull);
+    }
+    return 0;
+}
+
 static int command_daemon(const manager_state_t *state, int argc, char **argv)
 {
     const char *requested_socket = NULL;
     const char *requested_uri = NULL;
     int allow_insecure = 0;
+    int foreground = 0;
     int poll_interval_ms = 250;
 
     for (int i = 0; i < argc; ++i) {
@@ -5365,6 +5408,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             requested_uri = argv[++i];
         } else if (strcmp(argv[i], "--allow-insecure") == 0) {
             allow_insecure = 1;
+        } else if (strcmp(argv[i], "--foreground") == 0) {
+            foreground = 1;
         } else if (strcmp(argv[i], "--event-interval-ms") == 0 && i + 1 < argc) {
             poll_interval_ms = atoi(argv[++i]);
         } else {
@@ -5422,6 +5467,16 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     if (reconcile_process_records(state) < 0) {
+        manager_log_error(errno);
+        close(listen_fd);
+        if (cleanup_path[0] != '\0') {
+            unlink(cleanup_path);
+        }
+        unlock_state(daemon_lock_fd);
+        return 1;
+    }
+
+    if (!foreground && daemonize_manager() < 0) {
         manager_log_error(errno);
         close(listen_fd);
         if (cleanup_path[0] != '\0') {

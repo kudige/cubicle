@@ -32,7 +32,7 @@ workspace_id=${workspace_id%% name=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" \
     --controller-bin "$CUBICLE_CONTROLLER" \
-    daemon --control-socket "$socket_path" --event-interval-ms 50 &
+    daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do

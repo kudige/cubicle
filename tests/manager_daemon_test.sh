@@ -94,7 +94,7 @@ server.bind(sys.argv[1])
 server.close()
 PY
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --control-socket "$socket_path" --event-interval-ms 50 &
+"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -266,5 +266,42 @@ manager_pid=
 
 if [ -S "$socket_path" ]; then
     echo "manager daemon did not remove control socket" >&2
+    exit 1
+fi
+
+detached_state_dir="$tmpdir/detached-manager"
+detached_socket_path="$tmpdir/detached-manager.sock"
+if ! "$CUBICLE_MANAGER" --state-dir "$detached_state_dir" daemon \
+    --control-socket "$detached_socket_path" --event-interval-ms 50 \
+    >"$tmpdir/detached-manager.out" 2>"$tmpdir/detached-manager.err"; then
+    echo "detached manager daemon startup failed" >&2
+    cat "$tmpdir/detached-manager.err" >&2
+    exit 1
+fi
+grep -q '^\[INFO\] manager: ' "$tmpdir/detached-manager.err"
+
+for _ in $(seq 1 100); do
+    if [ -S "$detached_socket_path" ]; then
+        break
+    fi
+    sleep 0.05
+done
+
+if [ ! -S "$detached_socket_path" ]; then
+    echo "detached manager daemon did not keep running" >&2
+    exit 1
+fi
+
+detached_ping=$(python3 "$CUBICLE_API_CLIENT" "$detached_socket_path" ping)
+printf "%s" "$detached_ping" | grep -q '"success": true'
+python3 "$CUBICLE_API_CLIENT" "$detached_socket_path" shutdown >/dev/null
+for _ in $(seq 1 100); do
+    if [ ! -S "$detached_socket_path" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ -S "$detached_socket_path" ]; then
+    echo "detached manager daemon did not remove control socket" >&2
     exit 1
 fi

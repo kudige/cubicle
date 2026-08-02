@@ -34,7 +34,7 @@ fi
 grep -q -- '--allow-insecure' "$tmpdir/rejected.err"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
-    --listen "$endpoint" --allow-insecure --event-interval-ms 50 &
+    --foreground --listen "$endpoint" --allow-insecure --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do

@@ -332,8 +332,9 @@ int main(void)
     assert(manager_pid >= 0);
     if (manager_pid == 0) {
         execl(manager, manager, "--state-dir", state_dir,
-              "--controller-bin", controller, "daemon", "--control-socket",
-              socket_path, "--event-interval-ms", "50", (char *)NULL);
+              "--controller-bin", controller, "daemon", "--foreground",
+              "--control-socket", socket_path, "--event-interval-ms", "50",
+              (char *)NULL);
         _exit(127);
     }
     wait_for_socket(socket_path);
