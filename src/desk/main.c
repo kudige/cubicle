@@ -27,6 +27,12 @@
 #define PATH_MAX CUBICLE_PATH_MAX
 #endif
 
+// Border glyphs
+#define DESK_ACTIVE_HORIZONTAL "─"
+#define DESK_ACTIVE_VERTICAL "│"
+#define DESK_INACTIVE_HORIZONTAL "╌"
+#define DESK_INACTIVE_VERTICAL "┊"
+
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
 
@@ -200,13 +206,13 @@ static desk_active_cube_t next_active_cube(desk_active_cube_t active)
 static const char *horizontal_border_glyph(desk_active_cube_t active,
                                            desk_active_cube_t cube)
 {
-    return active == cube ? "─" : "╌";
+    return active == cube ? DESK_ACTIVE_HORIZONTAL : DESK_INACTIVE_HORIZONTAL;
 }
 
 static const char *vertical_border_glyph(desk_active_cube_t active,
                                          desk_active_cube_t cube)
 {
-    return active == cube ? "│" : "┊";
+    return active == cube ? DESK_ACTIVE_VERTICAL : DESK_INACTIVE_VERTICAL;
 }
 
 static int selected_workspace_path(char path[PATH_MAX])
@@ -456,8 +462,8 @@ static void desk_render_layout(const desk_terminal_t *terminal,
     append_text(frame, sizeof(frame), &used,
                 active == DESK_ACTIVE_CUBE_ONE ||
                         active == DESK_ACTIVE_CUBE_TWO
-                    ? "│"
-                    : "┊");
+                    ? DESK_ACTIVE_VERTICAL
+                    : DESK_INACTIVE_VERTICAL);
     append_repeat_text(frame, sizeof(frame), &used,
                        horizontal_border_glyph(active, DESK_ACTIVE_CUBE_TWO),
                        layout.right_width);
@@ -483,14 +489,14 @@ static void desk_render_layout(const desk_terminal_t *terminal,
                               active, active == DESK_ACTIVE_CUBE_ONE
                                           ? DESK_ACTIVE_CUBE_ONE
                                           : right_cube)
-                        : "┊");
+                        : DESK_INACTIVE_VERTICAL);
 
         if (row == layout.top_rows) {
             append_repeat_text(frame, sizeof(frame), &used,
                                active == DESK_ACTIVE_CUBE_TWO ||
                                        active == DESK_ACTIVE_CUBE_THREE
-                                   ? "─"
-                                   : "╌",
+                                   ? DESK_ACTIVE_HORIZONTAL
+                                   : DESK_INACTIVE_HORIZONTAL,
                                layout.right_width);
         } else {
             append_cell_text(frame, sizeof(frame), &used, right,
@@ -505,8 +511,8 @@ static void desk_render_layout(const desk_terminal_t *terminal,
     append_text(frame, sizeof(frame), &used,
                 active == DESK_ACTIVE_CUBE_ONE ||
                         active == DESK_ACTIVE_CUBE_THREE
-                    ? "│"
-                    : "┊");
+                    ? DESK_ACTIVE_VERTICAL
+                    : DESK_INACTIVE_VERTICAL);
     append_repeat_text(frame, sizeof(frame), &used,
                        horizontal_border_glyph(active, DESK_ACTIVE_CUBE_THREE),
                        layout.right_width);
