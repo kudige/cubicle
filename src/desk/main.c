@@ -73,6 +73,8 @@ typedef struct desk_grid {
     int cols;
     int cursor_row;
     int cursor_col;
+    int scroll_top;
+    int scroll_bottom;
     char current_sgr[64];
     bool escape_active;
     bool csi_active;
@@ -606,6 +608,8 @@ static void grid_clear(desk_grid_t *grid)
     }
     grid->cursor_row = 0;
     grid->cursor_col = 0;
+    grid->scroll_top = 0;
+    grid->scroll_bottom = grid->rows > 0 ? grid->rows - 1 : 0;
     grid->current_sgr[0] = '\0';
 }
 
@@ -638,37 +642,104 @@ static void grid_cleanup(desk_grid_t *grid)
     memset(grid, 0, sizeof(*grid));
 }
 
-static void grid_scroll(desk_grid_t *grid)
+static void grid_clear_row(desk_grid_t *grid, int row)
 {
-    if (grid->rows <= 1) {
-        for (int col = 0; col < grid->cols; ++col) {
-            grid->cells[col].ch = ' ';
-            grid->cells[col].sgr[0] = '\0';
-        }
-        grid->cursor_row = 0;
-        grid->cursor_col = 0;
+    if (row < 0 || row >= grid->rows) {
         return;
     }
-    memmove(grid->cells, grid->cells + grid->cols,
-            (size_t)(grid->rows - 1) * (size_t)grid->cols *
-                sizeof(*grid->cells));
-    desk_cell_t *last_row =
-        grid->cells + (size_t)(grid->rows - 1) * (size_t)grid->cols;
+    desk_cell_t *line = grid->cells + (size_t)row * (size_t)grid->cols;
     for (int col = 0; col < grid->cols; ++col) {
-        last_row[col].ch = ' ';
-        last_row[col].sgr[0] = '\0';
+        line[col].ch = ' ';
+        line[col].sgr[0] = '\0';
     }
-    grid->cursor_row = grid->rows - 1;
+}
+
+static void grid_scroll_up_region(desk_grid_t *grid, int top, int bottom,
+                                  int amount)
+{
+    if (top < 0) top = 0;
+    if (bottom >= grid->rows) bottom = grid->rows - 1;
+    if (top > bottom || amount <= 0) {
+        return;
+    }
+
+    int height = bottom - top + 1;
+    if (amount >= height) {
+        for (int row = top; row <= bottom; ++row) {
+            grid_clear_row(grid, row);
+        }
+        return;
+    }
+
+    desk_cell_t *start = grid->cells + (size_t)top * (size_t)grid->cols;
+    desk_cell_t *source =
+        grid->cells + (size_t)(top + amount) * (size_t)grid->cols;
+    size_t move_cells = (size_t)(height - amount) * (size_t)grid->cols;
+    memmove(start, source, move_cells * sizeof(*grid->cells));
+    for (int row = bottom - amount + 1; row <= bottom; ++row) {
+        grid_clear_row(grid, row);
+    }
+}
+
+static void grid_scroll_down_region(desk_grid_t *grid, int top, int bottom,
+                                    int amount)
+{
+    if (top < 0) top = 0;
+    if (bottom >= grid->rows) bottom = grid->rows - 1;
+    if (top > bottom || amount <= 0) {
+        return;
+    }
+
+    int height = bottom - top + 1;
+    if (amount >= height) {
+        for (int row = top; row <= bottom; ++row) {
+            grid_clear_row(grid, row);
+        }
+        return;
+    }
+
+    desk_cell_t *dest =
+        grid->cells + (size_t)(top + amount) * (size_t)grid->cols;
+    desk_cell_t *source = grid->cells + (size_t)top * (size_t)grid->cols;
+    size_t move_cells = (size_t)(height - amount) * (size_t)grid->cols;
+    memmove(dest, source, move_cells * sizeof(*grid->cells));
+    for (int row = top; row < top + amount; ++row) {
+        grid_clear_row(grid, row);
+    }
+}
+
+static void grid_index(desk_grid_t *grid)
+{
+    int bottom = grid->scroll_bottom;
+    if (bottom < grid->scroll_top || bottom >= grid->rows) {
+        bottom = grid->rows - 1;
+    }
+    if (grid->cursor_row >= bottom) {
+        grid_scroll_up_region(grid, grid->scroll_top, bottom, 1);
+        grid->cursor_row = bottom;
+    } else if (grid->cursor_row + 1 < grid->rows) {
+        grid->cursor_row++;
+    }
+}
+
+static void grid_reverse_index(desk_grid_t *grid)
+{
+    int top = grid->scroll_top;
+    int bottom = grid->scroll_bottom;
+    if (top < 0) top = 0;
+    if (bottom < top || bottom >= grid->rows) bottom = grid->rows - 1;
+    if (grid->cursor_row <= top) {
+        grid_scroll_down_region(grid, top, bottom, 1);
+        grid->cursor_row = top;
+    } else if (grid->cursor_row > 0) {
+        grid->cursor_row--;
+    }
 }
 
 static void grid_newline(desk_grid_t *grid)
 {
     grid->cursor_col = 0;
-    if (grid->cursor_row + 1 >= grid->rows) {
-        grid_scroll(grid);
-    } else {
-        grid->cursor_row++;
-    }
+    grid_index(grid);
 }
 
 static void grid_put_char(desk_grid_t *grid, unsigned char ch)
@@ -726,6 +797,28 @@ static int parse_csi_number(const char *text, int default_value)
     return (int)parsed;
 }
 
+static void parse_csi_pair(const char *text, int default_first,
+                           int default_second, int *first, int *second)
+{
+    const char *separator = strchr(text, ';');
+    *first = default_first;
+    *second = default_second;
+    if (separator == NULL) {
+        *first = parse_csi_number(text, default_first);
+        return;
+    }
+
+    char first_text[32];
+    size_t first_length = (size_t)(separator - text);
+    if (first_length >= sizeof(first_text)) {
+        first_length = sizeof(first_text) - 1;
+    }
+    memcpy(first_text, text, first_length);
+    first_text[first_length] = '\0';
+    *first = parse_csi_number(first_text, default_first);
+    *second = parse_csi_number(separator + 1, default_second);
+}
+
 static void grid_clear_cell(desk_grid_t *grid, int row, int col)
 {
     if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
@@ -777,7 +870,27 @@ static void grid_apply_csi(desk_grid_t *grid)
     grid->csi[grid->csi_length - 1] = '\0';
 
     if (command == 'J') {
-        grid_clear(grid);
+        int mode = parse_csi_number(grid->csi, 0);
+        if (mode == 1 || mode == 2 || mode == 3) {
+            int end_row = mode == 1 ? grid->cursor_row : grid->rows - 1;
+            for (int row = 0; row <= end_row; ++row) {
+                int start_col = 0;
+                int end_col = grid->cols - 1;
+                if (mode == 1 && row == grid->cursor_row) {
+                    end_col = grid->cursor_col;
+                }
+                for (int col = start_col; col <= end_col; ++col) {
+                    grid_clear_cell(grid, row, col);
+                }
+            }
+        } else {
+            for (int row = grid->cursor_row; row < grid->rows; ++row) {
+                int start_col = row == grid->cursor_row ? grid->cursor_col : 0;
+                for (int col = start_col; col < grid->cols; ++col) {
+                    grid_clear_cell(grid, row, col);
+                }
+            }
+        }
         return;
     }
     if (command == 'K') {
@@ -796,22 +909,60 @@ static void grid_apply_csi(desk_grid_t *grid)
         return;
     }
     if (command == 'H' || command == 'f') {
-        char *separator = strchr(grid->csi, ';');
         int row = 1;
         int col = 1;
-        if (separator != NULL) {
-            *separator = '\0';
-            row = parse_csi_number(grid->csi, 1);
-            col = parse_csi_number(separator + 1, 1);
-        } else {
-            row = parse_csi_number(grid->csi, 1);
-        }
+        parse_csi_pair(grid->csi, 1, 1, &row, &col);
         if (row < 1) row = 1;
         if (col < 1) col = 1;
         if (row > grid->rows) row = grid->rows;
         if (col > grid->cols) col = grid->cols;
         grid->cursor_row = row - 1;
         grid->cursor_col = col - 1;
+        return;
+    }
+    if (command == 'r') {
+        int top = 1;
+        int bottom = grid->rows;
+        parse_csi_pair(grid->csi, 1, grid->rows, &top, &bottom);
+        if (top < 1) top = 1;
+        if (bottom > grid->rows) bottom = grid->rows;
+        if (top < bottom) {
+            grid->scroll_top = top - 1;
+            grid->scroll_bottom = bottom - 1;
+        } else {
+            grid->scroll_top = 0;
+            grid->scroll_bottom = grid->rows - 1;
+        }
+        grid->cursor_row = 0;
+        grid->cursor_col = 0;
+        return;
+    }
+    if (command == 'L') {
+        int amount = parse_csi_number(grid->csi, 1);
+        int bottom = grid->scroll_bottom;
+        if (grid->cursor_row >= grid->scroll_top && grid->cursor_row <= bottom) {
+            grid_scroll_down_region(grid, grid->cursor_row, bottom, amount);
+        }
+        return;
+    }
+    if (command == 'M') {
+        int amount = parse_csi_number(grid->csi, 1);
+        int bottom = grid->scroll_bottom;
+        if (grid->cursor_row >= grid->scroll_top && grid->cursor_row <= bottom) {
+            grid_scroll_up_region(grid, grid->cursor_row, bottom, amount);
+        }
+        return;
+    }
+    if (command == 'S') {
+        int amount = parse_csi_number(grid->csi, 1);
+        grid_scroll_up_region(grid, grid->scroll_top, grid->scroll_bottom,
+                              amount);
+        return;
+    }
+    if (command == 'T') {
+        int amount = parse_csi_number(grid->csi, 1);
+        grid_scroll_down_region(grid, grid->scroll_top, grid->scroll_bottom,
+                                amount);
         return;
     }
     if (command == 'A' && grid->cursor_row > 0) {
@@ -855,6 +1006,16 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
             if (ch == '[') {
                 grid->csi_active = true;
                 grid->csi_length = 0;
+            } else if (ch == 'D') {
+                grid_index(grid);
+                grid->escape_active = false;
+            } else if (ch == 'E') {
+                grid->cursor_col = 0;
+                grid_index(grid);
+                grid->escape_active = false;
+            } else if (ch == 'M') {
+                grid_reverse_index(grid);
+                grid->escape_active = false;
             } else {
                 grid->escape_active = false;
             }
