@@ -106,6 +106,20 @@ if [ "$output" != "Workspace Project A selected" ]; then
     exit 1
 fi
 
+mkdir -p "$xdg_state_home/cubicle"
+printf "Missing Workspace\n" >"$xdg_state_home/cubicle/current-workspace"
+set +e
+cube ps >"$tmpdir/stale-selected.out" 2>"$tmpdir/stale-selected.err"
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "stale selected workspace should exit 1, got $status" >&2
+    exit 1
+fi
+grep -q "selected workspace 'Missing Workspace' was not found by the manager" "$tmpdir/stale-selected.err"
+grep -q 'cube workspace list' "$tmpdir/stale-selected.err"
+cube workspace select "Project A" >/dev/null
+
 session_status=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" status)
 printf "%s" "$session_status" | grep -q '"active_client_sessions": 1'
 

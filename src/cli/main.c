@@ -1678,22 +1678,53 @@ static int workspace_simple_action(const char *manager_socket,
     return 0;
 }
 
-static int resolve_workspace_argument(const cube_options_t *options,
-                                      char *workspace,
-                                      size_t workspace_size)
+static int resolve_workspace_selection(const cube_options_t *options,
+                                       char *workspace,
+                                       size_t workspace_size,
+                                       int *from_selected_workspace)
 {
     if (options->workspace != NULL && options->workspace[0] != '\0') {
         int length = snprintf(workspace, workspace_size, "%s",
                               options->workspace);
+        if (from_selected_workspace != NULL) {
+            *from_selected_workspace = 0;
+        }
         return length < 0 || (size_t)length >= workspace_size ? -1 : 0;
     }
+    if (from_selected_workspace != NULL) {
+        *from_selected_workspace = 1;
+    }
     return read_selected_workspace(workspace, workspace_size);
+}
+
+static int resolve_workspace_argument(const cube_options_t *options,
+                                      char *workspace,
+                                      size_t workspace_size)
+{
+    return resolve_workspace_selection(options, workspace, workspace_size,
+                                       NULL);
+}
+
+static int print_workspace_rpc_error(const cube_rpc_response_t *response,
+                                     const char *workspace,
+                                     int from_selected_workspace)
+{
+    if (response->code == CUBICLE_ERR_NOT_FOUND && from_selected_workspace) {
+        fprintf(stderr,
+                "cube: selected workspace '%s' was not found by the manager\n",
+                workspace);
+        fprintf(stderr,
+                "hint: run `cube workspace list` and then `cube workspace NAME` to select an existing workspace\n");
+        return 1;
+    }
+    return print_rpc_error(response);
 }
 
 static int fetch_workspace_directory(const char *manager_socket,
                                      const char *workspace,
                                      char *directory,
-                                     size_t directory_size)
+                                     size_t directory_size,
+                                     int from_selected_workspace)
 {
     cubicle_json_builder_t params = {0};
     if (cubicle_json_builder_append(&params, "{\"workspace\":") < 0 ||
@@ -1708,7 +1739,8 @@ static int fetch_workspace_directory(const char *manager_socket,
     if (call_manager(manager_socket, "workspace.get", params.data,
                      &response) < 0) {
         cubicle_json_builder_cleanup(&params);
-        return print_rpc_error(&response);
+        return print_workspace_rpc_error(&response, workspace,
+                                         from_selected_workspace);
     }
     cubicle_json_builder_cleanup(&params);
 
@@ -1854,7 +1886,9 @@ static int command_access(const char *manager_socket,
     int remaining = argc - command_index - 1;
     char **arguments = &argv[command_index + 1];
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    int from_selected_workspace = 0;
+    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+                                    &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -2045,7 +2079,9 @@ static int process_list(const char *manager_socket,
                         const cube_options_t *options)
 {
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    int from_selected_workspace = 0;
+    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+                                    &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -2062,7 +2098,8 @@ static int process_list(const char *manager_socket,
              escaped_workspace);
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "process.list", params, &response) < 0) {
-        return print_rpc_error(&response);
+        return print_workspace_rpc_error(&response, workspace,
+                                         from_selected_workspace);
     }
 
     if (options->json) {
@@ -2281,8 +2318,9 @@ static int resolve_process_metadata(const char *manager_socket,
                                     size_t mode_size)
 {
     char workspace[CUBICLE_NAME_MAX];
-    int has_workspace = resolve_workspace_argument(options, workspace,
-                                                   sizeof(workspace)) == 0;
+    int from_selected_workspace = 0;
+    int has_workspace = resolve_workspace_selection(
+        options, workspace, sizeof(workspace), &from_selected_workspace) == 0;
     if (!valid_name(process_name)) {
         fprintf(stderr, "cube: invalid process name\n");
         return 2;
@@ -2313,6 +2351,10 @@ static int resolve_process_metadata(const char *manager_socket,
 
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "process.get", params, &response) < 0) {
+        if (has_workspace) {
+            return print_workspace_rpc_error(&response, workspace,
+                                             from_selected_workspace);
+        }
         return print_rpc_error(&response);
     }
 
@@ -3826,7 +3868,9 @@ static int process_run(const char *manager_socket,
         return 2;
     }
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    int from_selected_workspace = 0;
+    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+                                    &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -3834,7 +3878,8 @@ static int process_run(const char *manager_socket,
     char workspace_directory[CUBICLE_PATH_MAX];
     int workspace_result = fetch_workspace_directory(manager_socket, workspace,
                                                      workspace_directory,
-                                                     sizeof(workspace_directory));
+                                                     sizeof(workspace_directory),
+                                                     from_selected_workspace);
     if (workspace_result != 0) {
         return workspace_result;
     }
