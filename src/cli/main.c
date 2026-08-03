@@ -41,6 +41,7 @@
 #define CUBE_CHANNEL_STDERR 4U
 #define CUBE_CHANNEL_TTY 8U
 #define CUBE_ATTACH_POLL_MS 50
+#define CUBE_CONNECT_REPLAY_BYTES 16384ULL
 
 typedef struct cube_options {
     const char *manager_socket;
@@ -3498,11 +3499,19 @@ static int attachment_loop(const char *controller_socket,
                            unsigned int channels,
                            const char *process_name,
                            const char *mode,
-                           int read_only)
+                           int read_only,
+                           const cube_attach_offsets_t *offsets,
+                           uint64_t replay_bytes)
 {
-    uint64_t stdout_offset = 0;
-    uint64_t stderr_offset = 0;
-    uint64_t tty_offset = 0;
+    uint64_t stdout_offset = offsets->stdout_offset > replay_bytes
+                                 ? offsets->stdout_offset - replay_bytes
+                                 : 0;
+    uint64_t stderr_offset = offsets->stderr_offset > replay_bytes
+                                 ? offsets->stderr_offset - replay_bytes
+                                 : 0;
+    uint64_t tty_offset = offsets->tty_offset > replay_bytes
+                              ? offsets->tty_offset - replay_bytes
+                              : 0;
     int stdin_open = !read_only && (channels & CUBE_CHANNEL_STDIN) != 0;
     int stdin_is_tty = isatty(STDIN_FILENO);
     int detach_requested = 0;
@@ -3681,7 +3690,8 @@ static int attach_to_process_id(const char *manager_socket,
                                 const char *process_id,
                                 const char *process_name,
                                 const char *mode,
-                                int read_only)
+                                int read_only,
+                                uint64_t replay_bytes)
 {
     unsigned int requested_channels = CUBE_CHANNEL_STDOUT | CUBE_CHANNEL_STDERR;
     if (process_mode_uses_terminal(mode)) {
@@ -3723,10 +3733,9 @@ static int attach_to_process_id(const char *manager_socket,
     if (attach_result != 0) {
         return attach_result;
     }
-    (void)offsets;
 
     return attachment_loop(controller_socket, accepted_channels, process_name,
-                           mode, read_only);
+                           mode, read_only, &offsets, replay_bytes);
 }
 
 static int process_connect(const char *manager_socket,
@@ -3766,7 +3775,8 @@ static int process_connect(const char *manager_socket,
     }
 
     return attach_to_process_id(manager_socket, process_id,
-                                argv[argument_index], mode, read_only);
+                                argv[argument_index], mode, read_only,
+                                CUBE_CONNECT_REPLAY_BYTES);
 }
 
 static int wait_for_process(const char *manager_socket,
@@ -3996,7 +4006,7 @@ static int process_run(const char *manager_socket,
 
     if (process_mode_uses_terminal(mode)) {
         return attach_to_process_id(manager_socket, process_id, process_name,
-                                    mode, 0);
+                                    mode, 0, UINT64_MAX);
     }
 
     cube_rpc_response_t wait_response;

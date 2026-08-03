@@ -228,6 +228,20 @@ if [ "$output" != "Process fg-run removed" ]; then
     exit 1
 fi
 
+tail_replay_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name connect-tail-replay -- sh -c \
+    'printf "head-marker\n"; dd if=/dev/zero bs=1024 count=24 2>/dev/null | tr "\0" x; printf "\ntail-marker\n"; sleep 1' |
+    json_id)
+sleep 0.2
+cube connect --ro connect-tail-replay >"$tmpdir/connect-tail-replay.out" 2>"$tmpdir/connect-tail-replay.err"
+grep -q 'tail-marker' "$tmpdir/connect-tail-replay.out"
+if grep -q 'head-marker' "$tmpdir/connect-tail-replay.out"; then
+    echo "connect should replay only recent output" >&2
+    exit 1
+fi
+api process-wait "$tail_replay_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove connect-tail-replay >/dev/null
+
 workspace_run_dir="$tmpdir/workspace-run-dir"
 override_run_dir="$tmpdir/override-run-dir"
 mkdir -p "$workspace_run_dir" "$override_run_dir"
