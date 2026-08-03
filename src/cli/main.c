@@ -75,6 +75,15 @@ typedef struct cube_attach_offsets {
     uint64_t tty_offset;
 } cube_attach_offsets_t;
 
+typedef struct cube_log_options {
+    int follow;
+    int stdout_only;
+    int stderr_only;
+    uint64_t start;
+    uint64_t end;
+    int has_end;
+} cube_log_options_t;
+
 typedef struct cube_cached_session {
     cubicle_session_info_t session;
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
@@ -138,7 +147,7 @@ static void print_usage(FILE *stream)
             "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n"
             "  cube ps\n"
             "  cube inspect NAME\n"
-            "  cube logs [--follow] NAME\n"
+            "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
             "  cube connect [--ro] NAME\n"
             "  cube signal NAME SIGNAL\n"
@@ -180,7 +189,9 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "logs") == 0) {
-        fprintf(stream, "Usage:\n  cube logs [--follow] NAME\n");
+        fprintf(stream,
+                "Usage:\n"
+                "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n");
         return 0;
     }
     if (strcmp(command, "events") == 0) {
@@ -708,6 +719,18 @@ static int cube_cache_field_u64(const char *data,
     unsigned long long parsed = strtoull(value, &end, 10);
     if (errno != 0 || end == value || *end != '\0') {
         errno = EINVAL;
+        return -1;
+    }
+    *value_out = (uint64_t)parsed;
+    return 0;
+}
+
+static int parse_u64_arg(const char *value, uint64_t *value_out)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
         return -1;
     }
     *value_out = (uint64_t)parsed;
@@ -2803,6 +2826,7 @@ static int read_process_output_once(const char *manager_socket,
                                     const char *process_id,
                                     const char *stream,
                                     uint64_t *offset,
+                                    uint64_t maximum_length,
                                     FILE *output,
                                     int *end_of_stream,
                                     int *advanced)
@@ -2816,9 +2840,10 @@ static int read_process_output_once(const char *manager_socket,
 
     char params[512];
     snprintf(params, sizeof(params),
-             "{\"process_id\":\"%s\",\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":8192}",
+             "{\"process_id\":\"%s\",\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":%llu}",
              escaped_process_id, stream,
-             (unsigned long long)*offset);
+             (unsigned long long)*offset,
+             (unsigned long long)maximum_length);
 
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "process.read_output", params,
@@ -2859,15 +2884,28 @@ static int read_process_output_once(const char *manager_socket,
 static int read_process_output(const char *manager_socket,
                                const char *process_id,
                                const char *stream,
+                               uint64_t start,
+                               uint64_t end,
+                               int has_end,
                                FILE *output)
 {
-    uint64_t offset = 0;
+    uint64_t offset = start;
     for (;;) {
+        uint64_t maximum_length = 8192;
+        if (has_end) {
+            if (offset >= end) {
+                return 0;
+            }
+            if (end - offset < maximum_length) {
+                maximum_length = end - offset;
+            }
+        }
         int end_of_stream = 0;
         int advanced = 0;
         int result = read_process_output_once(manager_socket, process_id,
-                                              stream, &offset, output,
-                                              &end_of_stream, &advanced);
+                                              stream, &offset, maximum_length,
+                                              output, &end_of_stream,
+                                              &advanced);
         if (result != 0 || end_of_stream) {
             return result;
         }
@@ -2927,11 +2965,12 @@ static int manager_process_is_terminal(const char *manager_socket,
 
 static int follow_process_output(const char *manager_socket,
                                  const char *process_id,
-                                 const char *mode)
+                                 const char *mode,
+                                 const cube_log_options_t *log_options)
 {
-    uint64_t stdout_offset = 0;
-    uint64_t stderr_offset = 0;
-    uint64_t tty_offset = 0;
+    uint64_t stdout_offset = log_options->start;
+    uint64_t stderr_offset = log_options->start;
+    uint64_t tty_offset = log_options->start;
     int stdout_end = 0;
     int stderr_end = 0;
     int tty_end = 0;
@@ -2940,28 +2979,36 @@ static int follow_process_output(const char *manager_socket,
         int advanced = 0;
         int result = 0;
         if (process_mode_uses_terminal(mode)) {
-            result = read_process_output_once(manager_socket, process_id,
-                                              "tty", &tty_offset, stdout,
-                                              &tty_end, &advanced);
-            if (result == 0 && strcmp(mode, "term") == 0) {
+            if (!log_options->stderr_only) {
+                result = read_process_output_once(manager_socket, process_id,
+                                                  "tty", &tty_offset, 8192,
+                                                  stdout, &tty_end,
+                                                  &advanced);
+            }
+            if (result == 0 && strcmp(mode, "term") == 0 &&
+                !log_options->stdout_only) {
                 int stream_advanced = 0;
                 result = read_process_output_once(manager_socket, process_id,
                                                   "stderr", &stderr_offset,
+                                                  8192,
                                                   stderr, &stderr_end,
                                                   &stream_advanced);
                 advanced = advanced || stream_advanced;
             }
         } else {
             int stream_advanced = 0;
-            result = read_process_output_once(manager_socket, process_id,
-                                              "stdout", &stdout_offset,
-                                              stdout, &stdout_end,
-                                              &stream_advanced);
-            advanced = stream_advanced;
-            if (result == 0) {
+            if (!log_options->stderr_only) {
+                result = read_process_output_once(manager_socket, process_id,
+                                                  "stdout", &stdout_offset,
+                                                  8192, stdout, &stdout_end,
+                                                  &stream_advanced);
+                advanced = stream_advanced;
+            }
+            if (result == 0 && !log_options->stdout_only) {
                 stream_advanced = 0;
                 result = read_process_output_once(manager_socket, process_id,
                                                   "stderr", &stderr_offset,
+                                                  8192,
                                                   stderr, &stderr_end,
                                                   &stream_advanced);
                 advanced = advanced || stream_advanced;
@@ -2978,9 +3025,14 @@ static int follow_process_output(const char *manager_socket,
             return result;
         }
         if (terminal &&
-            ((strcmp(mode, "tty") == 0 && tty_end) ||
-             (strcmp(mode, "term") == 0 && tty_end && stderr_end) ||
-             (!process_mode_uses_terminal(mode) && stdout_end && stderr_end))) {
+            ((strcmp(mode, "tty") == 0 &&
+              (log_options->stderr_only || tty_end)) ||
+             (strcmp(mode, "term") == 0 &&
+              (log_options->stderr_only || tty_end) &&
+              (log_options->stdout_only || stderr_end)) ||
+             (!process_mode_uses_terminal(mode) &&
+              (log_options->stderr_only || stdout_end) &&
+              (log_options->stdout_only || stderr_end)))) {
             return 0;
         }
         if (!advanced) {
@@ -2996,10 +3048,60 @@ static int process_logs(const char *manager_socket,
                         int command_index)
 {
     int argument_index = command_index + 1;
-    int follow = 0;
+    cube_log_options_t log_options = {0};
     while (argument_index < argc) {
         if (strcmp(argv[argument_index], "--follow") == 0) {
-            follow = 1;
+            log_options.follow = 1;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argv[argument_index], "--stdout") == 0) {
+            log_options.stdout_only = 1;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argv[argument_index], "--stderr") == 0) {
+            log_options.stderr_only = 1;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argv[argument_index], "--start") == 0) {
+            if (argument_index + 1 >= argc ||
+                parse_u64_arg(argv[argument_index + 1],
+                              &log_options.start) < 0) {
+                fprintf(stderr, "cube: --start requires a byte offset\n");
+                return 2;
+            }
+            argument_index += 2;
+            continue;
+        }
+        if (strcmp(argv[argument_index], "--end") == 0) {
+            if (argument_index + 1 >= argc ||
+                parse_u64_arg(argv[argument_index + 1],
+                              &log_options.end) < 0) {
+                fprintf(stderr, "cube: --end requires a byte offset\n");
+                return 2;
+            }
+            log_options.has_end = 1;
+            argument_index += 2;
+            continue;
+        }
+        if (strncmp(argv[argument_index], "--start=", 8) == 0) {
+            if (parse_u64_arg(argv[argument_index] + 8,
+                              &log_options.start) < 0) {
+                fprintf(stderr, "cube: --start requires a byte offset\n");
+                return 2;
+            }
+            ++argument_index;
+            continue;
+        }
+        if (strncmp(argv[argument_index], "--end=", 6) == 0) {
+            if (parse_u64_arg(argv[argument_index] + 6,
+                              &log_options.end) < 0) {
+                fprintf(stderr, "cube: --end requires a byte offset\n");
+                return 2;
+            }
+            log_options.has_end = 1;
             ++argument_index;
             continue;
         }
@@ -3010,6 +3112,18 @@ static int process_logs(const char *manager_socket,
             return 2;
         }
         break;
+    }
+    if (log_options.stdout_only && log_options.stderr_only) {
+        fprintf(stderr, "cube: --stdout and --stderr are mutually exclusive\n");
+        return 2;
+    }
+    if (log_options.has_end && log_options.end < log_options.start) {
+        fprintf(stderr, "cube: --end must be greater than or equal to --start\n");
+        return 2;
+    }
+    if (log_options.follow && log_options.has_end) {
+        fprintf(stderr, "cube: --end cannot be used with --follow\n");
+        return 2;
     }
     if (argument_index + 1 != argc) {
         fprintf(stderr, "cube: logs requires a process name\n");
@@ -3025,25 +3139,49 @@ static int process_logs(const char *manager_socket,
         return resolve_result;
     }
 
-    if (follow) {
-        return follow_process_output(manager_socket, process_id, mode);
+    if (strcmp(mode, "tty") == 0 && log_options.stderr_only) {
+        fprintf(stderr, "cube: tty processes do not retain stderr separately\n");
+        return 2;
+    }
+
+    if (log_options.follow) {
+        return follow_process_output(manager_socket, process_id, mode,
+                                     &log_options);
     }
 
     if (strcmp(mode, "tty") == 0) {
-        return read_process_output(manager_socket, process_id, "tty", stdout);
+        return read_process_output(manager_socket, process_id, "tty",
+                                   log_options.start, log_options.end,
+                                   log_options.has_end, stdout);
     }
     if (strcmp(mode, "term") == 0) {
-        int tty_result = read_process_output(manager_socket, process_id,
-                                             "tty", stdout);
-        int stderr_result = read_process_output(manager_socket, process_id,
-                                                "stderr", stderr);
+        int tty_result = 0;
+        int stderr_result = 0;
+        if (!log_options.stderr_only) {
+            tty_result = read_process_output(
+                manager_socket, process_id, "tty", log_options.start,
+                log_options.end, log_options.has_end, stdout);
+        }
+        if (!log_options.stdout_only) {
+            stderr_result = read_process_output(
+                manager_socket, process_id, "stderr", log_options.start,
+                log_options.end, log_options.has_end, stderr);
+        }
         return tty_result != 0 ? tty_result : stderr_result;
     }
 
-    int stdout_result = read_process_output(manager_socket, process_id,
-                                            "stdout", stdout);
-    int stderr_result = read_process_output(manager_socket, process_id,
-                                            "stderr", stderr);
+    int stdout_result = 0;
+    int stderr_result = 0;
+    if (!log_options.stderr_only) {
+        stdout_result = read_process_output(
+            manager_socket, process_id, "stdout", log_options.start,
+            log_options.end, log_options.has_end, stdout);
+    }
+    if (!log_options.stdout_only) {
+        stderr_result = read_process_output(
+            manager_socket, process_id, "stderr", log_options.start,
+            log_options.end, log_options.has_end, stderr);
+    }
     return stdout_result != 0 ? stdout_result : stderr_result;
 }
 
@@ -4017,9 +4155,9 @@ static int process_run(const char *manager_socket,
     }
 
     int stdout_result = read_process_output(manager_socket, process_id,
-                                            "stdout", stdout);
+                                            "stdout", 0, 0, 0, stdout);
     int stderr_result = read_process_output(manager_socket, process_id,
-                                            "stderr", stderr);
+                                            "stderr", 0, 0, 0, stderr);
     if (stdout_result != 0 || stderr_result != 0) {
         cleanup_rpc_response(&wait_response);
         return stdout_result != 0 ? stdout_result : stderr_result;

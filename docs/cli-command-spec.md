@@ -505,14 +505,18 @@ Recommended semantics:
 Output/history commands:
 
 ```console
-cube logs NAME
-cube logs --follow NAME
+cube logs [--stdout|--stderr] [--start N] [--end N] NAME
+cube logs --follow [--stdout|--stderr] [--start N] NAME
 cube events
 cube events --follow
 cube events --follow --iterations N
 ```
 
 `cube logs` reads retained output without creating an interactive attachment. For a TTY process it may show the recorded TTY byte stream initially; richer terminal-history rendering can follow.
+`--stdout` selects only stdout; for terminal modes this selects the retained PTY stream.
+`--stderr` selects only retained stderr and is valid for stream and term processes.
+`--start N` starts at zero-based byte offset `N`; `--end N` stops before byte offset `N`.
+`--end` is exclusive and is not valid with `--follow`.
 `cube events --follow --iterations N` is a bounded polling form for scripts and integration tests; plain `--follow` continues until interrupted.
 
 ## 8. Defaults commands

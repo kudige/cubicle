@@ -18,7 +18,7 @@ cube workspace delete NAME
 cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 cube ps
 cube inspect NAME
-cube logs [--follow] NAME
+cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
 cube stop NAME
@@ -208,7 +208,7 @@ Typical process states include `running`, `completed`, `failed`, `lost`, and
 ## Logs
 
 ```text
-cube logs [--follow] NAME
+cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 ```
 
 Print retained output for a process.
@@ -218,14 +218,25 @@ written to `cube` stderr. For `tty` processes, the PTY stream is written to
 stdout. For `term` processes, the PTY stream is written to stdout and the
 captured stderr pipe is written to stderr.
 
+`--stdout` prints only the stdout stream. For `tty` and `term` processes this
+selects the retained PTY stream. `--stderr` prints only the retained stderr
+stream; it is valid for `stream` and `term` processes.
+
+`--start N` starts reading at zero-based byte offset `N`. `--end N` stops before
+zero-based byte offset `N`. `--end` is exclusive and must be greater than or
+equal to `--start`.
+
 `--follow` keeps polling until the process reaches a terminal state and all
-known streams have reached end-of-stream.
+selected streams have reached end-of-stream. `--follow` may be used with
+`--start`, but not with `--end`.
 
 Examples:
 
 ```sh
 cube logs build
 cube logs --follow build
+cube logs --stdout --start 4096 --end 8192 build
+cube logs --stderr build
 cube logs term-run >stdout.txt 2>stderr.txt
 ```
 

@@ -207,6 +207,27 @@ grep -q '^fg-err$' "$tmpdir/fg-run.err"
 cube logs fg-run >"$tmpdir/fg-run-logs.out" 2>"$tmpdir/fg-run-logs.err"
 grep -q '^fg-out$' "$tmpdir/fg-run-logs.out"
 grep -q '^fg-err$' "$tmpdir/fg-run-logs.err"
+cube logs --stdout fg-run >"$tmpdir/fg-run-logs-stdout.out" 2>"$tmpdir/fg-run-logs-stdout.err"
+grep -q '^fg-out$' "$tmpdir/fg-run-logs-stdout.out"
+if [ -s "$tmpdir/fg-run-logs-stdout.err" ]; then
+    echo "cube logs --stdout should not write stderr" >&2
+    exit 1
+fi
+cube logs --stderr fg-run >"$tmpdir/fg-run-logs-stderr.out" 2>"$tmpdir/fg-run-logs-stderr.err"
+if [ -s "$tmpdir/fg-run-logs-stderr.out" ]; then
+    echo "cube logs --stderr should not write stdout" >&2
+    exit 1
+fi
+grep -q '^fg-err$' "$tmpdir/fg-run-logs-stderr.err"
+cube logs --stdout --start 2 --end 5 fg-run >"$tmpdir/fg-run-logs-range.out" 2>"$tmpdir/fg-run-logs-range.err"
+if [ "$(cat "$tmpdir/fg-run-logs-range.out")" != "-ou" ]; then
+    echo "cube logs range returned unexpected stdout slice" >&2
+    exit 1
+fi
+if [ -s "$tmpdir/fg-run-logs-range.err" ]; then
+    echo "cube logs ranged stdout should not write stderr" >&2
+    exit 1
+fi
 for _ in $(seq 1 100); do
     cube events >"$tmpdir/events.out"
     if grep -q 'process_exited' "$tmpdir/events.out"; then
