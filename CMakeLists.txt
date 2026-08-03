@@ -122,6 +122,29 @@ target_compile_options(desk PRIVATE
     -Wpedantic
 )
 
+add_executable(testdesk
+    src/client/attachment.c
+    src/client/auth.c
+    src/client/client.c
+    src/client/decode.c
+    src/client/events.c
+    src/client/process.c
+    src/client/rpc_client.c
+    src/client/transport_tcp.c
+    src/client/transport_unix.c
+    src/client/workspace.c
+    tests/testdesk.c
+)
+
+target_link_libraries(testdesk PRIVATE cubicle_common)
+target_include_directories(testdesk PRIVATE third_party/yyjson)
+
+target_compile_options(testdesk PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 install(TARGETS
     cube
     desk
