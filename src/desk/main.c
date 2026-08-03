@@ -740,15 +740,90 @@ static bool pane_divider_crosses(const char **canvas,
            strcmp(existing, DESK_INACTIVE_VERTICAL) == 0;
 }
 
+static bool pane_glyph_is_horizontal(const char *glyph)
+{
+    return strcmp(glyph, DESK_ACTIVE_HORIZONTAL) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_HORIZONTAL) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0;
+}
+
+static bool pane_glyph_is_vertical(const char *glyph)
+{
+    return strcmp(glyph, DESK_ACTIVE_VERTICAL) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_VERTICAL) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0;
+}
+
+static bool pane_glyph_is_active(const char *glyph)
+{
+    return strcmp(glyph, DESK_ACTIVE_HORIZONTAL) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_VERTICAL) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0;
+}
+
+static const char *pane_canvas_glyph_at(const char **canvas,
+                                        const desk_terminal_t *terminal,
+                                        int row, int col)
+{
+    if (row < 0 || row >= terminal->rows || col < 0 || col >= terminal->cols) {
+        return " ";
+    }
+    return canvas[(size_t)row * (size_t)terminal->cols + (size_t)col];
+}
+
+static void pane_canvas_connect_dividers(const char **canvas,
+                                         const desk_terminal_t *terminal)
+{
+    for (int row = 0; row < terminal->rows; ++row) {
+        for (int col = 0; col < terminal->cols; ++col) {
+            const char *current = pane_canvas_glyph_at(canvas, terminal, row,
+                                                       col);
+            bool has_horizontal = pane_glyph_is_horizontal(current);
+            bool has_vertical = pane_glyph_is_vertical(current);
+            bool active = pane_glyph_is_active(current);
+
+            const char *left = pane_canvas_glyph_at(canvas, terminal, row,
+                                                    col - 1);
+            const char *right = pane_canvas_glyph_at(canvas, terminal, row,
+                                                     col + 1);
+            const char *above = pane_canvas_glyph_at(canvas, terminal, row - 1,
+                                                     col);
+            const char *below = pane_canvas_glyph_at(canvas, terminal, row + 1,
+                                                     col);
+
+            if (pane_glyph_is_horizontal(left) ||
+                pane_glyph_is_horizontal(right)) {
+                has_horizontal = true;
+                active = active || pane_glyph_is_active(left) ||
+                         pane_glyph_is_active(right);
+            }
+            if (pane_glyph_is_vertical(above) || pane_glyph_is_vertical(below)) {
+                has_vertical = true;
+                active = active || pane_glyph_is_active(above) ||
+                         pane_glyph_is_active(below);
+            }
+            if (has_horizontal && has_vertical) {
+                canvas[(size_t)row * (size_t)terminal->cols + (size_t)col] =
+                    active ? DESK_ACTIVE_MIDDLE_JUNCTION
+                           : DESK_INACTIVE_MIDDLE_JUNCTION;
+            }
+        }
+    }
+}
+
 static void pane_canvas_write_label(const char **canvas,
                                     const desk_terminal_t *terminal,
-                                    desk_rect_t rect, int pane_id)
+                                    desk_rect_t rect, int pane_id,
+                                    bool active)
 {
     if (rect.rows <= 0 || rect.cols <= 0) {
         return;
     }
     char label[32];
-    int length = snprintf(label, sizeof(label), "cube %d", pane_id);
+    int length = active ? snprintf(label, sizeof(label), "[Cube %d]", pane_id)
+                        : snprintf(label, sizeof(label), "cube %d", pane_id);
     if (length < 0) {
         return;
     }
@@ -769,7 +844,8 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     }
     const desk_pane_node_t *entry = &panes->nodes[node];
     if (entry->split == DESK_SPLIT_NONE) {
-        pane_canvas_write_label(canvas, terminal, rect, entry->pane_id);
+        pane_canvas_write_label(canvas, terminal, rect, entry->pane_id,
+                                entry->pane_id == panes->active_pane_id);
         return;
     }
 
@@ -853,6 +929,7 @@ static int desk_build_layout_frame(const desk_terminal_t *terminal,
     }
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
     pane_render_node(panes, terminal, canvas, panes->root, root);
+    pane_canvas_connect_dividers(canvas, terminal);
     for (int row = 0; row < terminal->rows; ++row) {
         for (int col = 0; col < terminal->cols; ++col) {
             append_text(frame, frame_size, used,
