@@ -818,25 +818,29 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     }
 }
 
-static void desk_render_layout(const desk_terminal_t *terminal,
-                               const desk_pane_layout_t *panes)
+static int desk_build_layout_frame(const desk_terminal_t *terminal,
+                                   const desk_pane_layout_t *panes,
+                                   char *frame,
+                                   size_t frame_size,
+                                   size_t *used,
+                                   bool include_clear)
 {
-    char frame[262144];
-    size_t used = 0;
     desk_layout_t layout;
+    *used = 0;
 
     if (!desk_get_layout(terminal, &layout)) {
-        append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J");
-        append_text(frame, sizeof(frame), &used,
+        if (include_clear) {
+            append_text(frame, frame_size, used, "\x1b[H\x1b[2J");
+        }
+        append_text(frame, frame_size, used,
                     "Terminal too small for desk. Press q to quit.");
-        (void)write_all(STDOUT_FILENO, frame, used);
-        return;
+        return 0;
     }
 
     const char **canvas = calloc((size_t)terminal->rows * (size_t)terminal->cols,
                                  sizeof(*canvas));
     if (canvas == NULL) {
-        return;
+        return -1;
     }
     for (int row = 0; row < terminal->rows; ++row) {
         for (int col = 0; col < terminal->cols; ++col) {
@@ -844,21 +848,53 @@ static void desk_render_layout(const desk_terminal_t *terminal,
         }
     }
 
-    append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J");
+    if (include_clear) {
+        append_text(frame, frame_size, used, "\x1b[H\x1b[2J");
+    }
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
     pane_render_node(panes, terminal, canvas, panes->root, root);
     for (int row = 0; row < terminal->rows; ++row) {
         for (int col = 0; col < terminal->cols; ++col) {
-            append_text(frame, sizeof(frame), &used,
+            append_text(frame, frame_size, used,
                         canvas[(size_t)row * (size_t)terminal->cols +
                                (size_t)col]);
         }
         if (row + 1 < terminal->rows) {
-            append_text(frame, sizeof(frame), &used, "\r\n");
+            append_text(frame, frame_size, used, "\r\n");
         }
     }
     free(canvas);
+    return 0;
+}
+
+static void desk_render_layout(const desk_terminal_t *terminal,
+                               const desk_pane_layout_t *panes)
+{
+    char frame[262144];
+    size_t used = 0;
+    if (desk_build_layout_frame(terminal, panes, frame, sizeof(frame), &used,
+                                true) < 0) {
+        return;
+    }
     (void)write_all(STDOUT_FILENO, frame, used);
+}
+
+static int desk_dump_layout(const desk_terminal_t *terminal,
+                            const desk_pane_layout_t *panes)
+{
+    char frame[262144];
+    size_t used = 0;
+    if (desk_build_layout_frame(terminal, panes, frame, sizeof(frame), &used,
+                                false) < 0) {
+        return -1;
+    }
+    FILE *file = fopen("desk.bin", "wb");
+    if (file == NULL) {
+        return -1;
+    }
+    size_t written = fwrite(frame, 1, used, file);
+    int close_result = fclose(file);
+    return written == used && close_result == 0 ? 0 : -1;
 }
 
 static void desk_render_cube_one(const desk_terminal_t *terminal,
@@ -1640,6 +1676,18 @@ static int desk_run_attached(const char *process_name)
             } else {
                 size_t start = 0;
                 for (ssize_t i = 0; i < input_length; ++i) {
+                    if (input[i] == 'P') {
+                        if (panes.active_pane_id == 1 && i > (ssize_t)start &&
+                            forward_input(target.attachment, input + start,
+                                          (size_t)i - start, &escape_pending,
+                                          &detach_requested) < 0) {
+                            result = 2;
+                            break;
+                        }
+                        (void)desk_dump_layout(&terminal, &panes);
+                        start = (size_t)i + 1;
+                        continue;
+                    }
                     if (!handle_pane_key(&panes, input[i])) {
                         continue;
                     }
@@ -1752,6 +1800,10 @@ static int desk_run(void)
             return -1;
         }
         for (ssize_t i = 0; i < length; ++i) {
+            if (input[i] == 'P') {
+                (void)desk_dump_layout(&terminal, &panes);
+                continue;
+            }
             if (handle_pane_key(&panes, input[i])) {
                 desk_render_layout(&terminal, &panes);
                 desk_render_cube_one(&terminal, &panes, counter);
