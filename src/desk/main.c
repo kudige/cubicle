@@ -772,13 +772,16 @@ static int pane_layout_load_file(desk_pane_layout_t *panes, const char *path)
         int first = 0;
         int second = 0;
         int split_size = 0;
-        char label[64];
-        if (sscanf(line, "node %d %d %d %d %d %d %63s", &index, &pane_id,
-                   &split, &first, &second, &split_size, label) == 7) {
+        char label[64] = "";
+        int matched = sscanf(line, "node %d %d %d %d %d %d %63s", &index,
+                             &pane_id, &split, &first, &second, &split_size,
+                             label);
+        if (matched == 6 || matched == 7) {
             if (index < 0 ||
                 index >= (int)(sizeof(loaded.nodes) / sizeof(loaded.nodes[0])) ||
                 split < DESK_SPLIT_NONE || split > DESK_SPLIT_VERTICAL ||
-                !layout_name_is_safe(label)) {
+                (split == DESK_SPLIT_NONE &&
+                 (matched != 7 || !layout_name_is_safe(label)))) {
                 fclose(file);
                 errno = EINVAL;
                 return -1;
