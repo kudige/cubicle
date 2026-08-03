@@ -87,6 +87,7 @@ typedef struct desk_rect {
 typedef struct desk_pane_node {
     bool used;
     int pane_id;
+    char label[64];
     desk_split_t split;
     int first;
     int second;
@@ -253,11 +254,14 @@ static int pane_alloc_node(desk_pane_layout_t *panes)
     return -1;
 }
 
-static int pane_create_leaf(desk_pane_layout_t *panes, int pane_id)
+static int pane_create_leaf(desk_pane_layout_t *panes, int pane_id,
+                            const char *label)
 {
     int node = pane_alloc_node(panes);
     if (node >= 0) {
         panes->nodes[node].pane_id = pane_id;
+        snprintf(panes->nodes[node].label, sizeof(panes->nodes[node].label),
+                 "%s", label);
         panes->nodes[node].split = DESK_SPLIT_NONE;
     }
     return node;
@@ -278,10 +282,10 @@ static int pane_create_split(desk_pane_layout_t *panes, desk_split_t split,
 static void pane_layout_reset(desk_pane_layout_t *panes)
 {
     memset(panes, 0, sizeof(*panes));
-    int one = pane_create_leaf(panes, 1);
-    int two = pane_create_leaf(panes, 2);
-    int three = pane_create_leaf(panes, 3);
-    int four = pane_create_leaf(panes, 4);
+    int one = pane_create_leaf(panes, 1, "1");
+    int two = pane_create_leaf(panes, 2, "2");
+    int three = pane_create_leaf(panes, 3, "3");
+    int four = pane_create_leaf(panes, 4, "4");
     int top = pane_create_split(panes, DESK_SPLIT_HORIZONTAL, one, two);
     int bottom = pane_create_split(panes, DESK_SPLIT_HORIZONTAL, three, four);
     panes->root = pane_create_split(panes, DESK_SPLIT_VERTICAL, top, bottom);
@@ -378,19 +382,31 @@ static int pane_layout_split(desk_pane_layout_t *panes, desk_split_t split)
     if (leaf < 0) {
         return -1;
     }
-    int new_leaf = pane_create_leaf(panes, panes->next_pane_id++);
-    if (new_leaf < 0) {
+    char first_label[64];
+    char second_label[64];
+    int first_length = snprintf(first_label, sizeof(first_label), "%s.1",
+                                panes->nodes[leaf].label);
+    int second_length = snprintf(second_label, sizeof(second_label), "%s.2",
+                                 panes->nodes[leaf].label);
+    if (first_length < 0 || second_length < 0 ||
+        first_length >= (int)sizeof(first_label) ||
+        second_length >= (int)sizeof(second_label)) {
+        return -1;
+    }
+    int current_pane_id = panes->nodes[leaf].pane_id;
+    int new_pane_id = panes->next_pane_id++;
+    int first_leaf = pane_create_leaf(panes, current_pane_id, first_label);
+    int new_leaf = pane_create_leaf(panes, new_pane_id, second_label);
+    if (first_leaf < 0 || new_leaf < 0) {
+        if (first_leaf >= 0) panes->nodes[first_leaf].used = false;
+        if (new_leaf >= 0) panes->nodes[new_leaf].used = false;
+        panes->next_pane_id--;
         return -1;
     }
     panes->nodes[leaf].split = split;
-    panes->nodes[leaf].first = pane_create_leaf(panes, panes->active_pane_id);
+    panes->nodes[leaf].first = first_leaf;
     panes->nodes[leaf].second = new_leaf;
     panes->nodes[leaf].pane_id = 0;
-    if (panes->nodes[leaf].first < 0) {
-        panes->nodes[new_leaf].used = false;
-        panes->nodes[leaf].used = false;
-        return -1;
-    }
     panes->active_pane_id = panes->nodes[new_leaf].pane_id;
     panes->zoom = DESK_ZOOM_NONE;
     return 0;
@@ -867,15 +883,17 @@ static void pane_canvas_connect_dividers(const char **canvas,
 
 static void pane_canvas_write_label(const char **canvas,
                                     const desk_terminal_t *terminal,
-                                    desk_rect_t rect, int pane_id,
+                                    desk_rect_t rect, const char *pane_label,
                                     bool active)
 {
     if (rect.rows <= 0 || rect.cols <= 0) {
         return;
     }
     char label[32];
-    int length = active ? snprintf(label, sizeof(label), "[Cube %d]", pane_id)
-                        : snprintf(label, sizeof(label), "cube %d", pane_id);
+    int length = active ? snprintf(label, sizeof(label), "[Cube %s]",
+                                   pane_label)
+                        : snprintf(label, sizeof(label), "cube %s",
+                                   pane_label);
     if (length < 0) {
         return;
     }
@@ -897,7 +915,7 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     }
     const desk_pane_node_t *entry = &panes->nodes[node];
     if (entry->split == DESK_SPLIT_NONE) {
-        pane_canvas_write_label(canvas, terminal, rect, entry->pane_id,
+        pane_canvas_write_label(canvas, terminal, rect, entry->label,
                                 entry->pane_id == panes->active_pane_id);
         return;
     }
