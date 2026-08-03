@@ -46,10 +46,8 @@ typedef struct desk_terminal {
 } desk_terminal_t;
 
 typedef struct desk_layout {
-    int left_width;
-    int right_width;
-    int top_rows;
-    int bottom_rows;
+    int rows;
+    int cols;
 } desk_layout_t;
 
 typedef enum desk_active_cube {
@@ -58,6 +56,41 @@ typedef enum desk_active_cube {
     DESK_ACTIVE_CUBE_THREE = 3,
     DESK_ACTIVE_CUBE_FOUR = 4
 } desk_active_cube_t;
+
+typedef enum desk_split {
+    DESK_SPLIT_NONE = 0,
+    DESK_SPLIT_HORIZONTAL,
+    DESK_SPLIT_VERTICAL
+} desk_split_t;
+
+typedef enum desk_zoom {
+    DESK_ZOOM_NONE = 0,
+    DESK_ZOOM_HORIZONTAL,
+    DESK_ZOOM_VERTICAL
+} desk_zoom_t;
+
+typedef struct desk_rect {
+    int row;
+    int col;
+    int rows;
+    int cols;
+} desk_rect_t;
+
+typedef struct desk_pane_node {
+    bool used;
+    int pane_id;
+    desk_split_t split;
+    int first;
+    int second;
+} desk_pane_node_t;
+
+typedef struct desk_pane_layout {
+    desk_pane_node_t nodes[32];
+    int root;
+    int active_pane_id;
+    int next_pane_id;
+    desk_zoom_t zoom;
+} desk_pane_layout_t;
 
 typedef struct desk_cell {
     char ch;
@@ -188,14 +221,6 @@ static void append_text(char *buffer, size_t buffer_size, size_t *used,
     }
 }
 
-static void append_repeat_text(char *buffer, size_t buffer_size, size_t *used,
-                               const char *text, int count)
-{
-    for (int i = 0; i < count; ++i) {
-        append_text(buffer, buffer_size, used, text);
-    }
-}
-
 static void append_cell_text(char *buffer, size_t buffer_size, size_t *used,
                              const char *text, int width)
 {
@@ -207,21 +232,256 @@ static void append_cell_text(char *buffer, size_t buffer_size, size_t *used,
     append_repeat(buffer, buffer_size, used, ' ', width - emitted);
 }
 
-static desk_active_cube_t next_active_cube(desk_active_cube_t active)
+static int pane_alloc_node(desk_pane_layout_t *panes)
 {
-    return active == DESK_ACTIVE_CUBE_FOUR
-               ? DESK_ACTIVE_CUBE_ONE
-               : (desk_active_cube_t)(active + 1);
+    for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
+         ++i) {
+        if (!panes->nodes[i].used) {
+            memset(&panes->nodes[i], 0, sizeof(panes->nodes[i]));
+            panes->nodes[i].used = true;
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
-static const char *middle_junction_glyph(desk_active_cube_t active)
+static int pane_create_leaf(desk_pane_layout_t *panes, int pane_id)
 {
-    return active == DESK_ACTIVE_CUBE_ONE ||
-                   active == DESK_ACTIVE_CUBE_TWO ||
-                   active == DESK_ACTIVE_CUBE_THREE ||
-                   active == DESK_ACTIVE_CUBE_FOUR
-               ? DESK_ACTIVE_MIDDLE_JUNCTION
-               : DESK_INACTIVE_MIDDLE_JUNCTION;
+    int node = pane_alloc_node(panes);
+    if (node >= 0) {
+        panes->nodes[node].pane_id = pane_id;
+        panes->nodes[node].split = DESK_SPLIT_NONE;
+    }
+    return node;
+}
+
+static int pane_create_split(desk_pane_layout_t *panes, desk_split_t split,
+                             int first, int second)
+{
+    int node = pane_alloc_node(panes);
+    if (node >= 0) {
+        panes->nodes[node].split = split;
+        panes->nodes[node].first = first;
+        panes->nodes[node].second = second;
+    }
+    return node;
+}
+
+static void pane_layout_reset(desk_pane_layout_t *panes)
+{
+    memset(panes, 0, sizeof(*panes));
+    int one = pane_create_leaf(panes, 1);
+    int two = pane_create_leaf(panes, 2);
+    int three = pane_create_leaf(panes, 3);
+    int four = pane_create_leaf(panes, 4);
+    int top = pane_create_split(panes, DESK_SPLIT_HORIZONTAL, one, two);
+    int bottom = pane_create_split(panes, DESK_SPLIT_HORIZONTAL, three, four);
+    panes->root = pane_create_split(panes, DESK_SPLIT_VERTICAL, top, bottom);
+    panes->active_pane_id = 1;
+    panes->next_pane_id = 5;
+    panes->zoom = DESK_ZOOM_NONE;
+}
+
+static bool pane_subtree_contains(const desk_pane_layout_t *panes, int node,
+                                  int pane_id)
+{
+    if (node < 0 || !panes->nodes[node].used) {
+        return false;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        return entry->pane_id == pane_id;
+    }
+    return pane_subtree_contains(panes, entry->first, pane_id) ||
+           pane_subtree_contains(panes, entry->second, pane_id);
+}
+
+static int pane_first_leaf(const desk_pane_layout_t *panes, int node)
+{
+    if (node < 0 || !panes->nodes[node].used) {
+        return 0;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        return entry->pane_id;
+    }
+    int first = pane_first_leaf(panes, entry->first);
+    return first != 0 ? first : pane_first_leaf(panes, entry->second);
+}
+
+static int pane_find_leaf_node(const desk_pane_layout_t *panes, int node,
+                               int pane_id)
+{
+    if (node < 0 || !panes->nodes[node].used) {
+        return -1;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        return entry->pane_id == pane_id ? node : -1;
+    }
+    int found = pane_find_leaf_node(panes, entry->first, pane_id);
+    return found >= 0 ? found
+                      : pane_find_leaf_node(panes, entry->second, pane_id);
+}
+
+static int pane_find_parent(const desk_pane_layout_t *panes, int node,
+                            int child)
+{
+    if (node < 0 || !panes->nodes[node].used) {
+        return -1;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        return -1;
+    }
+    if (entry->first == child || entry->second == child) {
+        return node;
+    }
+    int found = pane_find_parent(panes, entry->first, child);
+    return found >= 0 ? found : pane_find_parent(panes, entry->second, child);
+}
+
+static void pane_layout_next(desk_pane_layout_t *panes)
+{
+    int best = 0;
+    int fallback = 0;
+    for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
+         ++i) {
+        if (!panes->nodes[i].used ||
+            panes->nodes[i].split != DESK_SPLIT_NONE) {
+            continue;
+        }
+        int pane_id = panes->nodes[i].pane_id;
+        if (fallback == 0 || pane_id < fallback) {
+            fallback = pane_id;
+        }
+        if (pane_id > panes->active_pane_id &&
+            (best == 0 || pane_id < best)) {
+            best = pane_id;
+        }
+    }
+    panes->active_pane_id = best != 0 ? best : fallback;
+    panes->zoom = DESK_ZOOM_NONE;
+}
+
+static int pane_layout_split(desk_pane_layout_t *panes, desk_split_t split)
+{
+    int leaf = pane_find_leaf_node(panes, panes->root, panes->active_pane_id);
+    if (leaf < 0) {
+        return -1;
+    }
+    int new_leaf = pane_create_leaf(panes, panes->next_pane_id++);
+    if (new_leaf < 0) {
+        return -1;
+    }
+    panes->nodes[leaf].split = split;
+    panes->nodes[leaf].first = pane_create_leaf(panes, panes->active_pane_id);
+    panes->nodes[leaf].second = new_leaf;
+    panes->nodes[leaf].pane_id = 0;
+    if (panes->nodes[leaf].first < 0) {
+        panes->nodes[new_leaf].used = false;
+        panes->nodes[leaf].used = false;
+        return -1;
+    }
+    panes->active_pane_id = panes->nodes[new_leaf].pane_id;
+    panes->zoom = DESK_ZOOM_NONE;
+    return 0;
+}
+
+static int pane_layout_delete_active(desk_pane_layout_t *panes)
+{
+    int leaf = pane_find_leaf_node(panes, panes->root, panes->active_pane_id);
+    if (leaf < 0 || leaf == panes->root) {
+        return -1;
+    }
+    int parent = pane_find_parent(panes, panes->root, leaf);
+    if (parent < 0) {
+        return -1;
+    }
+    int sibling = panes->nodes[parent].first == leaf
+                      ? panes->nodes[parent].second
+                      : panes->nodes[parent].first;
+    panes->active_pane_id = pane_first_leaf(panes, sibling);
+    panes->nodes[parent] = panes->nodes[sibling];
+    panes->nodes[leaf].used = false;
+    panes->nodes[sibling].used = false;
+    panes->zoom = DESK_ZOOM_NONE;
+    return 0;
+}
+
+static void split_rect(desk_rect_t rect, desk_split_t split,
+                       desk_rect_t *first, desk_rect_t *second,
+                       desk_rect_t *divider)
+{
+    *first = rect;
+    *second = rect;
+    memset(divider, 0, sizeof(*divider));
+    if (split == DESK_SPLIT_HORIZONTAL) {
+        int left = rect.cols / 2;
+        first->cols = left;
+        second->col = rect.col + left + 1;
+        second->cols = rect.cols - left - 1;
+        divider->row = rect.row;
+        divider->col = rect.col + left;
+        divider->rows = rect.rows;
+        divider->cols = 1;
+    } else {
+        int top = rect.rows / 2;
+        first->rows = top;
+        second->row = rect.row + top + 1;
+        second->rows = rect.rows - top - 1;
+        divider->row = rect.row + top;
+        divider->col = rect.col;
+        divider->rows = 1;
+        divider->cols = rect.cols;
+    }
+}
+
+static bool pane_layout_rect_for_node(const desk_pane_layout_t *panes,
+                                      int node, int pane_id, desk_rect_t rect,
+                                      desk_rect_t *out)
+{
+    if (node < 0 || !panes->nodes[node].used || rect.rows <= 0 ||
+        rect.cols <= 0) {
+        return false;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        if (entry->pane_id == pane_id) {
+            *out = rect;
+            return true;
+        }
+        return false;
+    }
+
+    bool first_has_active =
+        pane_subtree_contains(panes, entry->first, panes->active_pane_id);
+    bool second_has_active =
+        pane_subtree_contains(panes, entry->second, panes->active_pane_id);
+    bool zooms_this_split =
+        (panes->zoom == DESK_ZOOM_HORIZONTAL &&
+         entry->split == DESK_SPLIT_HORIZONTAL) ||
+        (panes->zoom == DESK_ZOOM_VERTICAL &&
+         entry->split == DESK_SPLIT_VERTICAL);
+    if (zooms_this_split && (first_has_active || second_has_active)) {
+        int child = first_has_active ? entry->first : entry->second;
+        return pane_layout_rect_for_node(panes, child, pane_id, rect, out);
+    }
+
+    desk_rect_t first;
+    desk_rect_t second;
+    desk_rect_t divider;
+    split_rect(rect, entry->split, &first, &second, &divider);
+    return pane_layout_rect_for_node(panes, entry->first, pane_id, first, out) ||
+           pane_layout_rect_for_node(panes, entry->second, pane_id, second, out);
+}
+
+static bool pane_layout_rect_for_pane(const desk_pane_layout_t *panes,
+                                      const desk_terminal_t *terminal,
+                                      int pane_id, desk_rect_t *out)
+{
+    desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
+    return pane_layout_rect_for_node(panes, panes->root, pane_id, root, out);
 }
 
 static int selected_workspace_path(char path[PATH_MAX])
@@ -438,17 +698,130 @@ static bool desk_get_layout(const desk_terminal_t *terminal,
         return false;
     }
 
-    layout->left_width = cols / 2;
-    layout->right_width = cols - layout->left_width - 1;
-    layout->top_rows = rows / 2;
-    layout->bottom_rows = rows - layout->top_rows - 1;
+    layout->rows = rows;
+    layout->cols = cols;
     return true;
 }
 
-static void desk_render_layout(const desk_terminal_t *terminal,
-                               desk_active_cube_t active)
+static void pane_canvas_put(const char **canvas, const desk_terminal_t *terminal,
+                            int row, int col, const char *glyph)
 {
-    char frame[16384];
+    if (row < 0 || row >= terminal->rows || col < 0 || col >= terminal->cols) {
+        return;
+    }
+    canvas[(size_t)row * (size_t)terminal->cols + (size_t)col] = glyph;
+}
+
+static const char *ascii_glyph(char ch)
+{
+    static char glyphs[128][2];
+    unsigned char value = (unsigned char)ch;
+    if (value >= 128) {
+        return " ";
+    }
+    if (glyphs[value][0] == '\0') {
+        glyphs[value][0] = ch;
+        glyphs[value][1] = '\0';
+    }
+    return glyphs[value];
+}
+
+static bool pane_divider_crosses(const char **canvas,
+                                 const desk_terminal_t *terminal, int row,
+                                 int col, desk_split_t split)
+{
+    const char *existing =
+        canvas[(size_t)row * (size_t)terminal->cols + (size_t)col];
+    if (split == DESK_SPLIT_HORIZONTAL) {
+        return strcmp(existing, DESK_ACTIVE_HORIZONTAL) == 0 ||
+               strcmp(existing, DESK_INACTIVE_HORIZONTAL) == 0;
+    }
+    return strcmp(existing, DESK_ACTIVE_VERTICAL) == 0 ||
+           strcmp(existing, DESK_INACTIVE_VERTICAL) == 0;
+}
+
+static void pane_canvas_write_label(const char **canvas,
+                                    const desk_terminal_t *terminal,
+                                    desk_rect_t rect, int pane_id)
+{
+    if (rect.rows <= 0 || rect.cols <= 0) {
+        return;
+    }
+    char label[32];
+    int length = snprintf(label, sizeof(label), "cube %d", pane_id);
+    if (length < 0) {
+        return;
+    }
+    int limit = length < rect.cols ? length : rect.cols;
+    for (int i = 0; i < limit; ++i) {
+        pane_canvas_put(canvas, terminal, rect.row, rect.col + i,
+                        ascii_glyph(label[i]));
+    }
+}
+
+static void pane_render_node(const desk_pane_layout_t *panes,
+                             const desk_terminal_t *terminal,
+                             const char **canvas, int node, desk_rect_t rect)
+{
+    if (node < 0 || !panes->nodes[node].used || rect.rows <= 0 ||
+        rect.cols <= 0) {
+        return;
+    }
+    const desk_pane_node_t *entry = &panes->nodes[node];
+    if (entry->split == DESK_SPLIT_NONE) {
+        pane_canvas_write_label(canvas, terminal, rect, entry->pane_id);
+        return;
+    }
+
+    bool first_has_active =
+        pane_subtree_contains(panes, entry->first, panes->active_pane_id);
+    bool second_has_active =
+        pane_subtree_contains(panes, entry->second, panes->active_pane_id);
+    bool zooms_this_split =
+        (panes->zoom == DESK_ZOOM_HORIZONTAL &&
+         entry->split == DESK_SPLIT_HORIZONTAL) ||
+        (panes->zoom == DESK_ZOOM_VERTICAL &&
+         entry->split == DESK_SPLIT_VERTICAL);
+    if (zooms_this_split && (first_has_active || second_has_active)) {
+        pane_render_node(panes, terminal, canvas,
+                         first_has_active ? entry->first : entry->second,
+                         rect);
+        return;
+    }
+
+    desk_rect_t first;
+    desk_rect_t second;
+    desk_rect_t divider;
+    split_rect(rect, entry->split, &first, &second, &divider);
+    pane_render_node(panes, terminal, canvas, entry->first, first);
+    pane_render_node(panes, terminal, canvas, entry->second, second);
+
+    bool active_divider = first_has_active || second_has_active;
+    const char *line = entry->split == DESK_SPLIT_HORIZONTAL
+                           ? (active_divider ? DESK_ACTIVE_VERTICAL
+                                             : DESK_INACTIVE_VERTICAL)
+                           : (active_divider ? DESK_ACTIVE_HORIZONTAL
+                                             : DESK_INACTIVE_HORIZONTAL);
+    const char *junction = active_divider ? DESK_ACTIVE_MIDDLE_JUNCTION
+                                          : DESK_INACTIVE_MIDDLE_JUNCTION;
+    for (int row = 0; row < divider.rows; ++row) {
+        for (int col = 0; col < divider.cols; ++col) {
+            int target_row = divider.row + row;
+            int target_col = divider.col + col;
+            pane_canvas_put(
+                canvas, terminal, target_row, target_col,
+                pane_divider_crosses(canvas, terminal, target_row, target_col,
+                                     entry->split)
+                    ? junction
+                    : line);
+        }
+    }
+}
+
+static void desk_render_layout(const desk_terminal_t *terminal,
+                               const desk_pane_layout_t *panes)
+{
+    char frame[262144];
     size_t used = 0;
     desk_layout_t layout;
 
@@ -460,77 +833,55 @@ static void desk_render_layout(const desk_terminal_t *terminal,
         return;
     }
 
-    append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J");
+    const char **canvas = calloc((size_t)terminal->rows * (size_t)terminal->cols,
+                                 sizeof(*canvas));
+    if (canvas == NULL) {
+        return;
+    }
     for (int row = 0; row < terminal->rows; ++row) {
-        const char *left = "";
-        const char *right = "";
-        bool divider_row = row == layout.top_rows;
-        bool top_half = row < layout.top_rows;
-        desk_active_cube_t left_cube =
-            top_half ? DESK_ACTIVE_CUBE_ONE : DESK_ACTIVE_CUBE_THREE;
-        desk_active_cube_t right_cube =
-            top_half ? DESK_ACTIVE_CUBE_TWO : DESK_ACTIVE_CUBE_FOUR;
-
-        if (row == 0) {
-            left = "cube 1";
-            right = "cube 2";
-        } else if (row == layout.top_rows + 1) {
-            left = "cube 3";
-            right = "cube 4";
+        for (int col = 0; col < terminal->cols; ++col) {
+            canvas[(size_t)row * (size_t)terminal->cols + (size_t)col] = " ";
         }
+    }
 
-        if (divider_row) {
-            append_repeat_text(frame, sizeof(frame), &used,
-                               active == DESK_ACTIVE_CUBE_ONE ||
-                                       active == DESK_ACTIVE_CUBE_THREE
-                                   ? DESK_ACTIVE_HORIZONTAL
-                                   : DESK_INACTIVE_HORIZONTAL,
-                               layout.left_width);
+    append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J");
+    desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
+    pane_render_node(panes, terminal, canvas, panes->root, root);
+    for (int row = 0; row < terminal->rows; ++row) {
+        for (int col = 0; col < terminal->cols; ++col) {
             append_text(frame, sizeof(frame), &used,
-                        middle_junction_glyph(active));
-            append_repeat_text(frame, sizeof(frame), &used,
-                               active == DESK_ACTIVE_CUBE_TWO ||
-                                       active == DESK_ACTIVE_CUBE_FOUR
-                                   ? DESK_ACTIVE_HORIZONTAL
-                                   : DESK_INACTIVE_HORIZONTAL,
-                               layout.right_width);
-        } else {
-            append_cell_text(frame, sizeof(frame), &used, left,
-                             layout.left_width);
-            append_text(frame, sizeof(frame), &used,
-                        active == left_cube || active == right_cube
-                            ? DESK_ACTIVE_VERTICAL
-                            : DESK_INACTIVE_VERTICAL);
-            append_cell_text(frame, sizeof(frame), &used, right,
-                             layout.right_width);
+                        canvas[(size_t)row * (size_t)terminal->cols +
+                               (size_t)col]);
         }
         if (row + 1 < terminal->rows) {
             append_text(frame, sizeof(frame), &used, "\r\n");
         }
     }
+    free(canvas);
     (void)write_all(STDOUT_FILENO, frame, used);
 }
 
 static void desk_render_cube_one(const desk_terminal_t *terminal,
+                                 const desk_pane_layout_t *panes,
                                  unsigned long long counter)
 {
     char frame[16384];
     size_t used = 0;
-    desk_layout_t layout;
+    desk_rect_t rect;
 
-    if (!desk_get_layout(terminal, &layout)) {
+    if (!pane_layout_rect_for_pane(panes, terminal, 1, &rect)) {
         return;
     }
 
-    for (int row = 0; row < layout.top_rows; ++row) {
+    for (int row = 0; row < rect.rows; ++row) {
         char line[128];
         const char *text = "";
-        int terminal_row = row + 1;
+        int terminal_row = rect.row + row + 1;
 
         if (row == 0) {
             text = "cube 1: counter";
         } else {
-            int scroll_rows = layout.top_rows - 1;
+            int scroll_rows = rect.rows - 1;
             unsigned long long first_visible = 1;
             unsigned long long line_number = 0;
 
@@ -545,12 +896,12 @@ static void desk_render_cube_one(const desk_terminal_t *terminal,
         }
 
         char cursor[32];
-        int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;1H",
-                                     terminal_row);
+        int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
+                                     terminal_row, rect.col + 1);
         if (cursor_length > 0 && (size_t)cursor_length < sizeof(cursor)) {
             append_text(frame, sizeof(frame), &used, cursor);
         }
-        append_cell_text(frame, sizeof(frame), &used, text, layout.left_width);
+        append_cell_text(frame, sizeof(frame), &used, text, rect.cols);
     }
 
     (void)write_all(STDOUT_FILENO, frame, used);
@@ -989,28 +1340,29 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
+                                  const desk_pane_layout_t *panes,
                                   const desk_grid_t *grid,
                                   const char *title)
 {
     (void)title;
     char frame[65536];
     size_t used = 0;
-    desk_layout_t layout;
+    desk_rect_t rect;
 
-    if (!desk_get_layout(terminal, &layout)) {
+    if (!pane_layout_rect_for_pane(panes, terminal, 1, &rect)) {
         return;
     }
 
     for (int row = 0; row < grid->rows; ++row) {
         char cursor[32];
         char active_sgr[64] = "";
-        int terminal_row = row + 1;
-        int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;1H",
-                                     terminal_row);
+        int terminal_row = rect.row + row + 1;
+        int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
+                                     terminal_row, rect.col + 1);
         if (cursor_length > 0 && (size_t)cursor_length < sizeof(cursor)) {
             append_text(frame, sizeof(frame), &used, cursor);
         }
-        for (int col = 0; col < layout.left_width; ++col) {
+        for (int col = 0; col < rect.cols; ++col) {
             char ch = ' ';
             const char *sgr = "";
             if (row < grid->rows && col < grid->cols) {
@@ -1040,27 +1392,29 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
 }
 
 static int cube_one_content_size(const desk_terminal_t *terminal,
+                                 const desk_pane_layout_t *panes,
                                  unsigned int *rows,
                                  unsigned int *cols)
 {
-    desk_layout_t layout;
-    if (!desk_get_layout(terminal, &layout) || layout.top_rows <= 0 ||
-        layout.left_width <= 0) {
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, 1, &rect) ||
+        rect.rows <= 0 || rect.cols <= 0) {
         return -1;
     }
-    *rows = (unsigned int)layout.top_rows;
-    *cols = (unsigned int)layout.left_width;
+    *rows = (unsigned int)rect.rows;
+    *cols = (unsigned int)rect.cols;
     return 0;
 }
 
 static int desk_attach_after_terminal_enter(desk_attachment_t *target,
                                             const desk_terminal_t *terminal,
+                                            const desk_pane_layout_t *panes,
                                             char *error,
                                             size_t error_size)
 {
     unsigned int rows = 0;
     unsigned int cols = 0;
-    if (cube_one_content_size(terminal, &rows, &cols) < 0) {
+    if (cube_one_content_size(terminal, panes, &rows, &cols) < 0) {
         snprintf(error, error_size, "terminal too small for attachment");
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
@@ -1136,6 +1490,35 @@ static int forward_input(cubicle_attachment_t *attachment,
     return 0;
 }
 
+static bool handle_pane_key(desk_pane_layout_t *panes, unsigned char key)
+{
+    switch (key) {
+    case 0:
+        pane_layout_next(panes);
+        return true;
+    case 'h':
+        panes->zoom = DESK_ZOOM_HORIZONTAL;
+        return true;
+    case 'v':
+        panes->zoom = DESK_ZOOM_VERTICAL;
+        return true;
+    case 'r':
+        pane_layout_reset(panes);
+        return true;
+    case 'H':
+        (void)pane_layout_split(panes, DESK_SPLIT_HORIZONTAL);
+        return true;
+    case 'V':
+        (void)pane_layout_split(panes, DESK_SPLIT_VERTICAL);
+        return true;
+    case 'D':
+        (void)pane_layout_delete_active(panes);
+        return true;
+    default:
+        return false;
+    }
+}
+
 static int desk_run_attached(const char *process_name)
 {
     char error[256];
@@ -1166,23 +1549,25 @@ static int desk_run_attached(const char *process_name)
     memset(&grid, 0, sizeof(grid));
     unsigned int content_rows = 0;
     unsigned int content_cols = 0;
-    desk_active_cube_t active_cube = DESK_ACTIVE_CUBE_ONE;
+    desk_pane_layout_t panes;
+    pane_layout_reset(&panes);
     int detach_requested = 0;
     int escape_pending = 0;
     int result = 0;
 
-    if (cube_one_content_size(&terminal, &content_rows, &content_cols) < 0 ||
+    if (cube_one_content_size(&terminal, &panes, &content_rows,
+                              &content_cols) < 0 ||
         grid_resize(&grid, (int)content_rows, (int)content_cols) < 0) {
         result = 2;
         goto cleanup;
     }
 
-    desk_render_layout(&terminal, active_cube);
+    desk_render_layout(&terminal, &panes);
     char title[CUBICLE_NAME_MAX + 32];
     snprintf(title, sizeof(title), "cube 1: %s", process_name);
-    desk_render_cube_grid(&terminal, &grid, title);
+    desk_render_cube_grid(&terminal, &panes, &grid, title);
 
-    code = desk_attach_after_terminal_enter(&target, &terminal, error,
+    code = desk_attach_after_terminal_enter(&target, &terminal, &panes, error,
                                             sizeof(error));
     if (code != CUBICLE_OK) {
         terminal_leave(&terminal);
@@ -1196,15 +1581,15 @@ static int desk_run_attached(const char *process_name)
         if (g_resize_requested) {
             g_resize_requested = 0;
             if (terminal_query_size(&terminal) == 0 &&
-                cube_one_content_size(&terminal, &content_rows,
+                cube_one_content_size(&terminal, &panes, &content_rows,
                                       &content_cols) == 0) {
-                desk_render_layout(&terminal, active_cube);
+                desk_render_layout(&terminal, &panes);
                 if (grid_resize(&grid, (int)content_rows,
                                 (int)content_cols) == 0) {
                     (void)cubicle_attachment_resize(target.attachment,
                                                     content_rows,
                                                     content_cols);
-                    desk_render_cube_grid(&terminal, &grid, title);
+                    desk_render_cube_grid(&terminal, &panes, &grid, title);
                 }
             }
         }
@@ -1214,7 +1599,7 @@ static int desk_run_attached(const char *process_name)
                                                 sizeof(output));
         if (nread > 0) {
             grid_feed(&grid, output, (size_t)nread);
-            desk_render_cube_grid(&terminal, &grid, title);
+            desk_render_cube_grid(&terminal, &panes, &grid, title);
         } else if (nread < 0) {
             const cubicle_error_t *last =
                 cubicle_attachment_last_error(target.attachment);
@@ -1255,25 +1640,33 @@ static int desk_run_attached(const char *process_name)
             } else {
                 size_t start = 0;
                 for (ssize_t i = 0; i < input_length; ++i) {
-                    if (input[i] != 0) {
+                    if (!handle_pane_key(&panes, input[i])) {
                         continue;
                     }
-                    if (active_cube == DESK_ACTIVE_CUBE_ONE && i > (ssize_t)start &&
+                    if (panes.active_pane_id == 1 && i > (ssize_t)start &&
                         forward_input(target.attachment, input + start,
                                       (size_t)i - start, &escape_pending,
                                       &detach_requested) < 0) {
                         result = 2;
                         break;
                     }
-                    active_cube = next_active_cube(active_cube);
-                    desk_render_layout(&terminal, active_cube);
-                    desk_render_cube_grid(&terminal, &grid, title);
+                    if (cube_one_content_size(&terminal, &panes,
+                                              &content_rows,
+                                              &content_cols) == 0 &&
+                        grid_resize(&grid, (int)content_rows,
+                                    (int)content_cols) == 0) {
+                        (void)cubicle_attachment_resize(target.attachment,
+                                                        content_rows,
+                                                        content_cols);
+                    }
+                    desk_render_layout(&terminal, &panes);
+                    desk_render_cube_grid(&terminal, &panes, &grid, title);
                     start = (size_t)i + 1;
                 }
                 if (result != 0) {
                     break;
                 }
-                if (active_cube == DESK_ACTIVE_CUBE_ONE &&
+                if (panes.active_pane_id == 1 &&
                     start < (size_t)input_length &&
                     forward_input(target.attachment, input + start,
                                   (size_t)input_length - start,
@@ -1310,14 +1703,15 @@ static int desk_run(void)
 
     unsigned long long counter = 0;
     time_t last_tick = 0;
-    desk_active_cube_t active_cube = DESK_ACTIVE_CUBE_ONE;
+    desk_pane_layout_t panes;
+    pane_layout_reset(&panes);
 
     while (!g_stop_requested) {
         if (g_resize_requested) {
             g_resize_requested = 0;
             if (terminal_query_size(&terminal) == 0) {
-                desk_render_layout(&terminal, active_cube);
-                desk_render_cube_one(&terminal, counter);
+                desk_render_layout(&terminal, &panes);
+                desk_render_cube_one(&terminal, &panes, counter);
             }
         }
 
@@ -1325,7 +1719,7 @@ static int desk_run(void)
         if (now != (time_t)-1 && now != last_tick) {
             last_tick = now;
             counter++;
-            desk_render_cube_one(&terminal, counter);
+            desk_render_cube_one(&terminal, &panes, counter);
         }
 
         fd_set read_set;
@@ -1358,10 +1752,9 @@ static int desk_run(void)
             return -1;
         }
         for (ssize_t i = 0; i < length; ++i) {
-            if (input[i] == 0) {
-                active_cube = next_active_cube(active_cube);
-                desk_render_layout(&terminal, active_cube);
-                desk_render_cube_one(&terminal, counter);
+            if (handle_pane_key(&panes, input[i])) {
+                desk_render_layout(&terminal, &panes);
+                desk_render_cube_one(&terminal, &panes, counter);
                 continue;
             }
             if (input[i] == 'q' || input[i] == 3) {
