@@ -111,6 +111,7 @@ typedef struct desk_pane_layout {
     int next_pane_id;
     desk_zoom_t zoom;
     bool resize_mode;
+    char status[128];
 } desk_pane_layout_t;
 
 typedef struct desk_cell {
@@ -448,6 +449,17 @@ static int pane_layout_delete_active(desk_pane_layout_t *panes)
     return 0;
 }
 
+static void pane_layout_status(desk_pane_layout_t *panes,
+                               const char *message)
+{
+    snprintf(panes->status, sizeof(panes->status), "%s", message);
+}
+
+static void pane_layout_clear_status(desk_pane_layout_t *panes)
+{
+    panes->status[0] = '\0';
+}
+
 static int split_default_size(desk_rect_t rect, desk_split_t split)
 {
     return split == DESK_SPLIT_HORIZONTAL ? rect.cols / 2 : rect.rows / 2;
@@ -644,6 +656,149 @@ static int pane_layout_resize_side(desk_pane_layout_t *panes,
         }
         child = parent;
     }
+    return -1;
+}
+
+static bool pane_split_divider_rect(const desk_pane_layout_t *panes,
+                                    const desk_terminal_t *terminal,
+                                    int split_node,
+                                    desk_rect_t *divider)
+{
+    desk_rect_t rect;
+    desk_rect_t first;
+    desk_rect_t second;
+    desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
+    if (!pane_layout_rect_for_tree_node(panes, panes->root, split_node, root,
+                                        &rect)) {
+        return false;
+    }
+    split_rect(rect, &panes->nodes[split_node], &first, &second, divider);
+    return true;
+}
+
+static bool pane_dividers_align(const desk_rect_t *first,
+                                const desk_rect_t *second,
+                                desk_split_t split)
+{
+    if (split == DESK_SPLIT_HORIZONTAL) {
+        return first->col == second->col && first->rows == second->rows &&
+               first->row == second->row;
+    }
+    return first->row == second->row && first->cols == second->cols &&
+           first->col == second->col;
+}
+
+static int pane_layout_transpose(desk_pane_layout_t *panes,
+                                 const desk_terminal_t *terminal)
+{
+    int child = pane_find_leaf_node(panes, panes->root,
+                                    panes->active_pane_id);
+    while (child >= 0) {
+        int active_split = pane_find_parent(panes, panes->root, child);
+        if (active_split < 0) {
+            pane_layout_status(panes, "transpose: no eligible parent split");
+            return -1;
+        }
+        int local_parent = pane_find_parent(panes, panes->root, active_split);
+        int grandparent = local_parent >= 0
+                              ? pane_find_parent(panes, panes->root,
+                                                 local_parent)
+                              : -1;
+        if (local_parent < 0 || grandparent < 0) {
+            child = active_split;
+            continue;
+        }
+
+        desk_pane_node_t *active_node = &panes->nodes[active_split];
+        desk_pane_node_t *local_node = &panes->nodes[local_parent];
+        desk_pane_node_t *grand_node = &panes->nodes[grandparent];
+        if (active_node->split == DESK_SPLIT_NONE ||
+            local_node->split == DESK_SPLIT_NONE ||
+            grand_node->split == DESK_SPLIT_NONE ||
+            local_node->split != grand_node->split ||
+            active_node->split == grand_node->split) {
+            child = active_split;
+            continue;
+        }
+
+        bool local_is_first = grand_node->first == local_parent;
+        bool active_is_first = local_node->first == active_split;
+        int sibling_split = local_is_first ? grand_node->second
+                                           : grand_node->first;
+        int outside = active_is_first ? local_node->second
+                                      : local_node->first;
+        if ((local_is_first && active_is_first) ||
+            (!local_is_first && !active_is_first)) {
+            child = active_split;
+            continue;
+        }
+        if (sibling_split < 0 || !panes->nodes[sibling_split].used ||
+            panes->nodes[sibling_split].split != active_node->split) {
+            pane_layout_status(panes, "transpose: adjacent split mismatch");
+            return -1;
+        }
+
+        desk_rect_t active_divider;
+        desk_rect_t sibling_divider;
+        if (!pane_split_divider_rect(panes, terminal, active_split,
+                                     &active_divider) ||
+            !pane_split_divider_rect(panes, terminal, sibling_split,
+                                     &sibling_divider)) {
+            pane_layout_status(panes, "transpose: cannot resolve dividers");
+            return -1;
+        }
+        if (!pane_dividers_align(&active_divider, &sibling_divider,
+                                 active_node->split)) {
+            pane_layout_status(panes, "transpose: dividers are not aligned");
+            return -1;
+        }
+
+        int active_first = active_node->first;
+        int active_second = active_node->second;
+        int sibling_first = panes->nodes[sibling_split].first;
+        int sibling_second = panes->nodes[sibling_split].second;
+        desk_split_t outer_split = active_node->split;
+        desk_split_t pair_split = grand_node->split;
+        int outer_size = active_node->split_size;
+        int pair_size = grand_node->split_size;
+
+        grand_node->split = pair_split;
+        grand_node->split_size = local_node->split_size;
+        if (local_is_first) {
+            grand_node->first = outside;
+            grand_node->second = active_split;
+        } else {
+            grand_node->first = active_split;
+            grand_node->second = outside;
+        }
+
+        active_node->split = outer_split;
+        active_node->split_size = outer_size;
+        active_node->first = local_parent;
+        active_node->second = sibling_split;
+
+        local_node->split = pair_split;
+        local_node->split_size = pair_size;
+        panes->nodes[sibling_split].split = pair_split;
+        panes->nodes[sibling_split].split_size = pair_size;
+        if (local_is_first) {
+            local_node->first = active_first;
+            local_node->second = sibling_first;
+            panes->nodes[sibling_split].first = active_second;
+            panes->nodes[sibling_split].second = sibling_second;
+        } else {
+            local_node->first = sibling_first;
+            local_node->second = active_first;
+            panes->nodes[sibling_split].first = sibling_second;
+            panes->nodes[sibling_split].second = active_second;
+        }
+
+        panes->zoom = DESK_ZOOM_NONE;
+        pane_layout_clear_status(panes);
+        return 0;
+    }
+
+    pane_layout_status(panes, "transpose: no active pane");
     return -1;
 }
 
@@ -1320,6 +1475,21 @@ static void pane_canvas_write_label(const char **canvas,
     }
 }
 
+static void pane_canvas_write_status(const char **canvas,
+                                     const desk_terminal_t *terminal,
+                                     const char *status)
+{
+    if (status[0] == '\0' || terminal->rows <= 0) {
+        return;
+    }
+    int row = terminal->rows - 1;
+    int col = 0;
+    for (const char *cursor = status;
+         *cursor != '\0' && col < terminal->cols; ++cursor, ++col) {
+        pane_canvas_put(canvas, terminal, row, col, ascii_glyph(*cursor));
+    }
+}
+
 static void pane_render_node(const desk_pane_layout_t *panes,
                              const desk_terminal_t *terminal,
                              const char **canvas, int node, desk_rect_t rect,
@@ -1439,6 +1609,7 @@ static int desk_build_layout_frame(const desk_terminal_t *terminal,
     pane_render_node(panes, terminal, canvas, panes->root, root,
                      &active_rect);
     pane_canvas_connect_dividers(canvas, terminal);
+    pane_canvas_write_status(canvas, terminal, panes->status);
     for (int row = 0; row < terminal->rows; ++row) {
         for (int col = 0; col < terminal->cols; ++col) {
             append_text(frame, frame_size, used,
@@ -2167,17 +2338,22 @@ static int forward_input(cubicle_attachment_t *attachment,
     return 0;
 }
 
-static bool handle_pane_key(desk_pane_layout_t *panes, unsigned char key)
+static bool handle_pane_key(desk_pane_layout_t *panes,
+                            const desk_terminal_t *terminal,
+                            unsigned char key)
 {
     switch (key) {
     case 0:
         pane_layout_next(panes);
+        pane_layout_clear_status(panes);
         return true;
     case 'h':
         panes->zoom = DESK_ZOOM_HORIZONTAL;
+        pane_layout_clear_status(panes);
         return true;
     case 'v':
         panes->zoom = DESK_ZOOM_VERTICAL;
+        pane_layout_clear_status(panes);
         return true;
     case 'r':
         pane_layout_reset(panes);
@@ -2185,15 +2361,22 @@ static bool handle_pane_key(desk_pane_layout_t *panes, unsigned char key)
     case 's':
         panes->resize_mode = !panes->resize_mode;
         panes->zoom = DESK_ZOOM_NONE;
+        pane_layout_clear_status(panes);
+        return true;
+    case 't':
+        (void)pane_layout_transpose(panes, terminal);
         return true;
     case 'H':
         (void)pane_layout_split(panes, DESK_SPLIT_HORIZONTAL);
+        pane_layout_clear_status(panes);
         return true;
     case 'V':
         (void)pane_layout_split(panes, DESK_SPLIT_VERTICAL);
+        pane_layout_clear_status(panes);
         return true;
     case 'D':
         (void)pane_layout_delete_active(panes);
+        pane_layout_clear_status(panes);
         return true;
     default:
         return false;
@@ -2497,7 +2680,7 @@ static int desk_run_attached(const char *process_name, const char *layout_spec)
                         start = (size_t)i + 1;
                         continue;
                     }
-                    if (!handle_pane_key(&panes, input[i])) {
+                    if (!handle_pane_key(&panes, &terminal, input[i])) {
                         continue;
                     }
                     if (panes.active_pane_id == 1 && i > (ssize_t)start &&
@@ -2642,7 +2825,7 @@ static int desk_run(const char *layout_spec)
                 (void)desk_dump_layout(&terminal, &panes);
                 continue;
             }
-            if (handle_pane_key(&panes, input[i])) {
+            if (handle_pane_key(&panes, &terminal, input[i])) {
                 desk_render_layout(&terminal, &panes);
                 desk_render_cube_one(&terminal, &panes, counter);
                 continue;
