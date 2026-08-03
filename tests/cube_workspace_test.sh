@@ -129,7 +129,7 @@ if [ "$output" != "Workspace Project A selected" ]; then
     exit 1
 fi
 
-output=$("$CUBE" --manager-socket "$socket_path" workspace "Project B")
+output=$(cube --manager-socket "$socket_path" workspace "Project B")
 if [ "$output" != "Workspace Project B created and selected" ]; then
     echo "unexpected explicit-socket workspace output: $output" >&2
     exit 1
