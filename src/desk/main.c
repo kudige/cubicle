@@ -888,7 +888,8 @@ static void pane_canvas_write_label(const char **canvas,
 
 static void pane_render_node(const desk_pane_layout_t *panes,
                              const desk_terminal_t *terminal,
-                             const char **canvas, int node, desk_rect_t rect)
+                             const char **canvas, int node, desk_rect_t rect,
+                             const desk_rect_t *active_rect)
 {
     if (node < 0 || !panes->nodes[node].used || rect.rows <= 0 ||
         rect.cols <= 0) {
@@ -913,7 +914,7 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     if (zooms_this_split && (first_has_active || second_has_active)) {
         pane_render_node(panes, terminal, canvas,
                          first_has_active ? entry->first : entry->second,
-                         rect);
+                         rect, active_rect);
         return;
     }
 
@@ -921,21 +922,38 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     desk_rect_t second;
     desk_rect_t divider;
     split_rect(rect, entry->split, &first, &second, &divider);
-    pane_render_node(panes, terminal, canvas, entry->first, first);
-    pane_render_node(panes, terminal, canvas, entry->second, second);
+    pane_render_node(panes, terminal, canvas, entry->first, first,
+                     active_rect);
+    pane_render_node(panes, terminal, canvas, entry->second, second,
+                     active_rect);
 
-    bool active_divider = first_has_active || second_has_active;
-    const char *line = entry->split == DESK_SPLIT_HORIZONTAL
-                           ? (active_divider ? DESK_ACTIVE_VERTICAL
-                                             : DESK_INACTIVE_VERTICAL)
-                           : (active_divider ? DESK_ACTIVE_HORIZONTAL
-                                             : DESK_INACTIVE_HORIZONTAL);
-    const char *junction = active_divider ? DESK_ACTIVE_MIDDLE_JUNCTION
-                                          : DESK_INACTIVE_MIDDLE_JUNCTION;
     for (int row = 0; row < divider.rows; ++row) {
         for (int col = 0; col < divider.cols; ++col) {
             int target_row = divider.row + row;
             int target_col = divider.col + col;
+            bool active_divider = false;
+            if (entry->split == DESK_SPLIT_HORIZONTAL) {
+                active_divider =
+                    (active_rect->col + active_rect->cols == target_col ||
+                     active_rect->col == target_col + 1) &&
+                    target_row >= active_rect->row &&
+                    target_row < active_rect->row + active_rect->rows;
+            } else {
+                active_divider =
+                    (active_rect->row + active_rect->rows == target_row ||
+                     active_rect->row == target_row + 1) &&
+                    target_col >= active_rect->col &&
+                    target_col < active_rect->col + active_rect->cols;
+            }
+            const char *line = entry->split == DESK_SPLIT_HORIZONTAL
+                                   ? (active_divider ? DESK_ACTIVE_VERTICAL
+                                                     : DESK_INACTIVE_VERTICAL)
+                                   : (active_divider
+                                          ? DESK_ACTIVE_HORIZONTAL
+                                          : DESK_INACTIVE_HORIZONTAL);
+            const char *junction = active_divider
+                                       ? DESK_ACTIVE_MIDDLE_JUNCTION
+                                       : DESK_INACTIVE_MIDDLE_JUNCTION;
             pane_canvas_put(
                 canvas, terminal, target_row, target_col,
                 pane_divider_crosses(canvas, terminal, target_row, target_col,
@@ -980,7 +998,11 @@ static int desk_build_layout_frame(const desk_terminal_t *terminal,
         append_text(frame, frame_size, used, "\x1b[H\x1b[2J");
     }
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
-    pane_render_node(panes, terminal, canvas, panes->root, root);
+    desk_rect_t active_rect = root;
+    (void)pane_layout_rect_for_pane(panes, terminal, panes->active_pane_id,
+                                    &active_rect);
+    pane_render_node(panes, terminal, canvas, panes->root, root,
+                     &active_rect);
     pane_canvas_connect_dividers(canvas, terminal);
     for (int row = 0; row < terminal->rows; ++row) {
         for (int col = 0; col < terminal->cols; ++col) {
