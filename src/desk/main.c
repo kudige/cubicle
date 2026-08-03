@@ -31,9 +31,17 @@
 #define DESK_ACTIVE_HORIZONTAL "─"
 #define DESK_ACTIVE_VERTICAL "│"
 #define DESK_ACTIVE_MIDDLE_JUNCTION "┼"
+#define DESK_ACTIVE_T_DOWN "┬"
+#define DESK_ACTIVE_T_UP "┴"
+#define DESK_ACTIVE_T_RIGHT "├"
+#define DESK_ACTIVE_T_LEFT "┤"
 #define DESK_INACTIVE_HORIZONTAL "╌"
 #define DESK_INACTIVE_VERTICAL "┊"
 #define DESK_INACTIVE_MIDDLE_JUNCTION "┄"
+#define DESK_INACTIVE_T_DOWN "┄"
+#define DESK_INACTIVE_T_UP "┄"
+#define DESK_INACTIVE_T_RIGHT "┄"
+#define DESK_INACTIVE_T_LEFT "┄"
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -745,7 +753,15 @@ static bool pane_glyph_is_horizontal(const char *glyph)
     return strcmp(glyph, DESK_ACTIVE_HORIZONTAL) == 0 ||
            strcmp(glyph, DESK_INACTIVE_HORIZONTAL) == 0 ||
            strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0 ||
-           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0;
+           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_DOWN) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_UP) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_RIGHT) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_LEFT) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_DOWN) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_UP) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_RIGHT) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_LEFT) == 0;
 }
 
 static bool pane_glyph_is_vertical(const char *glyph)
@@ -753,14 +769,26 @@ static bool pane_glyph_is_vertical(const char *glyph)
     return strcmp(glyph, DESK_ACTIVE_VERTICAL) == 0 ||
            strcmp(glyph, DESK_INACTIVE_VERTICAL) == 0 ||
            strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0 ||
-           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0;
+           strcmp(glyph, DESK_INACTIVE_MIDDLE_JUNCTION) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_DOWN) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_UP) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_RIGHT) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_LEFT) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_DOWN) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_UP) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_RIGHT) == 0 ||
+           strcmp(glyph, DESK_INACTIVE_T_LEFT) == 0;
 }
 
 static bool pane_glyph_is_active(const char *glyph)
 {
     return strcmp(glyph, DESK_ACTIVE_HORIZONTAL) == 0 ||
            strcmp(glyph, DESK_ACTIVE_VERTICAL) == 0 ||
-           strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0;
+           strcmp(glyph, DESK_ACTIVE_MIDDLE_JUNCTION) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_DOWN) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_UP) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_RIGHT) == 0 ||
+           strcmp(glyph, DESK_ACTIVE_T_LEFT) == 0;
 }
 
 static const char *pane_canvas_glyph_at(const char **canvas,
@@ -792,22 +820,46 @@ static void pane_canvas_connect_dividers(const char **canvas,
                                                      col);
             const char *below = pane_canvas_glyph_at(canvas, terminal, row + 1,
                                                      col);
+            bool connects_left = pane_glyph_is_horizontal(left);
+            bool connects_right = pane_glyph_is_horizontal(right);
+            bool connects_above = pane_glyph_is_vertical(above);
+            bool connects_below = pane_glyph_is_vertical(below);
 
-            if (pane_glyph_is_horizontal(left) ||
-                pane_glyph_is_horizontal(right)) {
+            if (connects_left || connects_right) {
                 has_horizontal = true;
                 active = active || pane_glyph_is_active(left) ||
                          pane_glyph_is_active(right);
             }
-            if (pane_glyph_is_vertical(above) || pane_glyph_is_vertical(below)) {
+            if (connects_above || connects_below) {
                 has_vertical = true;
                 active = active || pane_glyph_is_active(above) ||
                          pane_glyph_is_active(below);
             }
             if (has_horizontal && has_vertical) {
+                bool connects_current_horizontal =
+                    pane_glyph_is_horizontal(current);
+                bool connects_current_vertical = pane_glyph_is_vertical(current);
+                bool left_line = connects_left || connects_current_horizontal;
+                bool right_line = connects_right || connects_current_horizontal;
+                bool above_line = connects_above || connects_current_vertical;
+                bool below_line = connects_below || connects_current_vertical;
+                const char *connector = active ? DESK_ACTIVE_MIDDLE_JUNCTION
+                                               : DESK_INACTIVE_MIDDLE_JUNCTION;
+                if (!above_line) {
+                    connector = active ? DESK_ACTIVE_T_DOWN
+                                       : DESK_INACTIVE_T_DOWN;
+                } else if (!below_line) {
+                    connector = active ? DESK_ACTIVE_T_UP
+                                       : DESK_INACTIVE_T_UP;
+                } else if (!left_line) {
+                    connector = active ? DESK_ACTIVE_T_RIGHT
+                                       : DESK_INACTIVE_T_RIGHT;
+                } else if (!right_line) {
+                    connector = active ? DESK_ACTIVE_T_LEFT
+                                       : DESK_INACTIVE_T_LEFT;
+                }
                 canvas[(size_t)row * (size_t)terminal->cols + (size_t)col] =
-                    active ? DESK_ACTIVE_MIDDLE_JUNCTION
-                           : DESK_INACTIVE_MIDDLE_JUNCTION;
+                    connector;
             }
         }
     }
