@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <ctype.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -646,6 +647,275 @@ static int pane_layout_resize_side(desk_pane_layout_t *panes,
     return -1;
 }
 
+static int pane_layout_next_id(const desk_pane_layout_t *panes)
+{
+    int next_id = 1;
+    for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
+         ++i) {
+        if (panes->nodes[i].used &&
+            panes->nodes[i].split == DESK_SPLIT_NONE &&
+            panes->nodes[i].pane_id >= next_id) {
+            next_id = panes->nodes[i].pane_id + 1;
+        }
+    }
+    return next_id;
+}
+
+static bool layout_name_is_safe(const char *name)
+{
+    if (name == NULL || name[0] == '\0' || strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0) {
+        return false;
+    }
+    for (const char *cursor = name; *cursor != '\0'; ++cursor) {
+        if (!isalnum((unsigned char)*cursor) && *cursor != '-' &&
+            *cursor != '_' && *cursor != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int layout_path_from_name(const char *name, char path[PATH_MAX])
+{
+    if (!layout_name_is_safe(name)) {
+        errno = EINVAL;
+        return -1;
+    }
+    const char *suffix = ".layout";
+    size_t name_length = strlen(name);
+    size_t suffix_length = strlen(suffix);
+    bool has_suffix =
+        name_length >= suffix_length &&
+        strcmp(name + name_length - suffix_length, suffix) == 0;
+    int length = snprintf(path, PATH_MAX, "%s%s", name,
+                          has_suffix ? "" : suffix);
+    return length < 0 || length >= PATH_MAX ? -1 : 0;
+}
+
+static bool layout_has_suffix(const char *path)
+{
+    const char *suffix = ".layout";
+    size_t path_length = strlen(path);
+    size_t suffix_length = strlen(suffix);
+    return path_length >= suffix_length &&
+           strcmp(path + path_length - suffix_length, suffix) == 0;
+}
+
+static int pane_layout_save(const desk_pane_layout_t *panes,
+                            const char *path)
+{
+    FILE *file = fopen(path, "w");
+    if (file == NULL) {
+        return -1;
+    }
+    fprintf(file, "desk-layout-v1\n");
+    fprintf(file, "root %d\n", panes->root);
+    fprintf(file, "active %d\n", panes->active_pane_id);
+    fprintf(file, "next %d\n", panes->next_pane_id);
+    fprintf(file, "zoom %d\n", (int)panes->zoom);
+    for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
+         ++i) {
+        if (!panes->nodes[i].used) {
+            continue;
+        }
+        const desk_pane_node_t *node = &panes->nodes[i];
+        fprintf(file, "node %zu %d %d %d %d %d %s\n", i, node->pane_id,
+                (int)node->split, node->first, node->second,
+                node->split_size, node->label);
+    }
+    return fclose(file);
+}
+
+static int pane_layout_load_file(desk_pane_layout_t *panes, const char *path)
+{
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return -1;
+    }
+
+    desk_pane_layout_t loaded;
+    memset(&loaded, 0, sizeof(loaded));
+    loaded.root = -1;
+    loaded.active_pane_id = 1;
+    loaded.next_pane_id = 1;
+    char line[256];
+    if (fgets(line, sizeof(line), file) == NULL ||
+        strcmp(line, "desk-layout-v1\n") != 0) {
+        fclose(file);
+        errno = EINVAL;
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        int value = 0;
+        if (sscanf(line, "root %d", &value) == 1) {
+            loaded.root = value;
+            continue;
+        }
+        if (sscanf(line, "active %d", &value) == 1) {
+            loaded.active_pane_id = value;
+            continue;
+        }
+        if (sscanf(line, "next %d", &value) == 1) {
+            loaded.next_pane_id = value;
+            continue;
+        }
+        if (sscanf(line, "zoom %d", &value) == 1) {
+            loaded.zoom = (desk_zoom_t)value;
+            continue;
+        }
+
+        int index = -1;
+        int pane_id = 0;
+        int split = 0;
+        int first = 0;
+        int second = 0;
+        int split_size = 0;
+        char label[64];
+        if (sscanf(line, "node %d %d %d %d %d %d %63s", &index, &pane_id,
+                   &split, &first, &second, &split_size, label) == 7) {
+            if (index < 0 ||
+                index >= (int)(sizeof(loaded.nodes) / sizeof(loaded.nodes[0])) ||
+                split < DESK_SPLIT_NONE || split > DESK_SPLIT_VERTICAL ||
+                !layout_name_is_safe(label)) {
+                fclose(file);
+                errno = EINVAL;
+                return -1;
+            }
+            loaded.nodes[index].used = true;
+            loaded.nodes[index].pane_id = pane_id;
+            snprintf(loaded.nodes[index].label,
+                     sizeof(loaded.nodes[index].label), "%s", label);
+            loaded.nodes[index].split = (desk_split_t)split;
+            loaded.nodes[index].first = first;
+            loaded.nodes[index].second = second;
+            loaded.nodes[index].split_size = split_size;
+            continue;
+        }
+
+        fclose(file);
+        errno = EINVAL;
+        return -1;
+    }
+    fclose(file);
+
+    if (loaded.root < 0 ||
+        loaded.root >= (int)(sizeof(loaded.nodes) / sizeof(loaded.nodes[0])) ||
+        !loaded.nodes[loaded.root].used ||
+        pane_find_leaf_node(&loaded, loaded.root, loaded.active_pane_id) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (loaded.next_pane_id <= 0) {
+        loaded.next_pane_id = pane_layout_next_id(&loaded);
+    }
+    loaded.resize_mode = false;
+    *panes = loaded;
+    return 0;
+}
+
+static int pane_layout_build_grid_range(desk_pane_layout_t *panes,
+                                        int row_start,
+                                        int rows,
+                                        int col_start,
+                                        int cols,
+                                        int total_cols)
+{
+    if (rows == 1 && cols == 1) {
+        int pane_id = row_start * total_cols + col_start + 1;
+        char label[32];
+        snprintf(label, sizeof(label), "%d", pane_id);
+        return pane_create_leaf(panes, pane_id, label);
+    }
+    if (cols > 1) {
+        int left_cols = cols / 2;
+        int left = pane_layout_build_grid_range(panes, row_start, rows,
+                                                col_start, left_cols,
+                                                total_cols);
+        int right = pane_layout_build_grid_range(
+            panes, row_start, rows, col_start + left_cols, cols - left_cols,
+            total_cols);
+        return left < 0 || right < 0
+                   ? -1
+                   : pane_create_split(panes, DESK_SPLIT_HORIZONTAL, left,
+                                       right);
+    }
+
+    int top_rows = rows / 2;
+    int top = pane_layout_build_grid_range(panes, row_start, top_rows,
+                                           col_start, cols, total_cols);
+    int bottom = pane_layout_build_grid_range(
+        panes, row_start + top_rows, rows - top_rows, col_start, cols,
+        total_cols);
+    return top < 0 || bottom < 0
+               ? -1
+               : pane_create_split(panes, DESK_SPLIT_VERTICAL, top, bottom);
+}
+
+static int pane_layout_grid(desk_pane_layout_t *panes, int rows, int cols)
+{
+    if (rows <= 0 || cols <= 0 || rows * cols > 16) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(panes, 0, sizeof(*panes));
+    panes->root = pane_layout_build_grid_range(panes, 0, rows, 0, cols, cols);
+    if (panes->root < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    panes->active_pane_id = 1;
+    panes->next_pane_id = rows * cols + 1;
+    panes->zoom = DESK_ZOOM_NONE;
+    panes->resize_mode = false;
+    return 0;
+}
+
+static bool parse_grid_layout(const char *text, int *rows, int *cols)
+{
+    char *end = NULL;
+    long parsed_rows = strtol(text, &end, 10);
+    if (end == text || (*end != 'x' && *end != 'X')) {
+        return false;
+    }
+    char *col_start = end + 1;
+    long parsed_cols = strtol(col_start, &end, 10);
+    if (end == col_start || *end != '\0' || parsed_rows <= 0 ||
+        parsed_cols <= 0 || parsed_rows > 16 || parsed_cols > 16) {
+        return false;
+    }
+    *rows = (int)parsed_rows;
+    *cols = (int)parsed_cols;
+    return true;
+}
+
+static int pane_layout_load_startup(desk_pane_layout_t *panes,
+                                    const char *layout_spec)
+{
+    pane_layout_reset(panes);
+    if (layout_spec == NULL) {
+        if (pane_layout_load_file(panes, "default.layout") == 0) {
+            return 0;
+        }
+        return errno == ENOENT ? 0 : -1;
+    }
+
+    int rows = 0;
+    int cols = 0;
+    if (parse_grid_layout(layout_spec, &rows, &cols)) {
+        return pane_layout_grid(panes, rows, cols);
+    }
+    if (layout_has_suffix(layout_spec) || strchr(layout_spec, '/') != NULL) {
+        return pane_layout_load_file(panes, layout_spec);
+    }
+    char path[PATH_MAX];
+    if (layout_path_from_name(layout_spec, path) < 0) {
+        return -1;
+    }
+    return pane_layout_load_file(panes, path);
+}
+
 static int selected_workspace_path(char path[PATH_MAX])
 {
     const char *state_home = getenv("XDG_STATE_HOME");
@@ -1208,6 +1478,61 @@ static int desk_dump_layout(const desk_terminal_t *terminal,
     size_t written = fwrite(frame, 1, used, file);
     int close_result = fclose(file);
     return written == used && close_result == 0 ? 0 : -1;
+}
+
+static int desk_prompt_layout_name(const desk_terminal_t *terminal,
+                                   char *name,
+                                   size_t name_size)
+{
+    char prompt[256];
+    size_t used = 0;
+    char cursor[32];
+    int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;1H",
+                                 terminal->rows);
+    if (cursor_length > 0 && (size_t)cursor_length < sizeof(cursor)) {
+        append_text(prompt, sizeof(prompt), &used, cursor);
+    }
+    append_text(prompt, sizeof(prompt), &used, "\x1b[2KLayout name: ");
+    (void)write_all(STDOUT_FILENO, prompt, used);
+
+    size_t length = 0;
+    name[0] = '\0';
+    while (!g_stop_requested) {
+        unsigned char ch;
+        ssize_t rc = read(STDIN_FILENO, &ch, 1);
+        if (rc < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            return -1;
+        }
+        if (rc == 0) {
+            continue;
+        }
+        if (ch == '\r' || ch == '\n') {
+            name[length] = '\0';
+            return length > 0 ? 0 : -1;
+        }
+        if (ch == 27 || ch == 3) {
+            return -1;
+        }
+        if (ch == 127 || ch == '\b') {
+            if (length > 0) {
+                length--;
+                name[length] = '\0';
+                (void)write_all(STDOUT_FILENO, "\b \b", 3);
+            }
+            continue;
+        }
+        if ((isalnum(ch) || ch == '-' || ch == '_' || ch == '.') &&
+            length + 1 < name_size) {
+            name[length++] = (char)ch;
+            name[length] = '\0';
+            char out[2] = {(char)ch, '\0'};
+            (void)write_all(STDOUT_FILENO, out, 1);
+        }
+    }
+    return -1;
 }
 
 static void desk_render_cube_one(const desk_terminal_t *terminal,
@@ -1926,7 +2251,52 @@ static bool parse_resize_arrow(const unsigned char *input,
     return true;
 }
 
-static int desk_run_attached(const char *process_name)
+static bool parse_shift_ctrl_s(const unsigned char *input,
+                               size_t length,
+                               size_t offset,
+                               size_t *consumed)
+{
+    if (offset + 1 >= length || input[offset] != 0x1b ||
+        input[offset + 1] != '[') {
+        return false;
+    }
+    size_t final = offset + 2;
+    while (final < length && input[final] != 'u' && input[final] != 'S') {
+        final++;
+    }
+    if (final >= length) {
+        return false;
+    }
+
+    char sequence[32];
+    size_t sequence_length = final - offset + 1;
+    if (sequence_length >= sizeof(sequence)) {
+        return false;
+    }
+    memcpy(sequence, input + offset, sequence_length);
+    sequence[sequence_length] = '\0';
+    if (strcmp(sequence, "\x1b[83;6u") == 0 ||
+        strcmp(sequence, "\x1b[115;6u") == 0 ||
+        strcmp(sequence, "\x1b[1;6S") == 0) {
+        *consumed = sequence_length;
+        return true;
+    }
+    return false;
+}
+
+static int desk_save_named_layout(const desk_terminal_t *terminal,
+                                  const desk_pane_layout_t *panes)
+{
+    char name[64];
+    char path[PATH_MAX];
+    if (desk_prompt_layout_name(terminal, name, sizeof(name)) < 0 ||
+        layout_path_from_name(name, path) < 0) {
+        return -1;
+    }
+    return pane_layout_save(panes, path);
+}
+
+static int desk_run_attached(const char *process_name, const char *layout_spec)
 {
     char error[256];
     desk_attachment_t target;
@@ -1957,7 +2327,12 @@ static int desk_run_attached(const char *process_name)
     unsigned int content_rows = 0;
     unsigned int content_cols = 0;
     desk_pane_layout_t panes;
-    pane_layout_reset(&panes);
+    if (pane_layout_load_startup(&panes, layout_spec) < 0) {
+        terminal_leave(&terminal);
+        fprintf(stderr, "desk: failed to load layout\n");
+        desk_attachment_cleanup(&target);
+        return 2;
+    }
     int detach_requested = 0;
     int escape_pending = 0;
     int result = 0;
@@ -2047,9 +2422,38 @@ static int desk_run_attached(const char *process_name)
             } else {
                 size_t start = 0;
                 for (ssize_t i = 0; i < input_length; ++i) {
+                    size_t consumed = 0;
+                    if (parse_shift_ctrl_s(input, (size_t)input_length,
+                                           (size_t)i, &consumed)) {
+                        if (panes.active_pane_id == 1 && i > (ssize_t)start &&
+                            forward_input(target.attachment, input + start,
+                                          (size_t)i - start, &escape_pending,
+                                          &detach_requested) < 0) {
+                            result = 2;
+                            break;
+                        }
+                        (void)desk_save_named_layout(&terminal, &panes);
+                        desk_render_layout(&terminal, &panes);
+                        desk_render_cube_grid(&terminal, &panes, &grid, title);
+                        start = (size_t)i + consumed;
+                        i = (ssize_t)start - 1;
+                        continue;
+                    }
+                    if (input[i] == 0x13) {
+                        if (panes.active_pane_id == 1 && i > (ssize_t)start &&
+                            forward_input(target.attachment, input + start,
+                                          (size_t)i - start, &escape_pending,
+                                          &detach_requested) < 0) {
+                            result = 2;
+                            break;
+                        }
+                        (void)pane_layout_save(&panes, "default.layout");
+                        start = (size_t)i + 1;
+                        continue;
+                    }
                     desk_resize_side_t side;
                     int delta = 0;
-                    size_t consumed = 0;
+                    consumed = 0;
                     if (panes.resize_mode &&
                         parse_resize_arrow(input, (size_t)input_length,
                                            (size_t)i, &side, &delta,
@@ -2136,7 +2540,7 @@ cleanup:
     return result;
 }
 
-static int desk_run(void)
+static int desk_run(const char *layout_spec)
 {
     desk_terminal_t terminal;
     if (terminal_enter(&terminal) < 0) {
@@ -2154,7 +2558,11 @@ static int desk_run(void)
     unsigned long long counter = 0;
     time_t last_tick = 0;
     desk_pane_layout_t panes;
-    pane_layout_reset(&panes);
+    if (pane_layout_load_startup(&panes, layout_spec) < 0) {
+        terminal_leave(&terminal);
+        fprintf(stderr, "desk: failed to load layout\n");
+        return 2;
+    }
 
     while (!g_stop_requested) {
         if (g_resize_requested) {
@@ -2202,9 +2610,22 @@ static int desk_run(void)
             return -1;
         }
         for (ssize_t i = 0; i < length; ++i) {
+            size_t consumed = 0;
+            if (parse_shift_ctrl_s(input, (size_t)length, (size_t)i,
+                                   &consumed)) {
+                (void)desk_save_named_layout(&terminal, &panes);
+                desk_render_layout(&terminal, &panes);
+                desk_render_cube_one(&terminal, &panes, counter);
+                i = (ssize_t)((size_t)i + consumed) - 1;
+                continue;
+            }
+            if (input[i] == 0x13) {
+                (void)pane_layout_save(&panes, "default.layout");
+                continue;
+            }
             desk_resize_side_t side;
             int delta = 0;
-            size_t consumed = 0;
+            consumed = 0;
             if (panes.resize_mode &&
                 parse_resize_arrow(input, (size_t)length, (size_t)i, &side,
                                    &delta, &consumed)) {
@@ -2235,32 +2656,49 @@ static int desk_run(void)
 
 static void print_usage(FILE *stream, const char *program)
 {
-    fprintf(stream, "Usage: %s [PROCESS]\n", program);
+    fprintf(stream, "Usage: %s [--layout FILE|GRID] [PROCESS]\n", program);
     fprintf(stream, "Render the Cubicle desk terminal view.\n");
 }
 
 int main(int argc, char **argv)
 {
-    if (argc > 1) {
-        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+    const char *layout_spec = NULL;
+    const char *process_name = NULL;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout, argv[0]);
             return 0;
         }
-        if (argc == 2) {
-            int result = desk_run_attached(argv[1]);
-            if (result < 0) {
-                fprintf(stderr, "desk: %s\n", strerror(errno));
-                return 1;
+        if (strcmp(argv[i], "--layout") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(stderr, argv[0]);
+                return 2;
             }
-            return result;
+            layout_spec = argv[++i];
+            continue;
+        }
+        if (process_name == NULL) {
+            process_name = argv[i];
+            continue;
         }
         print_usage(stderr, argv[0]);
         return 2;
     }
 
-    if (desk_run() < 0) {
+    if (process_name != NULL) {
+        int result = desk_run_attached(process_name, layout_spec);
+        if (result < 0) {
+            fprintf(stderr, "desk: %s\n", strerror(errno));
+            return 1;
+        }
+        return result;
+    }
+
+    int result = desk_run(layout_spec);
+    if (result < 0) {
         fprintf(stderr, "desk: %s\n", strerror(errno));
         return 1;
     }
-    return 0;
+    return result;
 }
