@@ -20,6 +20,8 @@ xdg_state_home="$tmpdir/xdg-state"
 xdg_runtime_dir="$tmpdir/xdg-runtime"
 xdg_config_home="$tmpdir/xdg-config"
 mkdir -p "$xdg_runtime_dir"
+workspace_dir="$tmpdir/workspace-dir"
+mkdir -p "$workspace_dir"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --foreground \
     --control-socket "$socket_path" --event-interval-ms 50 &
@@ -50,6 +52,11 @@ if [ "$output" != "Workspace Project A created and selected" ]; then
     echo "unexpected workspace create output: $output" >&2
     exit 1
 fi
+
+json_dir_create_output=$(cube --json workspace create --dir "$workspace_dir" "Project Dir")
+printf "%s" "$json_dir_create_output" | grep -q '"name":"Project Dir"'
+printf "%s" "$json_dir_create_output" | grep -q "\"directory\":\"$workspace_dir\""
+cube workspace select "Project A" >/dev/null
 
 owner_key=$(tr -d '\n' <"$xdg_config_home/cubicle/keys/client.pub")
 access_list=$(cube access list)
@@ -123,6 +130,7 @@ json_list_output=$(cube --json workspace list)
 printf "%s" "$json_list_output" | grep -q '"workspaces"'
 printf "%s" "$json_list_output" | grep -q '"name":"Project A"'
 printf "%s" "$json_list_output" | grep -q '"name":"Project B"'
+printf "%s" "$json_list_output" | grep -q "\"directory\":\"$workspace_dir\""
 
 json_stop_output=$(cube --json workspace stop "Project JSON")
 if [ "$json_stop_output" != "{}" ]; then

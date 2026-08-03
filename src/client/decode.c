@@ -252,6 +252,10 @@ int parse_workspace_info(const char *json, cubicle_workspace_info_t *out)
                                           out->manager_id,
                                           sizeof(out->manager_id), NULL,
                                           &error) < 0 ||
+         cubicle_json_get_optional_string(parsed.root, "directory",
+                                          out->directory,
+                                          sizeof(out->directory), NULL,
+                                          &error) < 0 ||
          cubicle_json_get_optional_u64(parsed.root, "created_at_ms",
                                        &out->created_at_ms, NULL, &error) < 0 ||
          cubicle_json_get_optional_u64(parsed.root, "updated_at_ms",
@@ -292,6 +296,9 @@ int parse_process_info(const char *json, cubicle_process_info_t *out)
         cubicle_json_get_optional_string(parsed.root, "friendly_name",
                                          out->friendly_name,
                                          sizeof(out->friendly_name), NULL,
+                                         &error) < 0 ||
+        cubicle_json_get_optional_string(parsed.root, "cwd",
+                                         out->cwd, sizeof(out->cwd), NULL,
                                          &error) < 0) {
         cubicle_json_cleanup(&parsed);
         return -1;

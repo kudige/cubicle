@@ -685,9 +685,17 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state,
     return *child_result;
 }
 
+static void child_chdir_or_exit(const char *cwd)
+{
+    if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) < 0) {
+        _exit(127);
+    }
+}
+
 int run_stream(char **command, const char *state_dir,
                const char *log_dir,
                const char *control_socket,
+               const char *cwd,
                stdin_policy_t stdin_policy,
                int completed_retention_ms)
 {
@@ -730,6 +738,7 @@ int run_stream(char **command, const char *state_dir,
         close_if_open(&stdout_pipe[1]);
         close_if_open(&stderr_pipe[1]);
 
+        child_chdir_or_exit(cwd);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -863,6 +872,7 @@ static int open_pty_pair(int *master_fd, int *slave_fd)
 static int run_pty_mode(char **command, const char *state_dir,
                         const char *log_dir,
                         const char *control_socket,
+                        const char *cwd,
                         stdin_policy_t stdin_policy,
                         int completed_retention_ms,
                         cubicle_process_mode_t process_mode)
@@ -912,6 +922,7 @@ static int run_pty_mode(char **command, const char *state_dir,
 
         close_if_open(&slave_fd);
         close_if_open(&stdout_slave_fd);
+        child_chdir_or_exit(cwd);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -1056,20 +1067,23 @@ static int run_pty_mode(char **command, const char *state_dir,
 int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
+            const char *cwd,
             stdin_policy_t stdin_policy,
             int completed_retention_ms)
 {
-    return run_pty_mode(command, state_dir, log_dir, control_socket, stdin_policy,
-                        completed_retention_ms, CUBICLE_PROCESS_TTY);
+    return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
+                        stdin_policy, completed_retention_ms,
+                        CUBICLE_PROCESS_TTY);
 }
 
 int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
+             const char *cwd,
              stdin_policy_t stdin_policy,
              int completed_retention_ms)
 {
-    return run_pty_mode(command, state_dir, log_dir, control_socket, stdin_policy,
-                        completed_retention_ms,
+    return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
+                        stdin_policy, completed_retention_ms,
                         CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
 }

@@ -20,7 +20,7 @@ Use `--state-dir DIR` to override it.
 ### workspaces.tsv
 
 ```text
-workspace_id<TAB>workspace_name
+workspace_id<TAB>workspace_name<TAB>workspace_directory
 ```
 
 Workspace names are unique.
@@ -28,7 +28,7 @@ Workspace names are unique.
 ### processes.tsv
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 The current process state written by `process register` is `running`.
@@ -68,7 +68,7 @@ cubicle-manager --state-dir DIR workspace list
 Prints:
 
 ```text
-workspace_id<TAB>workspace_name
+workspace_id<TAB>workspace_name<TAB>workspace_directory
 ```
 
 ### process register
@@ -100,7 +100,7 @@ cubicle-manager --state-dir DIR process list --workspace "Project A"
 Prints:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 ### process resolve
@@ -116,7 +116,7 @@ name resolution requires `--workspace`.
 Prints the direct controller details:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 ### process start

@@ -464,6 +464,7 @@ Request:
 
 ```text
 name
+directory?                # defaults to the manager's current directory when omitted
 initial_owner_public_key? 
 initial_owner_label?
 idempotency_key
@@ -560,7 +561,7 @@ stdin_policy              # open or eof
 argv[]
 environment[]?            # explicit NAME=value entries
 inherit_environment?      # default false for remote-safe semantics
-cwd?                       # workspace-relative unless explicitly marked otherwise
+cwd?                       # defaults to workspace.directory when omitted
 tty_rows?
 tty_cols?
 retention_policy?

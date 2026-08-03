@@ -14,6 +14,9 @@ cubicle_error_code_t cubicle_workspace_create(cubicle_client_t *client,
     cubicle_json_builder_t params = {0};
     if (cubicle_json_builder_append(&params, "{\"name\":") < 0 ||
         cubicle_json_builder_append_string(&params, options->name) < 0 ||
+        (options->directory != NULL &&
+         (cubicle_json_builder_append(&params, ",\"directory\":") < 0 ||
+          cubicle_json_builder_append_string(&params, options->directory) < 0)) ||
         (options->initial_owner_label != NULL &&
          (cubicle_json_builder_append(&params, ",\"initial_owner_label\":") < 0 ||
           cubicle_json_builder_append_string(&params, options->initial_owner_label) < 0)) ||

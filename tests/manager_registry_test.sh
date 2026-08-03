@@ -7,7 +7,7 @@ state_dir="$tmpdir/manager"
 
 create_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project A")
 case "$create_output" in
-    workspace\ id=*\ name=Project\ A) ;;
+    workspace\ id=*\ name=Project\ A\ directory=*) ;;
     *)
         echo "unexpected workspace create output: $create_output" >&2
         exit 1
@@ -16,10 +16,11 @@ esac
 
 workspace_id=${create_output#workspace id=}
 workspace_id=${workspace_id%% name=*}
+workspace_dir=${create_output##* directory=}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" workspace list >"$tmpdir/workspaces"
-grep -q "^$workspace_id	Project A$" "$tmpdir/workspaces"
-grep -q "^$workspace_id	Project A$" "$state_dir/workspaces.tsv"
+grep -q "^$workspace_id	Project A	$workspace_dir$" "$tmpdir/workspaces"
+grep -q "^$workspace_id	Project A	$workspace_dir$" "$state_dir/workspaces.tsv"
 
 register_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
     --workspace "Project A" \
@@ -40,14 +41,14 @@ process_id=${register_output#process id=}
 process_id=${process_id%% workspace_id=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process list --workspace "Project A" >"$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$state_dir/processes.tsv"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/processes"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$state_dir/processes.tsv"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$process_id" >"$tmpdir/resolve-by-id"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/resolve-by-id"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/resolve-by-id"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project A" >"$tmpdir/resolve-by-name"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock$" "$tmpdir/resolve-by-name"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/resolve-by-name"
 
 if "$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
     --workspace "Project A" \
@@ -75,6 +76,7 @@ grep -q 'Process friendly name already exists in workspace: make-1' "$tmpdir/dup
 workspace_b_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project B")
 workspace_b_id=${workspace_b_output#workspace id=}
 workspace_b_id=${workspace_b_id%% name=*}
+workspace_b_dir=${workspace_b_output##* directory=}
 
 register_b_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
     --workspace "Project B" \
@@ -87,7 +89,7 @@ process_b_id=${register_b_output#process id=}
 process_b_id=${process_b_id%% workspace_id=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project B" >"$tmpdir/resolve-by-name-b"
-grep -q "^$process_b_id	$workspace_b_id	make-1	stream	running	controller-b	$tmpdir/controller-b.sock$" "$tmpdir/resolve-by-name-b"
+grep -q "^$process_b_id	$workspace_b_id	make-1	stream	running	controller-b	$tmpdir/controller-b.sock	$workspace_b_dir$" "$tmpdir/resolve-by-name-b"
 
 set +e
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 >/dev/null 2>"$tmpdir/resolve-error"

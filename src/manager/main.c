@@ -130,10 +130,10 @@ static void manager_log_error(int error_number)
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] workspace create NAME\n"
+            "Usage: %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] workspace create [--dir DIR] NAME\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] workspace list\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process register --workspace NAME_OR_ID --friendly-name NAME --mode MODE --controller-id ID --control-socket PATH [--process-id ID]\n"
-            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream|tty|term [--stdin-policy open|eof] -- COMMAND [ARGS...]\n"
+            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] [--controller-bin PATH] process start --workspace NAME_OR_ID --friendly-name NAME --mode stream|tty|term [--stdin-policy open|eof] [--dir DIR] -- COMMAND [ARGS...]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process resolve PROCESS_ID_OR_NAME [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events list [--workspace NAME_OR_ID]\n"
@@ -157,6 +157,25 @@ static int validate_field(const char *value, const char *name)
     }
 
     return 0;
+}
+
+static int resolve_directory_path(const char *directory,
+                                  char resolved[CUBICLE_PATH_MAX])
+{
+    if (directory == NULL || directory[0] == '\0') {
+        if (getcwd(resolved, CUBICLE_PATH_MAX) == NULL) {
+            return -1;
+        }
+        return 0;
+    }
+
+    char real_path[CUBICLE_PATH_MAX];
+    if (realpath(directory, real_path) == NULL) {
+        return -1;
+    }
+
+    int length = snprintf(resolved, CUBICLE_PATH_MAX, "%s", real_path);
+    return length < 0 || length >= CUBICLE_PATH_MAX ? -1 : 0;
 }
 
 static int state_path(char path[PATH_MAX], const manager_state_t *state,
@@ -757,7 +776,8 @@ static int rewrite_workspace_records(const manager_state_t *state,
                              new_name);
                 }
             }
-            if (fprintf(output, "%s\t%s\n", record.id, record.name) < 0) {
+            if (fprintf(output, "%s\t%s\t%s\n", record.id, record.name,
+                        record.directory) < 0) {
                 fclose(input);
                 fclose(output);
                 return -1;
@@ -810,17 +830,20 @@ static int workspace_info_json(const manager_state_t *state,
     size_t process_count = 0;
     size_t running_count = 0;
     char escaped_name[256];
+    char escaped_directory[CUBICLE_PATH_MAX * 2];
     if (count_processes_for_workspace(state, workspace->id, &process_count,
                                       &running_count) < 0 ||
         cubicle_json_escape(escaped_name, sizeof(escaped_name),
-                            workspace->name) < 0) {
+                            workspace->name) < 0 ||
+        cubicle_json_escape(escaped_directory, sizeof(escaped_directory),
+                            workspace->directory) < 0) {
         return -1;
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"manager_id\":\"%s\",\"id\":\"%s\",\"name\":\"%s\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":%zu,\"running_process_count\":%zu}",
+                          "{\"manager_id\":\"%s\",\"id\":\"%s\",\"name\":\"%s\",\"directory\":\"%s\",\"created_at_ms\":0,\"updated_at_ms\":0,\"process_count\":%zu,\"running_process_count\":%zu}",
                           manager_id_value, workspace->id, escaped_name,
-                          process_count, running_count);
+                          escaped_directory, process_count, running_count);
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -848,16 +871,19 @@ static int process_info_json(const char *manager_id_value,
                              size_t buffer_size)
 {
     char escaped_name[256];
+    char escaped_cwd[CUBICLE_PATH_MAX * 2];
     if (cubicle_json_escape(escaped_name, sizeof(escaped_name),
-                            process->friendly_name) < 0) {
+                            process->friendly_name) < 0 ||
+        cubicle_json_escape(escaped_cwd, sizeof(escaped_cwd),
+                            process->cwd) < 0) {
         return -1;
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
+                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
                           manager_id_value, process->workspace_id,
                           process->process_id, escaped_name, process->mode,
-                          api_process_state_name(process->state));
+                          api_process_state_name(process->state), escaped_cwd);
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -1461,9 +1487,31 @@ static int channel_mask_string(uint64_t channels, char *buffer,
     return used == 0 ? -1 : 0;
 }
 
-static int command_workspace_create(const manager_state_t *state, const char *name)
+static int command_workspace_create(const manager_state_t *state, int argc,
+                                    char **argv)
 {
+    const char *name = NULL;
+    const char *directory_arg = NULL;
+    for (int i = 0; i < argc; ++i) {
+        if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc) {
+            directory_arg = argv[++i];
+        } else if (name == NULL) {
+            name = argv[i];
+        } else {
+            fprintf(stderr, "Unknown workspace create option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
     if (validate_field(name, "workspace name") < 0) {
+        return 2;
+    }
+
+    char directory[CUBICLE_PATH_MAX];
+    if (resolve_directory_path(directory_arg, directory) < 0 ||
+        validate_field(directory, "workspace directory") < 0) {
+        fprintf(stderr, "Invalid workspace directory: %s\n",
+                directory_arg == NULL ? "." : directory_arg);
         return 2;
     }
 
@@ -1486,8 +1534,9 @@ static int command_workspace_create(const manager_state_t *state, const char *na
         return 1;
     }
 
-    char line[256];
-    int length = snprintf(line, sizeof(line), "%s\t%s\n", id, name);
+    char line[CUBICLE_PATH_MAX + 256];
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\n", id, name,
+                          directory);
     if (length < 0 || (size_t)length >= sizeof(line) ||
         append_line(state, "workspaces.tsv", line) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
@@ -1496,7 +1545,7 @@ static int command_workspace_create(const manager_state_t *state, const char *na
     }
 
     unlock_state(lock_fd);
-    printf("workspace id=%s name=%s\n", id, name);
+    printf("workspace id=%s name=%s directory=%s\n", id, name, directory);
     return 0;
 }
 
@@ -1511,7 +1560,8 @@ static int command_workspace_list(const manager_state_t *state)
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_workspace_record_t record;
         if (cubicle_parse_workspace_record(line, &record) == 0) {
-            printf("%s\t%s\n", record.id, record.name);
+            printf("%s\t%s\t%s\n", record.id, record.name,
+                   record.directory);
         }
     }
 
@@ -1526,12 +1576,14 @@ static int append_process_record(const manager_state_t *state,
                                  const char *mode,
                                  const char *process_state,
                                  const char *controller_id,
-                                 const char *control_socket)
+                                 const char *control_socket,
+                                 const char *cwd)
 {
     char line[PATH_MAX + 512];
-    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
                           process_id, workspace_id, friendly_name, mode,
-                          process_state, controller_id, control_socket);
+                          process_state, controller_id, control_socket,
+                          cwd == NULL ? "" : cwd);
     if (length < 0 || (size_t)length >= sizeof(line)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -1584,10 +1636,11 @@ static int rewrite_process_records(const manager_state_t *state,
                              new_state);
                 }
             }
-            if (fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+            if (fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
                         record.process_id, record.workspace_id,
                         record.friendly_name, record.mode, record.state,
-                        record.controller_id, record.control_socket) < 0) {
+                        record.controller_id, record.control_socket,
+                        record.cwd) < 0) {
                 fclose(input);
                 fclose(output);
                 return -1;
@@ -1904,7 +1957,7 @@ static int command_process_register(const manager_state_t *state, int argc,
 
     if (append_process_record(state, process_id, workspace_record.id,
                               friendly_name, mode, "running", controller_id,
-                              control_socket) < 0) {
+                              control_socket, workspace_record.directory) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         unlock_state(lock_fd);
         return 1;
@@ -2150,6 +2203,7 @@ static int launch_controller(const manager_state_t *state,
                              const char *control_socket,
                              const char *mode,
                              const char *stdin_policy,
+                             const char *cwd,
                              char **command)
 {
     size_t command_count = 0;
@@ -2157,7 +2211,7 @@ static int launch_controller(const manager_state_t *state,
         ++command_count;
     }
 
-    size_t argv_count = 13 + command_count + 1;
+    size_t argv_count = 15 + command_count + 1;
     char **controller_argv = calloc(argv_count, sizeof(char *));
     if (controller_argv == NULL) {
         return -1;
@@ -2176,6 +2230,8 @@ static int launch_controller(const manager_state_t *state,
     controller_argv[index++] = (char *)control_socket;
     controller_argv[index++] = "--mode";
     controller_argv[index++] = (char *)mode;
+    controller_argv[index++] = "--cwd";
+    controller_argv[index++] = (char *)cwd;
     controller_argv[index++] = "--";
     for (size_t i = 0; i < command_count; ++i) {
         controller_argv[index++] = command[i];
@@ -2223,6 +2279,7 @@ static int command_process_start(const manager_state_t *state, int argc,
     const char *friendly_name = NULL;
     const char *mode = "stream";
     const char *stdin_policy = "open";
+    const char *directory_arg = NULL;
     int command_index = -1;
 
     for (int i = 0; i < argc; ++i) {
@@ -2234,6 +2291,8 @@ static int command_process_start(const manager_state_t *state, int argc,
             mode = argv[++i];
         } else if (strcmp(argv[i], "--stdin-policy") == 0 && i + 1 < argc) {
             stdin_policy = argv[++i];
+        } else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc) {
+            directory_arg = argv[++i];
         } else if (strcmp(argv[i], "--") == 0 && i + 1 < argc) {
             command_index = i + 1;
             break;
@@ -2275,6 +2334,16 @@ static int command_process_start(const manager_state_t *state, int argc,
         fprintf(stderr, "Unknown workspace: %s\n", workspace);
         unlock_state(lock_fd);
         return 1;
+    }
+
+    char cwd[CUBICLE_PATH_MAX];
+    if (resolve_directory_path(directory_arg != NULL ? directory_arg :
+                               workspace_record.directory, cwd) < 0 ||
+        validate_field(cwd, "process directory") < 0) {
+        fprintf(stderr, "Invalid process directory: %s\n",
+                directory_arg == NULL ? workspace_record.directory : directory_arg);
+        unlock_state(lock_fd);
+        return 2;
     }
 
     char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
@@ -2340,7 +2409,7 @@ static int command_process_start(const manager_state_t *state, int argc,
 
     char process_state[32];
     if (launch_controller(state, controller_state, controller_log, control_socket, mode,
-                          stdin_policy, &argv[command_index]) < 0 ||
+                          stdin_policy, cwd, &argv[command_index]) < 0 ||
         wait_for_controller_ready(control_socket, metadata_path, events_path,
                                   process_state,
                                   sizeof(process_state)) < 0) {
@@ -2359,7 +2428,7 @@ static int command_process_start(const manager_state_t *state, int argc,
 
     if (append_process_record(state, process_id, workspace_record.id,
                               friendly_name, mode, process_state, controller_id,
-                              control_socket) < 0) {
+                              control_socket, cwd) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         unlock_state(lock_fd);
         return 1;
@@ -2407,10 +2476,10 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
             continue;
         }
 
-        printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
                record.process_id, record.workspace_id, record.friendly_name,
                record.mode, record.state, record.controller_id,
-               record.control_socket);
+               record.control_socket, record.cwd);
     }
 
     fclose(file);
@@ -2419,10 +2488,10 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
 
 static void print_process_record(const cubicle_process_record_t *record)
 {
-    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
            record->process_id, record->workspace_id, record->friendly_name,
            record->mode, record->state, record->controller_id,
-           record->control_socket);
+           record->control_socket, record->cwd);
 }
 
 static int command_process_resolve(const manager_state_t *state, int argc,
@@ -3438,10 +3507,17 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
     if (strcmp(method, "workspace.create") == 0) {
         char name[128];
+        char requested_directory[CUBICLE_PATH_MAX] = "";
         char initial_owner_label[CUBICLE_KEY_LABEL_MAX] = "owner";
         cubicle_validation_error_t validation_error;
+        int has_directory = 0;
         if (cubicle_json_get_required_string(params, "name", name,
                                              sizeof(name),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "directory",
+                                             requested_directory,
+                                             sizeof(requested_directory),
+                                             &has_directory,
                                              &validation_error) < 0 ||
             cubicle_json_get_optional_string(params, "initial_owner_label",
                                              initial_owner_label,
@@ -3452,6 +3528,15 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              CUBICLE_ERR_INVALID_ARGUMENT,
                                              "invalid workspace name", false,
                                              0));
+        }
+        char directory[CUBICLE_PATH_MAX];
+        if (resolve_directory_path(has_directory ? requested_directory : NULL,
+                                   directory) < 0 ||
+            validate_field(directory, "workspace directory") < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid workspace directory",
+                                             false, 0));
         }
         if (!connection_is_manager_owner(connection)) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -3486,10 +3571,13 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, saved_errno));
         }
         snprintf(workspace.name, sizeof(workspace.name), "%s", name);
+        snprintf(workspace.directory, sizeof(workspace.directory), "%s",
+                 directory);
 
-        char line[256];
-        int line_length = snprintf(line, sizeof(line), "%s\t%s\n",
-                                   workspace.id, workspace.name);
+        char line[CUBICLE_PATH_MAX + 256];
+        int line_length = snprintf(line, sizeof(line), "%s\t%s\t%s\n",
+                                   workspace.id, workspace.name,
+                                   workspace.directory);
         if (line_length < 0 || (size_t)line_length >= sizeof(line) ||
             append_line(state, "workspaces.tsv", line) < 0) {
             int saved_errno = errno;
@@ -3986,10 +4074,12 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         char friendly_name[128];
         char mode[32];
         char stdin_policy[32] = "open";
+        char requested_cwd[CUBICLE_PATH_MAX] = "";
         yyjson_val *argv_array = NULL;
         cubicle_validation_error_t validation_error;
         int has_friendly_name = 0;
         int has_stdin_policy = 0;
+        int has_cwd = 0;
         if (cubicle_json_get_required_string(params, "workspace_id",
                                              workspace_ref,
                                              sizeof(workspace_ref),
@@ -4006,6 +4096,11 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              stdin_policy,
                                              sizeof(stdin_policy),
                                              &has_stdin_policy,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "cwd",
+                                             requested_cwd,
+                                             sizeof(requested_cwd),
+                                             &has_cwd,
                                              &validation_error) < 0 ||
             cubicle_json_get_required_array(params, "argv", &argv_array,
                                             &validation_error) < 0) {
@@ -4083,6 +4178,18 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, 0));
         }
 
+        char cwd[CUBICLE_PATH_MAX];
+        if (resolve_directory_path(has_cwd ? requested_cwd :
+                                   workspace.directory, cwd) < 0 ||
+            validate_field(cwd, "process directory") < 0) {
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid process directory",
+                                             false, 0));
+        }
+
         char process_id[CUBICLE_MANAGER_ID_LENGTH + 1];
         if (cubicle_generate_hex_id(process_id, sizeof(process_id)) < 0) {
             int saved_errno = errno;
@@ -4153,7 +4260,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
         char process_state[32];
         if (launch_controller(state, controller_state, controller_log, control_socket, mode,
-                              stdin_policy, command_argv) < 0 ||
+                              stdin_policy, cwd, command_argv) < 0 ||
             wait_for_controller_ready(control_socket, metadata_path,
                                       events_path,
                                       process_state,
@@ -4174,7 +4281,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                 sizeof(controller_id)) < 0 ||
             append_process_record(state, process_id, workspace.id,
                                   friendly_name, mode, process_state,
-                                  controller_id, control_socket) < 0) {
+                                  controller_id, control_socket, cwd) < 0) {
             int saved_errno = errno;
             unlock_state(lock_fd);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4197,6 +4304,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                  controller_id);
         snprintf(process.control_socket, sizeof(process.control_socket), "%s",
                  control_socket);
+        snprintf(process.cwd, sizeof(process.cwd), "%s", cwd);
 
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
@@ -5598,8 +5706,8 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
     }
 
     if (strcmp(argv[0], "workspace") == 0 &&
-        strcmp(argv[1], "create") == 0 && argc == 3) {
-        return command_workspace_create(state, argv[2]);
+        strcmp(argv[1], "create") == 0 && argc >= 3) {
+        return command_workspace_create(state, argc - 2, &argv[2]);
     }
 
     if (strcmp(argv[0], "workspace") == 0 &&

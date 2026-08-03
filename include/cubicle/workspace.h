@@ -3,6 +3,7 @@
 
 #include "cubicle/client_error.h"
 #include "cubicle/types.h"
+#include "cubicle/util.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ typedef struct cubicle_workspace_info {
     cubicle_manager_id_t manager_id;
     cubicle_workspace_id_t id;
     char name[CUBICLE_NAME_MAX];
+    char directory[CUBICLE_PATH_MAX];
     uint64_t created_at_ms;
     uint64_t updated_at_ms;
     uint64_t process_count;
@@ -22,6 +24,7 @@ typedef struct cubicle_workspace_info {
 
 typedef struct cubicle_workspace_create_options {
     const char *name;
+    const char *directory;
     const unsigned char *initial_owner_public_key;
     size_t initial_owner_public_key_length;
     const char *initial_owner_label;

@@ -3,6 +3,7 @@
 
 #include "cubicle/client_error.h"
 #include "cubicle/types.h"
+#include "cubicle/util.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,7 @@ typedef struct cubicle_process_info {
     uint64_t exited_at_ms;
     int64_t local_pid;
     int64_t local_pgid;
+    char cwd[CUBICLE_PATH_MAX];
 } cubicle_process_info_t;
 
 typedef struct cubicle_process_start_options {

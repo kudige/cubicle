@@ -32,6 +32,12 @@ static void test_workspace_record(void)
                 "expected valid workspace record to parse");
     expect_string(record.id, "workspace-id", "workspace id");
     expect_string(record.name, "Project A", "workspace name");
+    expect_string(record.directory, "", "legacy workspace directory");
+
+    char directory_line[] = "workspace-id\tProject A\t/tmp/project\n";
+    expect_true(cubicle_parse_workspace_record(directory_line, &record) == 0,
+                "expected workspace directory record to parse");
+    expect_string(record.directory, "/tmp/project", "workspace directory");
 
     char malformed[] = "workspace-id-only\n";
     expect_true(cubicle_parse_workspace_record(malformed, &record) < 0,
@@ -52,6 +58,12 @@ static void test_process_record(void)
     expect_string(record.state, "running", "state");
     expect_string(record.controller_id, "controller-id", "controller id");
     expect_string(record.control_socket, "/tmp/control.sock", "control socket");
+    expect_string(record.cwd, "", "legacy process cwd");
+
+    char cwd_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\n";
+    expect_true(cubicle_parse_process_record(cwd_line, &record) == 0,
+                "expected process cwd record to parse");
+    expect_string(record.cwd, "/tmp/project", "process cwd");
 
     char malformed[] = "process-id\tworkspace-id\tmake-1\n";
     expect_true(cubicle_parse_process_record(malformed, &record) < 0,

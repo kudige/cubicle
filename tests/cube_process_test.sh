@@ -228,6 +228,21 @@ if [ "$output" != "Process fg-run removed" ]; then
     exit 1
 fi
 
+workspace_run_dir="$tmpdir/workspace-run-dir"
+override_run_dir="$tmpdir/override-run-dir"
+mkdir -p "$workspace_run_dir" "$override_run_dir"
+api workspace-create --dir "$workspace_run_dir" "Directory Project" >/dev/null
+cube --workspace "Directory Project" run --stream --name dir-default pwd \
+    >"$tmpdir/dir-default.out" 2>"$tmpdir/dir-default.err"
+grep -qx "$workspace_run_dir" "$tmpdir/dir-default.out"
+cube --workspace "Directory Project" remove dir-default >/dev/null
+
+cube --workspace "Directory Project" run --stream --name dir-override \
+    --dir "$override_run_dir" pwd \
+    >"$tmpdir/dir-override.out" 2>"$tmpdir/dir-override.err"
+grep -qx "$override_run_dir" "$tmpdir/dir-override.out"
+cube --workspace "Directory Project" remove dir-override >/dev/null
+
 output=$(cube run --bg --stream --name bg-run sleep 30)
 if [ "$output" != "[bg-run] started in stream mode" ]; then
     echo "unexpected background run output: $output" >&2

@@ -15,7 +15,7 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--cwd dir] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
             program);
 }
 
@@ -122,6 +122,7 @@ int main(int argc, char **argv)
     const char *state_dir = NULL;
     const char *log_dir = NULL;
     const char *control_socket = NULL;
+    const char *cwd = NULL;
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
     int completed_retention_ms = 0;
@@ -166,6 +167,11 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(argv[i], "--cwd") == 0 && i + 1 < argc) {
+            cwd = argv[++i];
+            continue;
+        }
+
         if (strcmp(argv[i], "--stdin-policy") == 0 && i + 1 < argc) {
             if (parse_stdin_policy(argv[++i], &stdin_policy) < 0) {
                 fprintf(stderr, "Unknown stdin policy: %s\n", argv[i]);
@@ -198,14 +204,14 @@ int main(int argc, char **argv)
 
     if (process_mode == CUBICLE_PROCESS_TTY) {
         return run_tty(&argv[command_index], state_dir, log_dir, control_socket,
-                       stdin_policy, completed_retention_ms);
+                       cwd, stdin_policy, completed_retention_ms);
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
         return run_term(&argv[command_index], state_dir, log_dir, control_socket,
-                        stdin_policy, completed_retention_ms);
+                        cwd, stdin_policy, completed_retention_ms);
     }
 
     return run_stream(&argv[command_index], state_dir, log_dir, control_socket,
-                      stdin_policy, completed_retention_ms);
+                      cwd, stdin_policy, completed_retention_ms);
 }

@@ -66,7 +66,7 @@ Pushed input to [shell]
 ## 3. Launch command shape
 
 ```text
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 ```
 
 Examples:
@@ -78,6 +78,7 @@ cube run --bg npm run dev
 cube run --bg --tty emacs test.c
 cube run --bg --term bash
 cube run --bg --name backend npm run server
+cube run --dir /tmp --stream pwd
 ```
 
 ### 3.1 Foreground and background
@@ -167,6 +168,9 @@ $ cube run --bg --name CScope bash
 
 The display should not rewrite this as `bash:CScope`.
 
+`--dir DIRECTORY` sets the managed process working directory. If omitted, the
+process runs in the selected workspace's default directory.
+
 Without `--name`, Cubicle generates a useful name from the command line:
 
 ```text
@@ -204,11 +208,15 @@ Core commands:
 cube workspace
 cube workspace NAME
 cube workspace list
-cube workspace create NAME
+cube workspace create [--dir DIRECTORY] NAME
 cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
 ```
+
+`cube workspace create` stores `DIRECTORY` as the workspace default directory.
+If `--dir` is omitted, the current directory is stored. `cube run` inherits that
+directory unless `cube run --dir DIRECTORY` overrides it.
 
 ### 4.1 Convenience selection
 
@@ -737,7 +745,7 @@ Implement:
 - `cube workspace`
 - `cube workspace NAME`
 - `cube workspace list`
-- `cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND...`
+- `cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND...`
 - `cube ps`
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
