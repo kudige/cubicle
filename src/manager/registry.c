@@ -8,12 +8,15 @@ int cubicle_parse_workspace_record(char *line, cubicle_workspace_record_t *recor
 {
     char *id = strtok(line, "\t\n");
     char *name = strtok(NULL, "\t\n");
+    char *directory = strtok(NULL, "\t\n");
     if (id == NULL || name == NULL) {
         return -1;
     }
 
     snprintf(record->id, sizeof(record->id), "%s", id);
     snprintf(record->name, sizeof(record->name), "%s", name);
+    snprintf(record->directory, sizeof(record->directory), "%s",
+             directory == NULL ? "" : directory);
     return 0;
 }
 
@@ -26,6 +29,7 @@ int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
     char *state = strtok(NULL, "\t\n");
     char *controller_id = strtok(NULL, "\t\n");
     char *control_socket = strtok(NULL, "\t\n");
+    char *cwd = strtok(NULL, "\t\n");
     if (process_id == NULL || workspace_id == NULL || friendly_name == NULL ||
         mode == NULL || state == NULL || controller_id == NULL ||
         control_socket == NULL) {
@@ -39,6 +43,7 @@ int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
     snprintf(record->state, sizeof(record->state), "%s", state);
     snprintf(record->controller_id, sizeof(record->controller_id), "%s", controller_id);
     snprintf(record->control_socket, sizeof(record->control_socket), "%s", control_socket);
+    snprintf(record->cwd, sizeof(record->cwd), "%s", cwd == NULL ? "" : cwd);
     return 0;
 }
 

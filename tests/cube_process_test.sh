@@ -32,7 +32,7 @@ workspace_id=${workspace_id%% name=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" \
     --controller-bin "$CUBICLE_CONTROLLER" \
-    daemon --control-socket "$socket_path" --event-interval-ms 50 &
+    daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -44,6 +44,18 @@ done
 
 if [ ! -S "$socket_path" ]; then
     echo "manager daemon did not create control socket" >&2
+    exit 1
+fi
+
+for _ in $(seq 1 100); do
+    if python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+
+if ! python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+    echo "manager daemon did not become ready" >&2
     exit 1
 fi
 
@@ -216,6 +228,35 @@ if [ "$output" != "Process fg-run removed" ]; then
     exit 1
 fi
 
+tail_replay_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name connect-tail-replay -- sh -c \
+    'printf "head-marker\n"; dd if=/dev/zero bs=1024 count=24 2>/dev/null | tr "\0" x; printf "\ntail-marker\n"; sleep 1' |
+    json_id)
+sleep 0.2
+cube connect --ro connect-tail-replay >"$tmpdir/connect-tail-replay.out" 2>"$tmpdir/connect-tail-replay.err"
+grep -q 'tail-marker' "$tmpdir/connect-tail-replay.out"
+if grep -q 'head-marker' "$tmpdir/connect-tail-replay.out"; then
+    echo "connect should replay only recent output" >&2
+    exit 1
+fi
+api process-wait "$tail_replay_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove connect-tail-replay >/dev/null
+
+workspace_run_dir="$tmpdir/workspace-run-dir"
+override_run_dir="$tmpdir/override-run-dir"
+mkdir -p "$workspace_run_dir" "$override_run_dir"
+api workspace-create --dir "$workspace_run_dir" "Directory Project" >/dev/null
+cube --workspace "Directory Project" run --stream --name dir-default pwd \
+    >"$tmpdir/dir-default.out" 2>"$tmpdir/dir-default.err"
+grep -qx "$workspace_run_dir" "$tmpdir/dir-default.out"
+cube --workspace "Directory Project" remove dir-default >/dev/null
+
+cube --workspace "Directory Project" run --stream --name dir-override \
+    --dir "$override_run_dir" pwd \
+    >"$tmpdir/dir-override.out" 2>"$tmpdir/dir-override.err"
+grep -qx "$override_run_dir" "$tmpdir/dir-override.out"
+cube --workspace "Directory Project" remove dir-override >/dev/null
+
 output=$(cube run --bg --stream --name bg-run sleep 30)
 if [ "$output" != "[bg-run] started in stream mode" ]; then
     echo "unexpected background run output: $output" >&2
@@ -294,6 +335,60 @@ for _ in $(seq 1 100); do
 done
 grep -q '^kill-ps-me	stream	completed$' "$tmpdir/after-kill-ps.out"
 api process-wait "$kill_ps_process_id" --timeout-ms 2000 | grep -q '"success":true'
+
+kill_cleanup_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-cleanup-me sleep 30 | json_id)
+kill_cleanup_output=$(cube kill --cleanup kill-cleanup-me)
+printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me killed$'
+printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me removed$'
+set +e
+api process-get "$kill_cleanup_process_id" >"$tmpdir/kill-cleanup-get.out" 2>&1
+status=$?
+set -e
+if [ "$status" -eq 0 ]; then
+    echo "kill --cleanup should remove killed process" >&2
+    exit 1
+fi
+
+kill_all_one_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-all-one sleep 30 | json_id)
+kill_all_two_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-all-two sleep 30 | json_id)
+kill_all_output=$(cube kill --all --cleanup)
+printf "%s\n" "$kill_all_output" | grep -q '^Killed 2 processes$'
+printf "%s\n" "$kill_all_output" | grep -q '^Removed 2 processes$'
+set +e
+api process-get "$kill_all_one_process_id" >"$tmpdir/kill-all-one-get.out" 2>&1
+first_status=$?
+api process-get "$kill_all_two_process_id" >"$tmpdir/kill-all-two-get.out" 2>&1
+second_status=$?
+set -e
+if [ "$first_status" -eq 0 ] || [ "$second_status" -eq 0 ]; then
+    echo "kill --all --cleanup should remove killed processes" >&2
+    exit 1
+fi
+
+kill_config_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-config-cleanup sleep 30 | json_id)
+config_path="$tmpdir/kill-cleanup.cfg"
+cat >"$config_path" <<EOF
+[client]
+manager=unix://$socket_path
+
+[defaults]
+kill_cleanup=true
+EOF
+kill_config_output=$(XDG_STATE_HOME="$xdg_state_home" CUBICLE_CONFIG="$config_path" "$CUBE" kill kill-config-cleanup)
+printf "%s\n" "$kill_config_output" | grep -q '^Process kill-config-cleanup killed$'
+printf "%s\n" "$kill_config_output" | grep -q '^Process kill-config-cleanup removed$'
+set +e
+api process-get "$kill_config_process_id" >"$tmpdir/kill-config-get.out" 2>&1
+status=$?
+set -e
+if [ "$status" -eq 0 ]; then
+    echo "configured kill cleanup should remove killed process" >&2
+    exit 1
+fi
 
 remove_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name remove-me /bin/true | json_id)
@@ -384,7 +479,7 @@ fi
 grep -q 'invalid signal' "$tmpdir/signal-invalid.err"
 
 cube run --fg --term --name term-run sh -c \
-    'test -t 0 && test -t 1 && ! test -t 2; printf "term-out\n"; printf "term-err\n" >&2; sleep 0.2' \
+    'test -t 0 && test -t 1 && test -t 2; printf "term-out\n"; printf "term-err\n" >&2; sleep 0.2' \
     >"$tmpdir/term-run.out" 2>"$tmpdir/term-run.err"
 grep -q 'term-out' "$tmpdir/term-run.out"
 grep -q 'term-err' "$tmpdir/term-run.err"

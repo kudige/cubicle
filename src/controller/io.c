@@ -24,6 +24,16 @@ int set_nonblocking(int fd)
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+int set_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+    if (flags < 0) {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
 int write_best_effort(int fd, const char *buffer, size_t length)
 {
     size_t written = 0;

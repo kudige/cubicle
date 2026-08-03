@@ -8,7 +8,7 @@ stdout_file="$tmpdir/stdout"
 stderr_file="$tmpdir/stderr"
 
 "$CUBICLE_CONTROLLER" --state-dir "$state_dir" --mode term --stdin-policy eof -- \
-    sh -c 'test -t 0 && test -t 1 && ! test -t 2; printf "term-out\n"; printf "term-err\n" >&2' \
+    sh -c 'test -t 0 && test -t 1 && test -t 2; printf "term-out\n"; printf "term-err\n" >&2' \
     >"$stdout_file" 2>"$stderr_file"
 
 grep -q 'term-out' "$state_dir/stdout.log"

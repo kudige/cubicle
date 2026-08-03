@@ -94,6 +94,7 @@ def main():
                 "--controller-bin",
                 controller,
                 "daemon",
+                "--foreground",
                 "--control-socket",
                 socket_path,
                 "--event-interval-ms",

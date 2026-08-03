@@ -74,6 +74,7 @@ typedef struct control_client {
 
 void close_if_open(int *fd);
 int set_nonblocking(int fd);
+int set_cloexec(int fd);
 int write_best_effort(int fd, const char *buffer, size_t length);
 
 int make_state_file_path(char path[PATH_MAX], const char *dir,
@@ -106,6 +107,7 @@ int read_control_client_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result);
@@ -123,16 +125,19 @@ int forward_attached_stdin(control_client_t *client,
 int run_stream(char **command, const char *state_dir,
                const char *log_dir,
                const char *control_socket,
+               const char *cwd,
                stdin_policy_t stdin_policy,
                int completed_retention_ms);
 int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
+            const char *cwd,
             stdin_policy_t stdin_policy,
             int completed_retention_ms);
 int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
+             const char *cwd,
              stdin_policy_t stdin_policy,
              int completed_retention_ms);
 

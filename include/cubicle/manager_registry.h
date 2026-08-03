@@ -12,6 +12,7 @@ extern "C" {
 typedef struct cubicle_workspace_record {
     char id[CUBICLE_MANAGER_ID_LENGTH + 1];
     char name[128];
+    char directory[CUBICLE_PATH_MAX];
 } cubicle_workspace_record_t;
 
 typedef struct cubicle_process_record {
@@ -22,6 +23,7 @@ typedef struct cubicle_process_record {
     char state[32];
     char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     char control_socket[CUBICLE_PATH_MAX];
+    char cwd[CUBICLE_PATH_MAX];
 } cubicle_process_record_t;
 
 typedef struct cubicle_cursor_record {

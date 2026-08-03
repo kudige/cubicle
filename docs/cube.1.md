@@ -11,18 +11,18 @@ cube [--manager-socket ENDPOINT] [--workspace NAME] [--json] COMMAND [ARG...]
 cube help
 cube workspace [NAME]
 cube workspace list
-cube workspace create NAME
+cube workspace create [--dir DIRECTORY] NAME
 cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 cube ps
 cube inspect NAME
 cube logs [--follow] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
 cube stop NAME
-cube kill NAME
+cube kill [--all] [--cleanup] [NAME]
 cube signal NAME SIGNAL
 cube remove NAME
 cube cleanup
@@ -101,9 +101,11 @@ Most process commands require a selected workspace or an explicit
 `cube workspace list`
 : List workspaces.
 
-`cube workspace create NAME`
+`cube workspace create [--dir DIRECTORY] NAME`
 : Create or select `NAME`. In the current implementation this has the same
-  create-if-missing behavior as `cube workspace NAME`.
+  create-if-missing behavior as `cube workspace NAME`. A newly created
+  workspace stores `DIRECTORY` as its default directory; without `--dir`, the
+  current directory is stored.
 
 `cube workspace select NAME`
 : Select or create `NAME`.
@@ -119,6 +121,7 @@ Examples:
 
 ```sh
 cube workspace ProjectA
+cube workspace create --dir "$PWD" ProjectA
 cube workspace list
 cube --json workspace list
 cube workspace stop OldProject
@@ -132,7 +135,7 @@ area. If no workspace is selected, commands such as `cube ps` exit with
 ## Running Processes
 
 ```text
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 ```
 
 `cube run` starts a managed process in the current workspace.
@@ -153,13 +156,18 @@ cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
 : Use one PTY for terminal-style stdin/stdout/stderr.
 
 `--term`
-: Use a PTY for stdin/stdout and capture stderr separately. This is the
-  packaged default mode.
+: Use terminal-style split capture. In the current implementation,
+  stdin/stderr share the controlling PTY and stdout is captured through a
+  second PTY.
 
 `--name NAME`
 : Set the process friendly name. Without `--name`, `cube` derives a name from
   the executable basename. If a generated name already exists, `cube` tries
   suffixes such as `sleep-1`, `sleep-2`, up to its internal limit.
+
+`--dir DIRECTORY`
+: Set the managed process working directory. Without `--dir`, the process uses
+  the selected workspace's default directory.
 
 Use `--` before a command whose first argument might otherwise be parsed as a
 `cube run` option.
@@ -168,6 +176,7 @@ Examples:
 
 ```sh
 cube run --stream make test
+cube run --dir /tmp --stream pwd
 cube run --fg --term vim docs/plan.txt
 cube run --bg --term --name shell bash
 cube run --bg --stream ls -lR /
@@ -289,6 +298,18 @@ cube connect --ro build
 `cube kill NAME`
 : Request forceful termination through the manager.
 
+`cube kill --cleanup NAME`
+: Request forceful termination, wait briefly for the process to exit, then
+  remove that process record.
+
+`cube kill --all`
+: Request forceful termination for all running processes in the selected
+  workspace.
+
+`cube kill --all --cleanup`
+: Kill all running processes in the selected workspace, then remove the killed
+  process records after they exit.
+
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,
   `TERM`, `KILL`, `USR1`, or `USR2`; names may also include the `SIG` prefix,
@@ -307,6 +328,8 @@ Examples:
 ```sh
 cube stop server
 cube kill stuck-build
+cube kill --cleanup stuck-build
+cube kill --all --cleanup
 cube signal worker TERM
 cube signal worker 15
 cube remove old-build
@@ -399,7 +422,8 @@ server_identity=
 
 [defaults]
 launch=foreground
-mode=term
+mode=tty
+kill_cleanup=false
 ```
 
 Examples:

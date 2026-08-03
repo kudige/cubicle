@@ -22,7 +22,7 @@ The CLI should hide manager/controller implementation details. Users work with:
 4. Defaults are policy-driven, not inferred from executable names.
 5. The initial built-in launch default is foreground.
 6. The initial built-in mode default is TTY when available, otherwise stream during development.
-7. Once term mode is implemented, the production built-in mode default becomes term.
+7. Term mode remains explicit; the production built-in mode default is TTY.
 8. Closing or detaching a terminal does not stop the managed process.
 9. Workspace and process names are the primary user-facing identifiers.
 10. Advanced protocol, controller, endpoint, and grant details remain hidden.
@@ -58,12 +58,15 @@ Connected to [CScope]. Detach with Ctrl-\\ d
 
 $ cube connect --ro bash
 Connected read-only to [bash]. Detach with Ctrl-\\ d
+
+$ printf 'make test\n' | cube push shell
+Pushed input to [shell]
 ```
 
 ## 3. Launch command shape
 
 ```text
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 ```
 
 Examples:
@@ -75,6 +78,7 @@ cube run --bg npm run dev
 cube run --bg --tty emacs test.c
 cube run --bg --term bash
 cube run --bg --name backend npm run server
+cube run --dir /tmp --stream pwd
 ```
 
 ### 3.1 Foreground and background
@@ -164,6 +168,9 @@ $ cube run --bg --name CScope bash
 
 The display should not rewrite this as `bash:CScope`.
 
+`--dir DIRECTORY` sets the managed process working directory. If omitted, the
+process runs in the selected workspace's default directory.
+
 Without `--name`, Cubicle generates a useful name from the command line:
 
 ```text
@@ -201,11 +208,15 @@ Core commands:
 cube workspace
 cube workspace NAME
 cube workspace list
-cube workspace create NAME
+cube workspace create [--dir DIRECTORY] NAME
 cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
 ```
+
+`cube workspace create` stores `DIRECTORY` as the workspace default directory.
+If `--dir` is omitted, the current directory is stored. `cube run` inherits that
+directory unless `cube run --dir DIRECTORY` overrides it.
 
 ### 4.1 Convenience selection
 
@@ -386,7 +397,64 @@ cube connect --in NAME
 
 These should not complicate Phase 2.
 
-### 6.3 Detach sequence
+### 6.3 Non-interactive input push
+
+```console
+cube push [--close] NAME
+```
+
+`cube push` reads all bytes from its own stdin and writes them to the managed
+process stdin without creating an interactive terminal attachment.
+
+Default semantics:
+
+- request an input-capable attachment grant from the manager,
+- connect directly or by relay to the process controller,
+- copy `cube` stdin to the process stdin or PTY input,
+- return after all local stdin has been written,
+- do not read or display process output,
+- do not stop, detach, or otherwise alter process lifecycle.
+
+By default, `cube push NAME` leaves the managed process stdin open after the
+write completes. This allows one-shot input injection into a still-running
+process without causing EOF:
+
+```console
+printf 'status\n' | cube push shell
+```
+
+`--close` writes all input and then closes the managed process stdin:
+
+```console
+printf 'quit\n' | cube push --close worker
+```
+
+Close semantics:
+
+- for stream processes, close the controller-side stdin pipe after all bytes
+  are written;
+- for TTY and term processes, send the bytes to the PTY input and then request
+  the controller's closest supported input-close/EOF action;
+- if the process mode or controller cannot represent input close, fail clearly
+  instead of pretending EOF was delivered.
+
+`cube push` is not a replacement for `cube connect`:
+
+- it does not put the local terminal in raw mode,
+- it does not forward resize events,
+- it does not consume attachment escape sequences,
+- it is suitable for scripts, pasted command batches, and feeding data from
+  files.
+
+Examples:
+
+```console
+cat commands.txt | cube push repl
+printf '\003' | cube push terminal
+cube push --close build < input.txt
+```
+
+### 6.4 Detach sequence
 
 Phase 2 implements exactly one client escape sequence:
 
@@ -413,7 +481,8 @@ Core lifecycle commands:
 ```console
 cube signal NAME SIGNAL
 cube stop NAME
-cube kill NAME
+cube kill [--all] [--cleanup] [NAME]
+cube push [--close] NAME
 cube remove NAME
 cube cleanup
 ```
@@ -423,6 +492,13 @@ Recommended semantics:
 - `signal`: send the named/numbered signal to the managed process group.
 - `stop`: request graceful termination, then optionally force after configured grace.
 - `kill`: immediate forceful termination.
+- `kill --all`: immediate forceful termination for all running processes in
+  the selected workspace.
+- `kill --cleanup`: after a successful kill, wait briefly for the killed
+  process to exit and remove that process record. `defaults.kill_cleanup` may
+  make this behavior the default.
+- `push`: copy local stdin into process stdin, optionally closing stdin after
+  the write with `--close`.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
 - `cleanup`: remove retained terminal process state in the current workspace; skip live processes.
 
@@ -493,6 +569,7 @@ A simple initial representation:
 [defaults]
 launch = "foreground"
 mode = "tty"
+kill_cleanup = false
 ```
 
 Suggested user configuration location:
@@ -649,6 +726,7 @@ Usage:
   cube run [OPTIONS] COMMAND [ARG...]
   cube ps
   cube connect [--ro] NAME
+  cube push [--close] NAME
   cube stop NAME
 
 Run and reconnect to persistent processes inside Cubicle workspaces.
@@ -667,12 +745,12 @@ Implement:
 - `cube workspace`
 - `cube workspace NAME`
 - `cube workspace list`
-- `cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] COMMAND...`
+- `cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND...`
 - `cube ps`
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
 - `cube stop NAME`
-- `cube kill NAME`
+- `cube kill [--all] [--cleanup] [NAME]`
 - `cube remove NAME`
 - `cube cleanup`
 - explicit `--workspace NAME`
@@ -711,9 +789,13 @@ Implement:
 
 - `cube connect NAME`
 - `cube connect --ro NAME`
+- `cube push NAME`
+- `cube push --close NAME`
 - manager attachment-grant request
 - direct/relay controller connection according to grant
 - interactive input forwarding
+- non-interactive stdin push without output attachment
+- optional stdin close after push
 - output forwarding
 - TTY resize propagation
 - exactly one escape command:
@@ -749,7 +831,8 @@ Do not include command-specific matching yet.
 
 ### Phase 4 — Term mode
 
-Goal: provide the intended production default combining terminal interactivity with separately captured stderr.
+Goal: provide an explicit mode combining terminal interactivity with separately
+captured streams. The default mode remains `tty`.
 
 Implement:
 
@@ -760,7 +843,7 @@ Implement:
 - read-only combined display
 - terminal resize behaviour
 - tests for `isatty(stdout)`, non-TTY stderr, ordering expectations, backpressure, and EOF
-- migration of the built-in production mode default from TTY to term
+- explicit term-mode selection without changing the TTY production default
 
 Configured users who explicitly selected TTY or stream remain unchanged.
 
@@ -884,8 +967,8 @@ The following are intentional and should not be changed casually:
 - `cube COMMAND...` is the common launch form,
 - default launch policy is configurable and initially foreground,
 - default mode is configurable and never inferred from executable names,
-- TTY is the Phase 1 default,
-- term becomes the production built-in default after implementation,
+- TTY is the production built-in default,
+- term is an explicit mode for split terminal stream capture,
 - explicit CLI options always override defaults and rules,
 - attachment is separate from process lifetime,
 - Phase 2 starts with only one detach escape sequence,

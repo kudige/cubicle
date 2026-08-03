@@ -94,7 +94,9 @@ server.bind(sys.argv[1])
 server.close()
 PY
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --control-socket "$socket_path" --event-interval-ms 50 &
+"$CUBICLE_MANAGER" --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -246,6 +248,99 @@ process_list_after_cleanup=$(send_manager_rpc process.list "{\"workspace_id\":\"
 printf "%s" "$process_list_after_cleanup" | grep -q '"count": 1'
 printf "%s" "$process_list_after_cleanup" | grep -q '"friendly_name": "daemon-running"'
 
+fd_leak_response=$(send_manager_rpc process.start "{\"workspace_id\":\"$workspace_id\",\"friendly_name\":\"fd-leak-check\",\"mode\":\"stream\",\"stdin_policy\":\"open\",\"argv\":[\"sleep\",\"30\"]}")
+fd_leak_process_id=$(python3 - "$fd_leak_response" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["result"]["id"])
+PY
+)
+for _ in $(seq 1 100); do
+    fd_leak_control_socket=$(awk -F '\t' -v id="$fd_leak_process_id" '$1 == id { print $7 }' "$state_dir/processes.tsv")
+    if [ -n "$fd_leak_control_socket" ] && [ -S "$fd_leak_control_socket" ] &&
+        [ -f "$state_dir/controllers/$fd_leak_process_id/metadata" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ -z "${fd_leak_control_socket:-}" ] || [ ! -S "$fd_leak_control_socket" ]; then
+    echo "fd leak test process did not create a control socket" >&2
+    exit 1
+fi
+fd_leak_child_pid=$(awk -F '=' '$1 == "pid" { print $2 }' "$state_dir/controllers/$fd_leak_process_id/metadata")
+if [ -z "$fd_leak_child_pid" ] || [ ! -d "/proc/$fd_leak_child_pid" ]; then
+    echo "fd leak test child pid is not live: $fd_leak_child_pid" >&2
+    exit 1
+fi
+fd_leak_controller_pid=
+for _ in $(seq 1 100); do
+    fd_leak_controller_pid=$(python3 - "$fd_leak_control_socket" <<'PY'
+import os
+import sys
+
+needle = sys.argv[1].encode()
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        data = open(f"/proc/{name}/cmdline", "rb").read()
+    except OSError:
+        continue
+    if b"cubicle-controller" in data and needle in data:
+        print(name)
+        break
+PY
+)
+    if [ -n "$fd_leak_controller_pid" ] && [ -d "/proc/$fd_leak_controller_pid" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ -z "$fd_leak_controller_pid" ]; then
+    echo "fd leak test controller pid was not found" >&2
+    exit 1
+fi
+manager_socket_inode=$(awk -v path="$socket_path" '$8 == path { print $7; exit }' /proc/net/unix)
+controller_socket_inode=$(awk -v path="$fd_leak_control_socket" '$8 == path { print $7; exit }' /proc/net/unix)
+if [ -z "$manager_socket_inode" ] || [ -z "$controller_socket_inode" ]; then
+    echo "fd leak test could not resolve socket inode" >&2
+    exit 1
+fi
+python3 - "$fd_leak_controller_pid" "$fd_leak_child_pid" "$manager_socket_inode" "$controller_socket_inode" <<'PY'
+import os
+import sys
+
+controller_pid, child_pid, manager_inode, controller_inode = sys.argv[1:]
+
+def socket_inodes(pid):
+    found = []
+    fd_dir = f"/proc/{pid}/fd"
+    for name in os.listdir(fd_dir):
+        try:
+            target = os.readlink(os.path.join(fd_dir, name))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            found.append((name, target[8:-1]))
+    return found
+
+controller_sockets = socket_inodes(controller_pid)
+child_sockets = socket_inodes(child_pid)
+if any(inode == manager_inode for _, inode in controller_sockets):
+    raise SystemExit(f"controller inherited manager listen socket: {controller_sockets}")
+unexpected_controller = [
+    (fd, inode) for fd, inode in controller_sockets
+    if inode != controller_inode
+]
+if unexpected_controller:
+    raise SystemExit(f"controller inherited unexpected socket fds: {unexpected_controller}")
+if child_sockets:
+    raise SystemExit(f"managed child inherited socket fds: {child_sockets}")
+PY
+send_manager_rpc process.kill "{\"process_id\":\"$fd_leak_process_id\"}" >/dev/null
+send_manager_rpc process.wait "{\"process_id\":\"$fd_leak_process_id\",\"timeout_ms\":2000}" | grep -q '"success": true'
+send_manager_rpc process.remove "{\"process_id\":\"$fd_leak_process_id\"}" >/dev/null
+
 # Endpoint test for unsupported endpoint error response
 unknown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error call unknown)
@@ -266,5 +361,42 @@ manager_pid=
 
 if [ -S "$socket_path" ]; then
     echo "manager daemon did not remove control socket" >&2
+    exit 1
+fi
+
+detached_state_dir="$tmpdir/detached-manager"
+detached_socket_path="$tmpdir/detached-manager.sock"
+if ! "$CUBICLE_MANAGER" --state-dir "$detached_state_dir" daemon \
+    --control-socket "$detached_socket_path" --event-interval-ms 50 \
+    >"$tmpdir/detached-manager.out" 2>"$tmpdir/detached-manager.err"; then
+    echo "detached manager daemon startup failed" >&2
+    cat "$tmpdir/detached-manager.err" >&2
+    exit 1
+fi
+grep -q '^\[INFO\] manager: ' "$tmpdir/detached-manager.err"
+
+for _ in $(seq 1 100); do
+    if [ -S "$detached_socket_path" ]; then
+        break
+    fi
+    sleep 0.05
+done
+
+if [ ! -S "$detached_socket_path" ]; then
+    echo "detached manager daemon did not keep running" >&2
+    exit 1
+fi
+
+detached_ping=$(python3 "$CUBICLE_API_CLIENT" "$detached_socket_path" ping)
+printf "%s" "$detached_ping" | grep -q '"success": true'
+python3 "$CUBICLE_API_CLIENT" "$detached_socket_path" shutdown >/dev/null
+for _ in $(seq 1 100); do
+    if [ ! -S "$detached_socket_path" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ -S "$detached_socket_path" ]; then
+    echo "detached manager daemon did not remove control socket" >&2
     exit 1
 fi

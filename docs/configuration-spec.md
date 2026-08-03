@@ -160,14 +160,17 @@ user defaults
 system defaults
         |
         v
-built-in production default: term
+built-in default: tty
 ```
+
+The `term` mode remains available for explicit use when separately captured
+terminal streams are needed, but ordinary interactive sessions should default
+to `tty`.
 
 During development, the built-in mode fallback is:
 
 ```text
-term if implemented
-otherwise tty if implemented
+tty if implemented
 otherwise stream
 ```
 
@@ -250,22 +253,27 @@ For local Unix endpoints, `server_identity` may be empty only when trust is esta
 [defaults]
 launch=foreground
 mode=tty
+kill_cleanup=false
 ```
 
 Keys:
 
 - `launch`: `foreground` or `background`.
 - `mode`: `stream`, `tty`, or `term`.
+- `kill_cleanup`: `true` or `false`; when true, `cube kill NAME` behaves like
+  `cube kill --cleanup NAME` unless overridden by a future explicit no-cleanup
+  option.
 
-The packaged production default should eventually be:
+The packaged default is:
 
 ```ini
 [defaults]
 launch=foreground
-mode=term
+mode=tty
+kill_cleanup=false
 ```
 
-Until term mode exists, package defaults should use `tty`; if TTY is not yet available, use `stream`.
+If TTY is not available in a development build, use `stream`.
 
 ### 5.5 `[retention]`
 
@@ -616,7 +624,7 @@ Reserved future syntax:
 ```ini
 [defaults]
 launch=foreground
-mode=term
+mode=tty
 
 [rule "make"]
 command_regex=^make($| )

@@ -56,7 +56,8 @@ static void test_defaults(void)
     assert(config.manager_socket_mode == 0660);
     assert(strcmp(config.manager_socket_group, "") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
-    assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
+    assert(config.default_mode == CUBICLE_PROCESS_TTY);
+    assert(config.default_kill_cleanup == 0);
 }
 
 static void test_override_file(void)
@@ -78,7 +79,8 @@ static void test_override_file(void)
                "\n"
                "[defaults]\n"
                "launch=background\n"
-               "mode=stream\n");
+               "mode=stream\n"
+               "kill_cleanup=true\n");
 
     assert(setenv("CUBICLE_CONFIG", path, 1) == 0);
     cubicle_config_t config;
@@ -92,6 +94,7 @@ static void test_override_file(void)
     assert(strcmp(config.controller_binary, "/tmp/cubicle-controller") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
+    assert(config.default_kill_cleanup == 1);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 
@@ -131,6 +134,12 @@ static void test_invalid_values(void)
                "socket_mode=9999\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "manager.socket_mode") != NULL);
+
+    write_file(path,
+               "[defaults]\n"
+               "kill_cleanup=maybe\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "defaults.kill_cleanup") != NULL);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 

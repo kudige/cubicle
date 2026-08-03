@@ -20,7 +20,7 @@ Use `--state-dir DIR` to override it.
 ### workspaces.tsv
 
 ```text
-workspace_id<TAB>workspace_name
+workspace_id<TAB>workspace_name<TAB>workspace_directory
 ```
 
 Workspace names are unique.
@@ -28,7 +28,7 @@ Workspace names are unique.
 ### processes.tsv
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 The current process state written by `process register` is `running`.
@@ -68,7 +68,7 @@ cubicle-manager --state-dir DIR workspace list
 Prints:
 
 ```text
-workspace_id<TAB>workspace_name
+workspace_id<TAB>workspace_name<TAB>workspace_directory
 ```
 
 ### process register
@@ -100,7 +100,7 @@ cubicle-manager --state-dir DIR process list --workspace "Project A"
 Prints:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 ### process resolve
@@ -116,7 +116,7 @@ name resolution requires `--workspace`.
 Prints the direct controller details:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
 ```
 
 ### process start
@@ -198,11 +198,16 @@ scripts. New records are flushed after each poll iteration.
 
 ```console
 cubicle-manager --state-dir DIR daemon
+cubicle-manager --state-dir DIR daemon --foreground
 cubicle-manager --state-dir DIR daemon --control-socket /path/to/manager.sock --event-interval-ms 250
 ```
 
-Runs the initial persistent manager daemon in the foreground. The lifecycle
-socket currently supports `ping`, `status`, and `shutdown` as a narrow bootstrap
-surface for the transport-neutral API implementation. While running, the daemon
-also owns workspace event aggregation and updates `workspace-events.log` and
-`cursors.tsv` periodically.
+Runs the persistent manager daemon. By default the command prints the manager
+startup identity, opens the configured listener, then detaches from the current
+terminal. Use `--foreground` to keep the manager attached to the invoking
+process, which is useful under tests and process supervisors.
+
+The lifecycle socket currently supports `ping`, `status`, and `shutdown` as a
+narrow bootstrap surface for the transport-neutral API implementation. While
+running, the daemon also owns workspace event aggregation and updates
+`workspace-events.log` and `cursors.tsv` periodically.

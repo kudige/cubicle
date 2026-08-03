@@ -67,20 +67,40 @@ static void restore_terminal_mode(terminal_mode_t *mode)
     }
 }
 
-static int apply_terminal_window_size(int pty_fd,
-                                      terminal_size_state_t *terminal_size)
+static int get_terminal_window_size(struct winsize *size)
 {
     if (!isatty(STDOUT_FILENO)) {
         return 0;
     }
 
-    struct winsize size;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0) {
+    memset(size, 0, sizeof(*size));
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, size) < 0) {
         return -1;
     }
 
-    if (size.ws_row == 0 || size.ws_col == 0) {
+    if (size->ws_row == 0 || size->ws_col == 0) {
         return 0;
+    }
+
+    return 1;
+}
+
+static int apply_window_size_to_fd(int fd, const struct winsize *size)
+{
+    if (fd < 0) {
+        return 0;
+    }
+    return ioctl(fd, TIOCSWINSZ, size);
+}
+
+static int apply_terminal_window_size(int pty_fd,
+                                      int stderr_pty_fd,
+                                      terminal_size_state_t *terminal_size)
+{
+    struct winsize size;
+    int result = get_terminal_window_size(&size);
+    if (result <= 0) {
+        return result;
     }
 
     if (terminal_size != NULL && terminal_size->known &&
@@ -89,7 +109,8 @@ static int apply_terminal_window_size(int pty_fd,
         return 0;
     }
 
-    if (ioctl(pty_fd, TIOCSWINSZ, &size) < 0) {
+    if (apply_window_size_to_fd(pty_fd, &size) < 0 ||
+        apply_window_size_to_fd(stderr_pty_fd, &size) < 0) {
         return -1;
     }
 
@@ -110,6 +131,7 @@ static void notify_terminal_window_size_changed(pid_t child_pid)
 }
 
 static int sync_local_terminal_window_size(int resize_fd,
+                                           int stderr_resize_fd,
                                            terminal_size_state_t *terminal_size,
                                            pid_t child_pid)
 {
@@ -117,7 +139,8 @@ static int sync_local_terminal_window_size(int resize_fd,
         return 0;
     }
 
-    int result = apply_terminal_window_size(resize_fd, terminal_size);
+    int result = apply_terminal_window_size(resize_fd, stderr_resize_fd,
+                                            terminal_size);
     if (result < 0) {
         return -1;
     }
@@ -220,6 +243,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                              int child_stdin_fd,
                              int local_input_fd,
                              int resize_fd,
+                             int stderr_resize_fd,
                              terminal_size_state_t *terminal_size,
                              int *child_reaped,
                              int *child_result)
@@ -247,8 +271,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
 
         if (resize_fd >= 0 && terminal_resize_pending) {
             terminal_resize_pending = 0;
-            if (sync_local_terminal_window_size(resize_fd, terminal_size,
-                                                child_pid) < 0) {
+            if (sync_local_terminal_window_size(resize_fd, stderr_resize_fd,
+                                                terminal_size, child_pid) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
                 return -1;
             }
@@ -357,6 +381,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                                 strerror(errno));
                     return -1;
                 } else if (sync_local_terminal_window_size(resize_fd,
+                                                           stderr_resize_fd,
                                                            terminal_size,
                                                            child_pid) < 0) {
                     cubicle_log(CUBICLE_LOG_ERROR, "controller",
@@ -392,6 +417,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
                                             child_stdin_fd, resize_fd,
+                                            stderr_resize_fd,
                                             terminal_size, 0,
                                             *child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
@@ -612,7 +638,8 @@ static int completed_retention_loop(controller_state_t *state,
             if (clients[i].kind == CONTROL_CLIENT_READING &&
                 (revents & POLLIN) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid, -1,
-                                            -1, NULL, 1, child_result) < 0) {
+                                            -1, -1, NULL, 1,
+                                            child_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed reading completed control request");
                 close_all_control_clients(clients, state);
@@ -658,9 +685,17 @@ static int wait_for_child(pid_t child_pid, controller_state_t *state,
     return *child_result;
 }
 
+static void child_chdir_or_exit(const char *cwd)
+{
+    if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) < 0) {
+        _exit(127);
+    }
+}
+
 int run_stream(char **command, const char *state_dir,
                const char *log_dir,
                const char *control_socket,
+               const char *cwd,
                stdin_policy_t stdin_policy,
                int completed_retention_ms)
 {
@@ -703,6 +738,7 @@ int run_stream(char **command, const char *state_dir,
         close_if_open(&stdout_pipe[1]);
         close_if_open(&stderr_pipe[1]);
 
+        child_chdir_or_exit(cwd);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -781,7 +817,7 @@ int run_stream(char **command, const char *state_dir,
     };
 
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
-                                          stdin_pipe[1], -1, -1,
+                                          stdin_pipe[1], -1, -1, -1,
                                           NULL,
                                           &child_reaped, &child_result);
     close_if_open(&pipes[0].fd);
@@ -836,13 +872,15 @@ static int open_pty_pair(int *master_fd, int *slave_fd)
 static int run_pty_mode(char **command, const char *state_dir,
                         const char *log_dir,
                         const char *control_socket,
+                        const char *cwd,
                         stdin_policy_t stdin_policy,
                         int completed_retention_ms,
                         cubicle_process_mode_t process_mode)
 {
     int master_fd = -1;
     int slave_fd = -1;
-    int stderr_pipe[2] = {-1, -1};
+    int stdout_master_fd = -1;
+    int stdout_slave_fd = -1;
     int capture_stderr =
         process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
 
@@ -850,7 +888,8 @@ static int run_pty_mode(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         return 1;
     }
-    if (capture_stderr && create_pipe(stderr_pipe, "stderr") < 0) {
+    if (capture_stderr &&
+        open_pty_pair(&stdout_master_fd, &stdout_slave_fd) < 0) {
         close_if_open(&master_fd);
         close_if_open(&slave_fd);
         return 1;
@@ -861,50 +900,52 @@ static int run_pty_mode(char **command, const char *state_dir,
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         close_if_open(&master_fd);
         close_if_open(&slave_fd);
-        close_if_open(&stderr_pipe[0]);
-        close_if_open(&stderr_pipe[1]);
+        close_if_open(&stdout_master_fd);
+        close_if_open(&stdout_slave_fd);
         return 1;
     }
 
     if (child_pid == 0) {
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         if (setsid() < 0) {
             _exit(127);
         }
         ioctl(slave_fd, TIOCSCTTY, 0);
 
         if (dup2(slave_fd, STDIN_FILENO) < 0 ||
-            dup2(slave_fd, STDOUT_FILENO) < 0 ||
-            dup2(capture_stderr ? stderr_pipe[1] : slave_fd,
-                 STDERR_FILENO) < 0) {
+            dup2(capture_stderr ? stdout_slave_fd : slave_fd,
+                 STDOUT_FILENO) < 0 ||
+            dup2(slave_fd, STDERR_FILENO) < 0) {
             _exit(127);
         }
 
         close_if_open(&slave_fd);
-        close_if_open(&stderr_pipe[1]);
+        close_if_open(&stdout_slave_fd);
+        child_chdir_or_exit(cwd);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
 
     close_if_open(&slave_fd);
-    close_if_open(&stderr_pipe[1]);
+    close_if_open(&stdout_slave_fd);
 
     if (set_nonblocking(master_fd) < 0 ||
-        (capture_stderr && set_nonblocking(stderr_pipe[0]) < 0)) {
+        (capture_stderr && set_nonblocking(stdout_master_fd) < 0)) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         return 1;
     }
 
     terminal_size_state_t terminal_size = {.rows = 0, .columns = 0, .known = 0};
-    if (apply_terminal_window_size(master_fd, &terminal_size) < 0) {
+    if (apply_terminal_window_size(master_fd, stdout_master_fd,
+                                   &terminal_size) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
         kill(-child_pid, SIGTERM);
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         return 1;
     }
 
@@ -926,7 +967,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
@@ -943,20 +984,20 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         wait_for_child(child_pid, &state, &child_reaped, &child_result);
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
     cubicle_log(CUBICLE_LOG_INFO, "controller", "control socket initialized");
 
     stream_pipe_t pipes[2] = {
-        {.fd = master_fd,
+        {.fd = capture_stderr ? stdout_master_fd : master_fd,
          .output_fd = STDOUT_FILENO,
          .log_fd = state.stdout_fd,
          .name = "stdout",
          .offset = &state.stdout_offset,
          .open = 1},
-        {.fd = capture_stderr ? stderr_pipe[0] : -1,
+        {.fd = capture_stderr ? master_fd : -1,
          .output_fd = STDERR_FILENO,
          .log_fd = state.stderr_fd,
          .name = "stderr",
@@ -974,7 +1015,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         kill(-child_pid, SIGTERM);
         close_if_open(&control_fd);
         close_if_open(&master_fd);
-        close_if_open(&stderr_pipe[0]);
+        close_if_open(&stdout_master_fd);
         close_controller_state(&state);
         return 1;
     }
@@ -993,6 +1034,7 @@ static int run_pty_mode(char **command, const char *state_dir,
     int input_fd = stdin_policy == STDIN_POLICY_OPEN ? master_fd : -1;
     int output_result = stream_event_loop(pipes, &state, control_fd, child_pid,
                                           input_fd, local_input_fd, master_fd,
+                                          stdout_master_fd,
                                           &terminal_size,
                                           &child_reaped, &child_result);
 
@@ -1025,20 +1067,23 @@ static int run_pty_mode(char **command, const char *state_dir,
 int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
+            const char *cwd,
             stdin_policy_t stdin_policy,
             int completed_retention_ms)
 {
-    return run_pty_mode(command, state_dir, log_dir, control_socket, stdin_policy,
-                        completed_retention_ms, CUBICLE_PROCESS_TTY);
+    return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
+                        stdin_policy, completed_retention_ms,
+                        CUBICLE_PROCESS_TTY);
 }
 
 int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
+             const char *cwd,
              stdin_policy_t stdin_policy,
              int completed_retention_ms)
 {
-    return run_pty_mode(command, state_dir, log_dir, control_socket, stdin_policy,
-                        completed_retention_ms,
+    return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
+                        stdin_policy, completed_retention_ms,
                         CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
 }

@@ -102,7 +102,10 @@ def params_for_command(args):
     if command == "shutdown":
         return "manager.shutdown", {}
     if command == "workspace-create":
-        return "workspace.create", {"name": args.name}
+        params = {"name": args.name}
+        if args.directory is not None:
+            params["directory"] = args.directory
+        return "workspace.create", params
     if command == "workspace-get":
         return "workspace.get", {"workspace": args.workspace}
     if command == "workspace-list":
@@ -143,6 +146,8 @@ def params_for_command(args):
         }
         if args.friendly_name is not None:
             params["friendly_name"] = args.friendly_name
+        if args.cwd is not None:
+            params["cwd"] = args.cwd
         if args.tty_rows is not None:
             params["tty_rows"] = args.tty_rows
         if args.tty_cols is not None:
@@ -285,6 +290,7 @@ def build_parser():
     subparsers.add_parser("shutdown")
 
     workspace_create = subparsers.add_parser("workspace-create")
+    workspace_create.add_argument("--dir", dest="directory")
     workspace_create.add_argument("name")
 
     workspace_get = subparsers.add_parser("workspace-get")
@@ -323,6 +329,7 @@ def build_parser():
                                default="stream")
     process_start.add_argument("--stdin-policy", choices=("open", "eof"),
                                default="open")
+    process_start.add_argument("--cwd")
     process_start.add_argument("--tty-rows", type=int)
     process_start.add_argument("--tty-cols", type=int)
     process_start.add_argument("argv", nargs="+")

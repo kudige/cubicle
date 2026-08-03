@@ -107,13 +107,18 @@ int open_control_socket(const char *path)
         return -1;
     }
 
+    if (set_cloexec(fd) < 0 ||
+        set_nonblocking(fd) < 0) {
+        close(fd);
+        return -1;
+    }
+
     struct sockaddr_un address;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
     snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
 
-    if (set_nonblocking(fd) < 0 ||
-        bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
         chmod(path, 0600) < 0 ||
         listen(fd, 16) < 0) {
         close(fd);
@@ -602,6 +607,7 @@ static int dispatch_api_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result)
@@ -728,7 +734,9 @@ static int dispatch_api_request(control_client_t *client,
         memset(&size, 0, sizeof(size));
         size.ws_row = (unsigned short)rows;
         size.ws_col = (unsigned short)columns;
-        if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
+        if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0 ||
+            (stderr_resize_fd >= 0 &&
+             ioctl(stderr_resize_fd, TIOCSWINSZ, &size) < 0)) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_IO, "resize failed", true,
                 errno));
@@ -956,6 +964,7 @@ static int dispatch_control_request(control_client_t *client,
                                     pid_t child_pid,
                                     int child_stdin_fd,
                                     int resize_fd,
+                                    int stderr_resize_fd,
                                     terminal_size_state_t *terminal_size,
                                     int process_completed,
                                     int child_result)
@@ -1032,7 +1041,9 @@ static int dispatch_control_request(control_client_t *client,
             memset(&size, 0, sizeof(size));
             size.ws_row = (unsigned short)rows;
             size.ws_col = (unsigned short)columns;
-            if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0) {
+            if (ioctl(resize_fd, TIOCSWINSZ, &size) < 0 ||
+                (stderr_resize_fd >= 0 &&
+                 ioctl(stderr_resize_fd, TIOCSWINSZ, &size) < 0)) {
                 result = enqueue_error_response(client, "resize_failed");
             } else {
                 if (terminal_size != NULL) {
@@ -1125,6 +1136,7 @@ static int finish_control_request(control_client_t *client,
                                   pid_t child_pid,
                                   int child_stdin_fd,
                                   int resize_fd,
+                                  int stderr_resize_fd,
                                   terminal_size_state_t *terminal_size,
                                   int process_completed,
                                   int child_result)
@@ -1137,6 +1149,7 @@ static int finish_control_request(control_client_t *client,
     client->request[client->request_length] = '\0';
     dispatch_control_request(client, state, child_pid, child_stdin_fd,
                              resize_fd,
+                             stderr_resize_fd,
                              terminal_size,
                              process_completed, child_result);
     return 0;
@@ -1147,6 +1160,7 @@ static int finish_api_request(control_client_t *client,
                               pid_t child_pid,
                               int child_stdin_fd,
                               int resize_fd,
+                              int stderr_resize_fd,
                               terminal_size_state_t *terminal_size,
                               int process_completed,
                               int child_result)
@@ -1156,8 +1170,8 @@ static int finish_api_request(control_client_t *client,
     client->request[client->framed_length] = '\0';
     client->request_length = client->framed_length;
     return dispatch_api_request(client, state, child_pid, child_stdin_fd,
-                                resize_fd, terminal_size, process_completed,
-                                child_result);
+                                resize_fd, stderr_resize_fd, terminal_size,
+                                process_completed, child_result);
 }
 
 int flush_control_client_response(control_client_t *client,
@@ -1213,6 +1227,10 @@ int accept_control_clients(int listen_fd,
 
             return -1;
         }
+        if (set_cloexec(client_fd) < 0) {
+            close(client_fd);
+            return -1;
+        }
 
         size_t slot = CUBICLE_MAX_CONTROL_CLIENTS;
         for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
@@ -1251,6 +1269,7 @@ int read_control_client_request(control_client_t *client,
                                 pid_t child_pid,
                                 int child_stdin_fd,
                                 int resize_fd,
+                                int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
                                 int process_completed,
                                 int child_result)
@@ -1285,6 +1304,7 @@ int read_control_client_request(control_client_t *client,
             client->request[client->request_length] = '\0';
             return finish_control_request(client, state, child_pid,
                                           child_stdin_fd, resize_fd,
+                                          stderr_resize_fd,
                                           terminal_size,
                                           process_completed,
                                           child_result);
@@ -1330,6 +1350,7 @@ int read_control_client_request(control_client_t *client,
                         sizeof(uint32_t) + client->framed_length) {
                     return finish_api_request(client, state, child_pid,
                                               child_stdin_fd, resize_fd,
+                                              stderr_resize_fd,
                                               terminal_size,
                                               process_completed,
                                               child_result);
@@ -1340,6 +1361,7 @@ int read_control_client_request(control_client_t *client,
             if (buffer[i] == '\n') {
                 return finish_control_request(client, state, child_pid,
                                               child_stdin_fd, resize_fd,
+                                              stderr_resize_fd,
                                               terminal_size,
                                               process_completed,
                                               child_result);

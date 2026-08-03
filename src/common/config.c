@@ -107,6 +107,29 @@ static int parse_mode(const char *value,
     return -1;
 }
 
+static int parse_bool(const char *value,
+                      int *parsed,
+                      const char *name,
+                      char *error,
+                      size_t error_size)
+{
+    if (strcmp(value, "true") == 0 || strcmp(value, "yes") == 0 ||
+        strcmp(value, "1") == 0 || strcmp(value, "on") == 0) {
+        *parsed = 1;
+        return 0;
+    }
+    if (strcmp(value, "false") == 0 || strcmp(value, "no") == 0 ||
+        strcmp(value, "0") == 0 || strcmp(value, "off") == 0) {
+        *parsed = 0;
+        return 0;
+    }
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size,
+                 "%s must be true or false", name);
+    }
+    return -1;
+}
+
 static int parse_socket_mode(const char *value,
                              unsigned int *mode,
                              char *error,
@@ -239,7 +262,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
                  config->manager_listen_uri);
     }
     config->default_launch = CUBICLE_LAUNCH_FOREGROUND;
-    config->default_mode = CUBICLE_PROCESS_TTY_CAPTURED_STDERR;
+    config->default_mode = CUBICLE_PROCESS_TTY;
+    config->default_kill_cleanup = 0;
     snprintf(config->source, sizeof(config->source), "built-in defaults");
 }
 
@@ -339,6 +363,15 @@ static int apply_econf_file(cubicle_config_t *config,
                             error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_mode(value, &config->default_mode, error, error_size) < 0)) {
+        return -1;
+    }
+
+    value[0] = '\0';
+    if (get_optional_string(file, "defaults", "kill_cleanup", value,
+                            sizeof(value), error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_bool(value, &config->default_kill_cleanup,
+                    "defaults.kill_cleanup", error, error_size) < 0)) {
         return -1;
     }
 

@@ -27,6 +27,7 @@ typedef struct cubicle_config {
     char client_server_identity[256];
     cubicle_launch_default_t default_launch;
     cubicle_process_mode_t default_mode;
+    int default_kill_cleanup;
     char source[CUBICLE_PATH_MAX];
 } cubicle_config_t;
 
