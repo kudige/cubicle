@@ -1,5 +1,16 @@
 set -eu
 
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$tmpdir/xdg-runtime"
+
+cube() {
+    XDG_STATE_HOME="$tmpdir/xdg-state" \
+        XDG_CONFIG_HOME="$tmpdir/xdg-config" \
+        XDG_RUNTIME_DIR="$tmpdir/xdg-runtime" \
+        "$CUBE" "$@"
+}
+
 rm -f "$PWD/controller-help.out" "$PWD/controller-help.err"
 rm -f "$PWD/manager-help.out" "$PWD/manager-help.err"
 rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
@@ -27,7 +38,7 @@ grep -q 'Usage: .*cubicle-manager' "$PWD/manager-help.err"
 grep -q 'events follow \[--iterations N\]' "$PWD/manager-help.err"
 grep -q 'daemon \[--foreground\] \[--control-socket PATH\] \[--listen URI\] \[--allow-insecure\] \[--event-interval-ms N\]' "$PWD/manager-help.err"
 
-"$CUBE" --help >"$PWD/cube-help.out" 2>"$PWD/cube-help.err"
+cube --help >"$PWD/cube-help.out" 2>"$PWD/cube-help.err"
 if [ -s "$PWD/cube-help.err" ]; then
     echo "cube help should write to stdout only" >&2
     exit 1
@@ -46,7 +57,7 @@ grep -q 'cube cleanup' "$PWD/cube-help.out"
 grep -q 'cube access list|add|set-role|remove|revoke' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
 
-"$CUBE" kill --help >"$PWD/cube-kill-help.out" 2>"$PWD/cube-kill-help.err"
+cube kill --help >"$PWD/cube-kill-help.out" 2>"$PWD/cube-kill-help.err"
 if [ -s "$PWD/cube-kill-help.err" ]; then
     echo "cube kill help should write to stdout only" >&2
     exit 1
@@ -54,7 +65,7 @@ fi
 grep -q 'cube kill \[--cleanup\] NAME' "$PWD/cube-kill-help.out"
 grep -q 'cube kill --all \[--cleanup\]' "$PWD/cube-kill-help.out"
 
-"$CUBE" connect --help >"$PWD/cube-connect-help.out" 2>"$PWD/cube-connect-help.err"
+cube connect --help >"$PWD/cube-connect-help.out" 2>"$PWD/cube-connect-help.err"
 if [ -s "$PWD/cube-connect-help.err" ]; then
     echo "cube connect help should write to stdout only" >&2
     exit 1
@@ -62,7 +73,7 @@ fi
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-connect-help.out"
 
 set +e
-"$CUBE" --manager-socket "$PWD/missing-manager.sock" ps \
+cube --manager-socket "$PWD/missing-manager.sock" --workspace "Project A" ps \
     >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
 status=$?
 set -e
@@ -77,7 +88,7 @@ fi
 grep -q 'failed to connect to manager' "$PWD/cube-missing-manager.err"
 
 set +e
-"$CUBE" --manager-socket /tmp/cubicle-test.sock defaults >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
+cube --manager-socket /tmp/cubicle-test.sock defaults >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
 status=$?
 set -e
 if [ "$status" -ne 2 ]; then
@@ -87,7 +98,7 @@ fi
 grep -q "command 'defaults' is not implemented yet" "$PWD/cube-unimplemented.err"
 
 set +e
-"$CUBE" wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"
+cube wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"
 status=$?
 set -e
 if [ "$status" -ne 2 ]; then
