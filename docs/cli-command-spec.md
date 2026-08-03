@@ -483,6 +483,8 @@ cube signal NAME SIGNAL
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
 cube push [--close] NAME
+cube save NAME
+cube unsave NAME
 cube remove NAME
 cube cleanup
 ```
@@ -495,12 +497,15 @@ Recommended semantics:
 - `kill --all`: immediate forceful termination for all running processes in
   the selected workspace.
 - `kill --cleanup`: after a successful kill, wait briefly for the killed
-  process to exit and remove that process record. `defaults.kill_cleanup` may
-  make this behavior the default.
+  process to exit and remove that process record unless it is saved.
+  `defaults.kill_cleanup` may make this behavior the default.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--close`.
+- `save`: mark a process record so cleanup commands skip it.
+- `unsave`: clear the saved mark.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
-- `cleanup`: remove retained terminal process state in the current workspace; skip live processes.
+- `cleanup`: remove retained terminal process state in the current workspace;
+  skip live and saved processes.
 
 Output/history commands:
 
@@ -755,6 +760,8 @@ Implement:
 - `cube signal NAME SIGNAL`
 - `cube stop NAME`
 - `cube kill [--all] [--cleanup] [NAME]`
+- `cube save NAME`
+- `cube unsave NAME`
 - `cube remove NAME`
 - `cube cleanup`
 - explicit `--workspace NAME`

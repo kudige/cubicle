@@ -47,6 +47,7 @@ typedef struct cubicle_process_info {
     char friendly_name[CUBICLE_NAME_MAX];
     cubicle_process_mode_t mode;
     cubicle_process_state_t state;
+    bool saved;
     int exit_code;
     int termination_signal;
     bool has_exit_status;
@@ -104,6 +105,8 @@ cubicle_error_code_t cubicle_process_list(cubicle_client_t *client, const cubicl
 cubicle_error_code_t cubicle_process_signal(cubicle_client_t *client, const char *process_id, int signal_number);
 cubicle_error_code_t cubicle_process_terminate(cubicle_client_t *client, const char *process_id, const cubicle_process_terminate_options_t *options);
 cubicle_error_code_t cubicle_process_kill(cubicle_client_t *client, const char *process_id);
+cubicle_error_code_t cubicle_process_save(cubicle_client_t *client, const char *process_id, cubicle_process_info_t *process_out);
+cubicle_error_code_t cubicle_process_unsave(cubicle_client_t *client, const char *process_id, cubicle_process_info_t *process_out);
 cubicle_error_code_t cubicle_process_wait(cubicle_client_t *client, const char *process_id, int timeout_ms, cubicle_process_info_t *process_out);
 cubicle_error_code_t cubicle_process_remove(cubicle_client_t *client, const char *process_id);
 cubicle_error_code_t cubicle_process_read_output(cubicle_client_t *client, const char *process_id, cubicle_stream_kind_t stream, uint64_t offset, size_t maximum_length, cubicle_output_chunk_t *chunk_out);

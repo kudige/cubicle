@@ -359,15 +359,29 @@ api process-wait "$kill_ps_process_id" --timeout-ms 2000 | grep -q '"success":tr
 
 kill_cleanup_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-cleanup-me sleep 30 | json_id)
+save_output=$(cube save kill-cleanup-me)
+if [ "$save_output" != "Process kill-cleanup-me saved" ]; then
+    echo "unexpected save output: $save_output" >&2
+    exit 1
+fi
+cube inspect kill-cleanup-me >"$tmpdir/saved-inspect.out"
+grep -q '^Saved:       yes$' "$tmpdir/saved-inspect.out"
 kill_cleanup_output=$(cube kill --cleanup kill-cleanup-me)
 printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me killed$'
-printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me removed$'
+printf "%s\n" "$kill_cleanup_output" | grep -q '^Process kill-cleanup-me saved; cleanup skipped$'
+api process-get "$kill_cleanup_process_id" >/dev/null
+unsave_output=$(cube unsave kill-cleanup-me)
+if [ "$unsave_output" != "Process kill-cleanup-me unsaved" ]; then
+    echo "unexpected unsave output: $unsave_output" >&2
+    exit 1
+fi
+cube remove kill-cleanup-me >/dev/null
 set +e
 api process-get "$kill_cleanup_process_id" >"$tmpdir/kill-cleanup-get.out" 2>&1
 status=$?
 set -e
 if [ "$status" -eq 0 ]; then
-    echo "kill --cleanup should remove killed process" >&2
+    echo "unsaved killed process should be removable" >&2
     exit 1
 fi
 
@@ -375,19 +389,23 @@ kill_all_one_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-all-one sleep 30 | json_id)
 kill_all_two_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-all-two sleep 30 | json_id)
+cube save kill-all-two >/dev/null
 kill_all_output=$(cube kill --all --cleanup)
 printf "%s\n" "$kill_all_output" | grep -q '^Killed 2 processes$'
-printf "%s\n" "$kill_all_output" | grep -q '^Removed 2 processes$'
+printf "%s\n" "$kill_all_output" | grep -q '^Removed 1 processes$'
+printf "%s\n" "$kill_all_output" | grep -q '^Skipped 1 saved processes$'
 set +e
 api process-get "$kill_all_one_process_id" >"$tmpdir/kill-all-one-get.out" 2>&1
 first_status=$?
 api process-get "$kill_all_two_process_id" >"$tmpdir/kill-all-two-get.out" 2>&1
 second_status=$?
 set -e
-if [ "$first_status" -eq 0 ] || [ "$second_status" -eq 0 ]; then
-    echo "kill --all --cleanup should remove killed processes" >&2
+if [ "$first_status" -eq 0 ] || [ "$second_status" -ne 0 ]; then
+    echo "kill --all --cleanup should remove unsaved processes and keep saved processes" >&2
     exit 1
 fi
+cube unsave kill-all-two >/dev/null
+cube remove kill-all-two >/dev/null
 
 kill_config_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-config-cleanup sleep 30 | json_id)
@@ -432,11 +450,16 @@ cleanup_workspace_id=$(api workspace-create "Cleanup Workspace" | json_id)
 cleanup_done_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
     --friendly-name cleanup-done /bin/true | json_id)
 api process-wait "$cleanup_done_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cleanup_saved_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-saved /bin/true | json_id)
+api process-wait "$cleanup_saved_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube --workspace "Cleanup Workspace" save cleanup-saved >/dev/null
 cleanup_live_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
     --friendly-name cleanup-live sleep 30 | json_id)
 cleanup_output=$(cube --workspace "Cleanup Workspace" cleanup)
 printf "%s\n" "$cleanup_output" | grep -q '^Removed 1 processes$'
 printf "%s\n" "$cleanup_output" | grep -q '^Skipped 1 live processes$'
+printf "%s\n" "$cleanup_output" | grep -q '^Skipped 1 saved processes$'
 set +e
 cube --workspace "Cleanup Workspace" inspect cleanup-done \
     >"$tmpdir/cleanup-done.out" 2>"$tmpdir/cleanup-done.err"
@@ -450,11 +473,16 @@ grep -q 'process not found' "$tmpdir/cleanup-done.err"
 cube --workspace "Cleanup Workspace" inspect cleanup-live \
     >"$tmpdir/cleanup-live.out"
 grep -q '^State:       running$' "$tmpdir/cleanup-live.out"
+cube --workspace "Cleanup Workspace" inspect cleanup-saved \
+    >"$tmpdir/cleanup-saved.out"
+grep -q '^Saved:       yes$' "$tmpdir/cleanup-saved.out"
 json_cleanup_output=$(cube --workspace "Cleanup Workspace" --json cleanup)
 printf "%s" "$json_cleanup_output" | grep -q '"removed_count":0'
 printf "%s" "$json_cleanup_output" | grep -q '"skipped_live_count":1'
+printf "%s" "$json_cleanup_output" | grep -q '"skipped_saved_count":1'
 api process-kill "$cleanup_live_process_id" >/dev/null
 api process-wait "$cleanup_live_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube --workspace "Cleanup Workspace" unsave cleanup-saved >/dev/null
 cube --workspace "Cleanup Workspace" cleanup >/dev/null
 cube workspace delete "Cleanup Workspace" >/dev/null
 

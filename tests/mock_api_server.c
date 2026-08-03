@@ -119,7 +119,7 @@ static char *manager_response(const char *request, const char *request_id,
     }
     if (has_method(request, "manager.cleanup")) {
         return format_success(request_id,
-            "{\"removed_count\":2,\"skipped_live_count\":1,\"failed_count\":0}");
+            "{\"removed_count\":2,\"skipped_live_count\":1,\"skipped_saved_count\":0,\"failed_count\":0}");
     }
     if (has_method(request, "process.start") ||
         has_method(request, "process.get") ||

@@ -614,6 +614,7 @@ int main(void)
                                    &cleanup_result) == CUBICLE_OK);
     assert(cleanup_result.removed_count == 1);
     assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.skipped_saved_count == 0);
     assert(cleanup_result.failed_count == 0);
     assert(cubicle_process_get(client, cleanup_completed.id, NULL,
                                &process) == CUBICLE_ERR_NOT_FOUND);
@@ -631,6 +632,7 @@ int main(void)
                                    &cleanup_result) == CUBICLE_OK);
     assert(cleanup_result.removed_count == 1);
     assert(cleanup_result.skipped_live_count == 0);
+    assert(cleanup_result.skipped_saved_count == 0);
 
     cubicle_workspace_delete_options_t cleanup_delete_options;
     memset(&cleanup_delete_options, 0, sizeof(cleanup_delete_options));

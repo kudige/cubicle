@@ -384,6 +384,7 @@ typedef struct cubicle_process_info {
 
     cubicle_process_mode_t mode;
     cubicle_process_state_t state;
+    bool saved;
 
     int exit_code;
     int termination_signal;
@@ -435,8 +436,8 @@ Requires manager administration authority.
 
 #### `manager.cleanup`
 
-Removes retained terminal process records and controller state. Live processes
-are never stopped or removed.
+Removes retained terminal process records and controller state. Live and saved
+processes are never stopped or removed.
 
 Request:
 
@@ -449,6 +450,7 @@ Response:
 ```text
 removed_count
 skipped_live_count
+skipped_saved_count
 failed_count
 ```
 
@@ -633,6 +635,30 @@ force_after_grace
 #### `process.kill`
 
 Immediately requests forceful process-group termination.
+
+#### `process.save`
+
+Marks a process record as saved so cleanup commands skip it.
+
+Request:
+
+```text
+process_id
+```
+
+Response contains current process information.
+
+#### `process.unsave`
+
+Clears a process record's saved flag.
+
+Request:
+
+```text
+process_id
+```
+
+Response contains current process information.
 
 #### `process.wait`
 

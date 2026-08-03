@@ -112,6 +112,48 @@ cubicle_error_code_t cubicle_process_kill(cubicle_client_t *client,
     return simple_string_rpc(client, "process.kill", "process_id", process_id, NULL);
 }
 
+static cubicle_error_code_t process_save_rpc(cubicle_client_t *client,
+    const char *method, const char *process_id,
+    cubicle_process_info_t *process_out)
+{
+    if (client == NULL || process_id == NULL || process_id[0] == '\0' ||
+        process_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"process_id\":");
+    cubicle_json_builder_append_string(&params, process_id);
+    cubicle_json_builder_append(&params, "}");
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, method, params.data,
+                                           &response);
+    cubicle_json_builder_cleanup(&params);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    code = parse_process_info(result_object(client, response), process_out) == 0
+               ? CUBICLE_OK
+               : set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                  "invalid process result");
+    free(response);
+    return code;
+}
+
+cubicle_error_code_t cubicle_process_save(cubicle_client_t *client,
+                                          const char *process_id,
+                                          cubicle_process_info_t *process_out)
+{
+    return process_save_rpc(client, "process.save", process_id, process_out);
+}
+
+cubicle_error_code_t cubicle_process_unsave(cubicle_client_t *client,
+                                            const char *process_id,
+                                            cubicle_process_info_t *process_out)
+{
+    return process_save_rpc(client, "process.unsave", process_id,
+                            process_out);
+}
+
 cubicle_error_code_t cubicle_process_wait(cubicle_client_t *client,
     const char *process_id, int timeout_ms, cubicle_process_info_t *process_out)
 {

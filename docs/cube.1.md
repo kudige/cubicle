@@ -24,6 +24,8 @@ cube connect [--ro] NAME
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
 cube signal NAME SIGNAL
+cube save NAME
+cube unsave NAME
 cube remove NAME
 cube cleanup
 cube access list
@@ -311,7 +313,7 @@ cube connect --ro build
 
 `cube kill --cleanup NAME`
 : Request forceful termination, wait briefly for the process to exit, then
-  remove that process record.
+  remove that process record unless it is saved.
 
 `cube kill --all`
 : Request forceful termination for all running processes in the selected
@@ -319,12 +321,19 @@ cube connect --ro build
 
 `cube kill --all --cleanup`
 : Kill all running processes in the selected workspace, then remove the killed
-  process records after they exit.
+  process records after they exit unless they are saved.
 
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,
   `TERM`, `KILL`, `USR1`, or `USR2`; names may also include the `SIG` prefix,
   for example `SIGTERM`.
+
+`cube save NAME`
+: Mark a process record as saved. Saved records are skipped by `cube cleanup`
+  and by `cube kill --cleanup`.
+
+`cube unsave NAME`
+: Clear a process record's saved flag so cleanup commands may remove it.
 
 `cube remove NAME`
 : Remove a retained process record. This is for processes that have already
@@ -332,7 +341,7 @@ cube connect --ro build
 
 `cube cleanup`
 : Remove completed/removable process records in the selected workspace and
-  report how many live processes were skipped.
+  report how many live and saved processes were skipped.
 
 Examples:
 
@@ -343,6 +352,8 @@ cube kill --cleanup stuck-build
 cube kill --all --cleanup
 cube signal worker TERM
 cube signal worker 15
+cube save important-build
+cube unsave important-build
 cube remove old-build
 cube cleanup
 cube --json cleanup

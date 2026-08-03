@@ -268,6 +268,7 @@ static cubicle_error_code_t parse_process_info(
 {
     char mode[64];
     char state[64];
+    int saved = 0;
     int has_exit_status = 0;
     uint64_t exit_code = 0;
     uint64_t termination_signal = 0;
@@ -287,6 +288,7 @@ static cubicle_error_code_t parse_process_info(
         cubicle_rpc_get_uint64(json, "exit_code", &exit_code) < 0 ||
         cubicle_rpc_get_uint64(json, "termination_signal",
                                &termination_signal) < 0 ||
+        cubicle_rpc_get_bool(json, "saved", &saved) < 0 ||
         cubicle_rpc_get_bool(json, "has_exit_status",
                              &has_exit_status) < 0 ||
         cubicle_rpc_get_uint64(json, "stdout_offset",
@@ -310,6 +312,7 @@ static cubicle_error_code_t parse_process_info(
     process->state = process_state_from_name(state);
     process->exit_code = (int)exit_code;
     process->termination_signal = (int)termination_signal;
+    process->saved = saved != 0;
     process->has_exit_status = has_exit_status != 0;
     process->local_pid = (int64_t)local_pid;
     process->local_pgid = (int64_t)local_pgid;
@@ -570,6 +573,8 @@ cubicle_error_code_t cubicle_manager_cleanup(
                                &result_out->removed_count) < 0 ||
         cubicle_rpc_get_uint64(result, "skipped_live_count",
                                &result_out->skipped_live_count) < 0 ||
+        cubicle_rpc_get_uint64(result, "skipped_saved_count",
+                               &result_out->skipped_saved_count) < 0 ||
         cubicle_rpc_get_uint64(result, "failed_count",
                                &result_out->failed_count) < 0) {
         return set_error(client, CUBICLE_ERR_PROTOCOL, errno,

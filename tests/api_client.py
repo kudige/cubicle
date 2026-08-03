@@ -166,6 +166,10 @@ def params_for_command(args):
         }
     if command == "process-kill":
         return "process.kill", {"process_id": args.process}
+    if command == "process-save":
+        return "process.save", {"process_id": args.process}
+    if command == "process-unsave":
+        return "process.unsave", {"process_id": args.process}
     if command == "process-wait":
         return "process.wait", {
             "process_id": args.process,
@@ -346,6 +350,12 @@ def build_parser():
 
     process_kill = subparsers.add_parser("process-kill")
     process_kill.add_argument("process")
+
+    process_save = subparsers.add_parser("process-save")
+    process_save.add_argument("process")
+
+    process_unsave = subparsers.add_parser("process-unsave")
+    process_unsave.add_argument("process")
 
     process_wait = subparsers.add_parser("process-wait")
     process_wait.add_argument("process")

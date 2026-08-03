@@ -325,7 +325,9 @@ int parse_process_info(const char *json, cubicle_process_info_t *out)
     if (yyjson_is_int(value)) {
         out->termination_signal = (int)yyjson_get_sint(value);
     }
-    if (cubicle_json_get_optional_bool(parsed.root, "has_exit_status",
+    if (cubicle_json_get_optional_bool(parsed.root, "saved",
+                                       &out->saved, NULL, &error) < 0 ||
+        cubicle_json_get_optional_bool(parsed.root, "has_exit_status",
                                        &out->has_exit_status, NULL, &error) <
             0 ||
         cubicle_json_get_optional_u64(parsed.root, "stdout_offset",

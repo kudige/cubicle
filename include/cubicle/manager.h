@@ -34,6 +34,7 @@ typedef struct cubicle_manager_status {
 typedef struct cubicle_manager_cleanup_result {
     uint64_t removed_count;
     uint64_t skipped_live_count;
+    uint64_t skipped_saved_count;
     uint64_t failed_count;
 } cubicle_manager_cleanup_result_t;
 

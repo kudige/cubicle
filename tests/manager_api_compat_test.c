@@ -46,7 +46,7 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"manager.cleanup\"") != NULL) {
         // Endpoint test for manager.cleanup
         assert(cubicle_rpc_success(response, sizeof(response), "cCleanup",
-                                   "{\"removed_count\":2,\"skipped_live_count\":1,\"failed_count\":0}") == 0);
+                                   "{\"removed_count\":2,\"skipped_live_count\":1,\"skipped_saved_count\":0,\"failed_count\":0}") == 0);
     } else if (strstr(request_json, "\"workspace.create\"") != NULL) {
         // Endpoint test for workspace.create
         assert(cubicle_rpc_success(response, sizeof(response), "c3",
@@ -62,11 +62,11 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
     } else if (strstr(request_json, "\"process.get\"") != NULL) {
         // Endpoint test for process.get
         assert(cubicle_rpc_success(response, sizeof(response), "c6",
-                                   "{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}") == 0);
+                                   "{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"saved\":false,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}") == 0);
     } else if (strstr(request_json, "\"process.list\"") != NULL) {
         // Endpoint test for process.list
         assert(cubicle_rpc_success(response, sizeof(response), "c7",
-                                   "{\"processes\":[{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}],\"count\":1,\"has_more\":false}") == 0);
+                                   "{\"processes\":[{\"manager_id\":\"manager-1\",\"workspace_id\":\"workspace-1\",\"id\":\"process-1\",\"friendly_name\":\"build\",\"mode\":\"stream\",\"state\":\"running\",\"saved\":false,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}],\"count\":1,\"has_more\":false}") == 0);
     } else if (strstr(request_json, "\"events.list\"") != NULL) {
         // Endpoint test for events.list
         assert(cubicle_rpc_success(response, sizeof(response), "c8",
@@ -144,6 +144,7 @@ int main(void)
                                    &cleanup_result) == CUBICLE_OK);
     assert(cleanup_result.removed_count == 2);
     assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.skipped_saved_count == 0);
     assert(cleanup_result.failed_count == 0);
 
     cubicle_workspace_create_options_t create_options = {

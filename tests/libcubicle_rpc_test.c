@@ -88,7 +88,7 @@ static cubicle_error_code_t mock_request(cubicle_transport_t *transport,
             "{\"manager_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_major\":0,\"protocol_minor\":1,\"capabilities\":258,\"started_at_ms\":10,\"server_time_ms\":20,\"workspace_count\":2,\"process_count\":3,\"controller_count\":4,\"active_client_sessions\":5}");
     } else if (has_method(mock->last_request, "manager.cleanup")) {
         response = format_response(response_id,
-            "{\"removed_count\":2,\"skipped_live_count\":1,\"failed_count\":0}");
+            "{\"removed_count\":2,\"skipped_live_count\":1,\"skipped_saved_count\":0,\"failed_count\":0}");
     } else if (has_method(mock->last_request, "workspace.create") ||
                has_method(mock->last_request, "workspace.get")) {
         response = format_response(response_id,
@@ -190,6 +190,7 @@ int main(void)
                                    &cleanup_result) == CUBICLE_OK);
     assert(cleanup_result.removed_count == 2);
     assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.skipped_saved_count == 0);
     assert(strstr(mock.last_request, "\"method\":\"manager.cleanup\"") != NULL);
     assert(strstr(mock.last_request,
                   "\"workspace_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"") != NULL);

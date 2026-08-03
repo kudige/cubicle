@@ -59,11 +59,18 @@ static void test_process_record(void)
     expect_string(record.controller_id, "controller-id", "controller id");
     expect_string(record.control_socket, "/tmp/control.sock", "control socket");
     expect_string(record.cwd, "", "legacy process cwd");
+    expect_true(record.saved == 0, "legacy process saved flag");
 
     char cwd_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\n";
     expect_true(cubicle_parse_process_record(cwd_line, &record) == 0,
                 "expected process cwd record to parse");
     expect_string(record.cwd, "/tmp/project", "process cwd");
+    expect_true(record.saved == 0, "process cwd saved flag");
+
+    char saved_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\t1\n";
+    expect_true(cubicle_parse_process_record(saved_line, &record) == 0,
+                "expected saved process record to parse");
+    expect_true(record.saved == 1, "saved process flag");
 
     char malformed[] = "process-id\tworkspace-id\tmake-1\n";
     expect_true(cubicle_parse_process_record(malformed, &record) < 0,

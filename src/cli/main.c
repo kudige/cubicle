@@ -153,6 +153,8 @@ static void print_usage(FILE *stream)
             "  cube signal NAME SIGNAL\n"
             "  cube stop NAME\n"
             "  cube kill [--all] [--cleanup] [NAME]\n"
+            "  cube save NAME\n"
+            "  cube unsave NAME\n"
             "  cube remove NAME\n"
             "  cube cleanup\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
@@ -221,6 +223,14 @@ static int print_command_usage(const char *command, FILE *stream)
                 "Options:\n"
                 "  --all       Kill all running processes in the selected workspace.\n"
                 "  --cleanup   Remove killed process records after they exit.\n");
+        return 0;
+    }
+    if (strcmp(command, "save") == 0) {
+        fprintf(stream, "Usage:\n  cube save NAME\n");
+        return 0;
+    }
+    if (strcmp(command, "unsave") == 0) {
+        fprintf(stream, "Usage:\n  cube unsave NAME\n");
         return 0;
     }
     if (strcmp(command, "remove") == 0) {
@@ -311,6 +321,8 @@ static int command_requires_manager(const char *command)
            strcmp(command, "signal") == 0 ||
            strcmp(command, "stop") == 0 ||
            strcmp(command, "kill") == 0 ||
+           strcmp(command, "save") == 0 ||
+           strcmp(command, "unsave") == 0 ||
            strcmp(command, "remove") == 0 ||
            strcmp(command, "cleanup") == 0 ||
            strcmp(command, "access") == 0 ||
@@ -2222,10 +2234,13 @@ static int process_cleanup(const char *manager_socket,
 
     uint64_t removed_count = 0;
     uint64_t skipped_live_count = 0;
+    uint64_t skipped_saved_count = 0;
     if (json_u64_field(document.root, "removed_count",
                        &removed_count) < 0 ||
         json_u64_field(document.root, "skipped_live_count",
-                       &skipped_live_count) < 0) {
+                       &skipped_live_count) < 0 ||
+        json_u64_field(document.root, "skipped_saved_count",
+                       &skipped_saved_count) < 0) {
         cubicle_json_cleanup(&document);
         cleanup_rpc_response(&response);
         fprintf(stderr, "cube: invalid cleanup response\n");
@@ -2235,6 +2250,8 @@ static int process_cleanup(const char *manager_socket,
     printf("Removed %llu processes\n", (unsigned long long)removed_count);
     printf("Skipped %llu live processes\n",
            (unsigned long long)skipped_live_count);
+    printf("Skipped %llu saved processes\n",
+           (unsigned long long)skipped_saved_count);
 
     cubicle_json_cleanup(&document);
     cleanup_rpc_response(&response);
@@ -2291,11 +2308,13 @@ static int process_inspect(const char *manager_socket,
     char name[CUBICLE_NAME_MAX];
     char mode[32];
     char state[32];
+    int saved = 0;
     if (json_string_field(document.root, "id", id, sizeof(id)) < 0 ||
         json_string_field(document.root, "friendly_name", name,
                           sizeof(name)) < 0 ||
         json_string_field(document.root, "mode", mode, sizeof(mode)) < 0 ||
-        json_string_field(document.root, "state", state, sizeof(state)) < 0) {
+        json_string_field(document.root, "state", state, sizeof(state)) < 0 ||
+        json_bool_field(document.root, "saved", &saved) < 0) {
         cubicle_json_cleanup(&document);
         cleanup_rpc_response(&response);
         fprintf(stderr, "cube: invalid process response\n");
@@ -2306,6 +2325,7 @@ static int process_inspect(const char *manager_socket,
     printf("Workspace:   %s\n", workspace);
     printf("Mode:        %s\n", mode);
     printf("State:       %s\n", state);
+    printf("Saved:       %s\n", saved ? "yes" : "no");
     printf("Process ID:  %s\n", id);
 
     cubicle_json_cleanup(&document);
@@ -2538,6 +2558,82 @@ static int remove_process_by_id(const char *manager_socket,
                                 0);
 }
 
+static int process_saved_by_id(const char *manager_socket,
+                               const char *process_id,
+                               int *saved)
+{
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[512];
+    snprintf(params, sizeof(params), "{\"process\":\"%s\"}",
+             escaped_process_id);
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "process.get", params, &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+    if (json_bool_field(document.root, "saved", saved) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int process_save_command(const char *manager_socket,
+                                const cube_options_t *options,
+                                const char *process_name,
+                                int saved)
+{
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    int resolve_result = resolve_process_id(manager_socket, options,
+                                            process_name, process_id,
+                                            sizeof(process_id));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+
+    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
+    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
+                            process_id) < 0) {
+        fprintf(stderr, "cube: process id is too long\n");
+        return 2;
+    }
+
+    char params[512];
+    snprintf(params, sizeof(params), "{\"process_id\":\"%s\"}",
+             escaped_process_id);
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, saved ? "process.save" : "process.unsave",
+                     params, &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+    } else {
+        printf("Process %s %s\n", process_name,
+               saved ? "saved" : "unsaved");
+    }
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
 static int process_kill_single(const char *manager_socket,
                                const cube_options_t *options,
                                const char *process_name,
@@ -2557,23 +2653,43 @@ static int process_kill_single(const char *manager_socket,
         return result;
     }
 
+    int removed_after_kill = 0;
+    int skipped_saved = 0;
     if (cleanup_after_kill) {
         result = wait_for_process_timeout(manager_socket, process_id, 5000);
         if (result != 0) {
             return result;
         }
-        result = remove_process_by_id(manager_socket, process_id);
+        int saved = 0;
+        result = process_saved_by_id(manager_socket, process_id, &saved);
         if (result != 0) {
             return result;
+        }
+        if (saved) {
+            skipped_saved = 1;
+        } else {
+            result = remove_process_by_id(manager_socket, process_id);
+            if (result != 0) {
+                return result;
+            }
+            removed_after_kill = 1;
         }
     }
 
     if (options->json) {
-        printf("{}\n");
+        if (cleanup_after_kill) {
+            printf("{\"removed\":%s,\"skipped_saved\":%s}\n",
+                   removed_after_kill ? "true" : "false",
+                   skipped_saved ? "true" : "false");
+        } else {
+            printf("{}\n");
+        }
     } else {
         printf("Process %s killed\n", process_name);
-        if (cleanup_after_kill) {
+        if (removed_after_kill) {
             printf("Process %s removed\n", process_name);
+        } else if (skipped_saved) {
+            printf("Process %s saved; cleanup skipped\n", process_name);
         }
     }
     return 0;
@@ -2655,6 +2771,7 @@ static int process_kill_all(const char *manager_socket,
 
     size_t killed_count = 0;
     size_t removed_count = 0;
+    size_t skipped_saved_count = 0;
     for (size_t i = 0; i < target_count; ++i) {
         int result = process_action_by_id(manager_socket, targets[i].id,
                                           "process.kill", 0);
@@ -2671,6 +2788,16 @@ static int process_kill_all(const char *manager_socket,
             if (result != 0) {
                 return result;
             }
+            int saved = 0;
+            result = process_saved_by_id(manager_socket, targets[i].id,
+                                         &saved);
+            if (result != 0) {
+                return result;
+            }
+            if (saved) {
+                ++skipped_saved_count;
+                continue;
+            }
             result = remove_process_by_id(manager_socket, targets[i].id);
             if (result != 0) {
                 return result;
@@ -2680,12 +2807,13 @@ static int process_kill_all(const char *manager_socket,
     }
 
     if (options->json) {
-        printf("{\"killed_count\":%zu,\"removed_count\":%zu}\n",
-               killed_count, removed_count);
+        printf("{\"killed_count\":%zu,\"removed_count\":%zu,\"skipped_saved_count\":%zu}\n",
+               killed_count, removed_count, skipped_saved_count);
     } else {
         printf("Killed %zu processes\n", killed_count);
         if (cleanup_after_kill) {
             printf("Removed %zu processes\n", removed_count);
+            printf("Skipped %zu saved processes\n", skipped_saved_count);
         }
     }
     return 0;
@@ -4333,6 +4461,16 @@ int main(int argc, char **argv)
     if (strcmp(command, "kill") == 0) {
         return process_kill_command(manager_endpoint, &options, &config, argc,
                                     argv, command_index);
+    }
+
+    if (strcmp(command, "save") == 0 || strcmp(command, "unsave") == 0) {
+        if (command_index + 2 != argc) {
+            fprintf(stderr, "cube: %s requires a process name\n", command);
+            return 2;
+        }
+        return process_save_command(manager_endpoint, &options,
+                                    argv[command_index + 1],
+                                    strcmp(command, "save") == 0);
     }
 
     if (strcmp(command, "remove") == 0) {

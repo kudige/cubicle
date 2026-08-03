@@ -57,10 +57,10 @@ if [ ! -S "$control_socket" ]; then
 fi
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process list --workspace "$workspace_id" >"$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket	$workspace_dir$" "$tmpdir/processes"
+grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket	$workspace_dir	0$" "$tmpdir/processes"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve started-1 --workspace "Project A" >"$tmpdir/resolve-started"
-grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket	$workspace_dir$" "$tmpdir/resolve-started"
+grep -q "^$process_id	$workspace_id	started-1	stream	running	$controller_id	$control_socket	$workspace_dir	0$" "$tmpdir/resolve-started"
 
 if "$CUBICLE_MANAGER" \
     --state-dir "$state_dir" \
@@ -126,7 +126,7 @@ fast_process_id=${fast_process_id%% workspace_id=*}
 fast_socket=${fast_output##* control_socket=}
 
 wait_for_resolve_match "$fast_process_id" "$tmpdir/resolve-fast" \
-    "^$fast_process_id	$workspace_id	fast-1	stream	(exited|completed)	.*	$fast_socket	$workspace_dir$"
+    "^$fast_process_id	$workspace_id	fast-1	stream	(exited|completed)	.*	$fast_socket	$workspace_dir	0$"
 
 if [ -S "$fast_socket" ]; then
     echo "fast process should not leave a live control socket" >&2
@@ -150,7 +150,7 @@ tty_process_id=${tty_process_id%% workspace_id=*}
 tty_socket=${tty_output##* control_socket=}
 
 wait_for_resolve_match "$tty_process_id" "$tmpdir/resolve-tty" \
-    "^$tty_process_id	$workspace_id	tty-1	tty	(exited|completed)	.*	$tty_socket	$workspace_dir$"
+    "^$tty_process_id	$workspace_id	tty-1	tty	(exited|completed)	.*	$tty_socket	$workspace_dir	0$"
 
 grep -q 'manager-tty' "$state_dir/controllers/$tty_process_id/stdout.log"
 grep -q 'manager-tty-err' "$state_dir/controllers/$tty_process_id/stdout.log"
@@ -175,7 +175,7 @@ term_process_id=${term_process_id%% workspace_id=*}
 term_socket=${term_output##* control_socket=}
 
 wait_for_resolve_match "$term_process_id" "$tmpdir/resolve-term" \
-    "^$term_process_id	$workspace_id	term-1	term	(exited|completed)	.*	$term_socket	$workspace_dir$"
+    "^$term_process_id	$workspace_id	term-1	term	(exited|completed)	.*	$term_socket	$workspace_dir	0$"
 
 grep -q 'manager-term' "$state_dir/controllers/$term_process_id/stdout.log"
 if grep -q 'manager-term-err' "$state_dir/controllers/$term_process_id/stdout.log"; then

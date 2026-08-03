@@ -41,14 +41,14 @@ process_id=${register_output#process id=}
 process_id=${process_id%% workspace_id=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process list --workspace "Project A" >"$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$state_dir/processes.tsv"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$tmpdir/processes"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$state_dir/processes.tsv"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$process_id" >"$tmpdir/resolve-by-id"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/resolve-by-id"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$tmpdir/resolve-by-id"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project A" >"$tmpdir/resolve-by-name"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir$" "$tmpdir/resolve-by-name"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$tmpdir/resolve-by-name"
 
 if "$CUBICLE_MANAGER" --state-dir "$state_dir" process register \
     --workspace "Project A" \
@@ -89,7 +89,7 @@ process_b_id=${register_b_output#process id=}
 process_b_id=${process_b_id%% workspace_id=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 --workspace "Project B" >"$tmpdir/resolve-by-name-b"
-grep -q "^$process_b_id	$workspace_b_id	make-1	stream	running	controller-b	$tmpdir/controller-b.sock	$workspace_b_dir$" "$tmpdir/resolve-by-name-b"
+grep -q "^$process_b_id	$workspace_b_id	make-1	stream	running	controller-b	$tmpdir/controller-b.sock	$workspace_b_dir	0$" "$tmpdir/resolve-by-name-b"
 
 set +e
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve make-1 >/dev/null 2>"$tmpdir/resolve-error"

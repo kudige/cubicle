@@ -719,6 +719,8 @@ cubicle_error_code_t cubicle_manager_cleanup(
                        &result_out->removed_count) < 0 ||
         json_u64_field(result, "skipped_live_count",
                        &result_out->skipped_live_count) < 0 ||
+        json_u64_field(result, "skipped_saved_count",
+                       &result_out->skipped_saved_count) < 0 ||
         json_u64_field(result, "failed_count",
                        &result_out->failed_count) < 0) {
         free(response);

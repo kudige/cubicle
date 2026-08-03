@@ -272,6 +272,7 @@ static void run_manager_integration(const char *directory,
                                    &cleanup_result) == CUBICLE_OK);
     assert(cleanup_result.removed_count == 2);
     assert(cleanup_result.skipped_live_count == 1);
+    assert(cleanup_result.skipped_saved_count == 0);
 
     cubicle_workspace_create_options_t create = {
         .name = "default",

@@ -28,11 +28,13 @@ Workspace names are unique.
 ### processes.tsv
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd<TAB>saved
 ```
 
 The current process state written by `process register` is `running`.
 Process IDs are globally unique. Friendly names are unique within a workspace.
+`saved` is `1` when cleanup commands should skip the retained process record,
+otherwise `0`. Older eight-column records are treated as unsaved.
 
 ### manager.lock
 
@@ -100,7 +102,7 @@ cubicle-manager --state-dir DIR process list --workspace "Project A"
 Prints:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd<TAB>saved
 ```
 
 ### process resolve
@@ -116,7 +118,7 @@ name resolution requires `--workspace`.
 Prints the direct controller details:
 
 ```text
-process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd
+process_id<TAB>workspace_id<TAB>friendly_name<TAB>mode<TAB>state<TAB>controller_id<TAB>control_socket<TAB>cwd<TAB>saved
 ```
 
 ### process start

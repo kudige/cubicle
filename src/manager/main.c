@@ -880,10 +880,11 @@ static int process_info_json(const char *manager_id_value,
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
+                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"saved\":%s,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
                           manager_id_value, process->workspace_id,
                           process->process_id, escaped_name, process->mode,
-                          api_process_state_name(process->state), escaped_cwd);
+                          api_process_state_name(process->state), escaped_cwd,
+                          process->saved ? "true" : "false");
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -1580,7 +1581,7 @@ static int append_process_record(const manager_state_t *state,
                                  const char *cwd)
 {
     char line[PATH_MAX + 512];
-    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\n",
                           process_id, workspace_id, friendly_name, mode,
                           process_state, controller_id, control_socket,
                           cwd == NULL ? "" : cwd);
@@ -1592,9 +1593,27 @@ static int append_process_record(const manager_state_t *state,
     return append_line(state, "processes.tsv", line);
 }
 
+typedef struct process_record_update {
+    const char *state;
+    int has_saved;
+    int saved;
+} process_record_update_t;
+
+static int write_process_record(FILE *output,
+                                const cubicle_process_record_t *record)
+{
+    return fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+                   record->process_id, record->workspace_id,
+                   record->friendly_name, record->mode, record->state,
+                   record->controller_id, record->control_socket,
+                   record->cwd, record->saved ? 1 : 0) < 0
+               ? -1
+               : 0;
+}
+
 static int rewrite_process_records(const manager_state_t *state,
                                    const char *process_id,
-                                   const char *new_state,
+                                   const process_record_update_t *update,
                                    int remove_record,
                                    int *found)
 {
@@ -1631,16 +1650,15 @@ static int rewrite_process_records(const manager_state_t *state,
                 if (remove_record) {
                     continue;
                 }
-                if (new_state != NULL) {
+                if (update != NULL && update->state != NULL) {
                     snprintf(record.state, sizeof(record.state), "%s",
-                             new_state);
+                             update->state);
+                }
+                if (update != NULL && update->has_saved) {
+                    record.saved = update->saved;
                 }
             }
-            if (fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-                        record.process_id, record.workspace_id,
-                        record.friendly_name, record.mode, record.state,
-                        record.controller_id, record.control_socket,
-                        record.cwd) < 0) {
+            if (write_process_record(output, &record) < 0) {
                 fclose(input);
                 fclose(output);
                 return -1;
@@ -2115,8 +2133,9 @@ static int reconcile_process_records(const manager_state_t *state)
 
     for (size_t i = 0; result == 0 && i < update_count; ++i) {
         int found = 0;
+        process_record_update_t update = {.state = updates[i].state};
         if (rewrite_process_records(state, updates[i].process_id,
-                                    updates[i].state, 0, &found) < 0) {
+                                    &update, 0, &found) < 0) {
             result = -1;
             break;
         }
@@ -2476,10 +2495,10 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
             continue;
         }
 
-    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
                record.process_id, record.workspace_id, record.friendly_name,
                record.mode, record.state, record.controller_id,
-               record.control_socket, record.cwd);
+               record.control_socket, record.cwd, record.saved ? 1 : 0);
     }
 
     fclose(file);
@@ -2488,10 +2507,10 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
 
 static void print_process_record(const cubicle_process_record_t *record)
 {
-    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
            record->process_id, record->workspace_id, record->friendly_name,
            record->mode, record->state, record->controller_id,
-           record->control_socket, record->cwd);
+           record->control_socket, record->cwd, record->saved ? 1 : 0);
 }
 
 static int command_process_resolve(const manager_state_t *state, int argc,
@@ -4305,6 +4324,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         snprintf(process.control_socket, sizeof(process.control_socket), "%s",
                  control_socket);
         snprintf(process.cwd, sizeof(process.cwd), "%s", cwd);
+        process.saved = 0;
 
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
@@ -4433,8 +4453,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             int found = 0;
             int lock_fd = lock_state(state);
             if (lock_fd >= 0) {
+                process_record_update_t update = {.state = latest_state};
                 if (rewrite_process_records(state, process.process_id,
-                                            latest_state, 0, &found) == 0 &&
+                                            &update, 0, &found) == 0 &&
                     found) {
                     snprintf(process.state, sizeof(process.state), "%s",
                              latest_state);
@@ -4442,6 +4463,74 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 unlock_state(lock_fd);
             }
         }
+        char result[2048];
+        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode process",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "process.save") == 0 ||
+        strcmp(method, "process.unsave") == 0) {
+        char process_id[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id", process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing process id", false,
+                                             0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_REMOVE)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process save access is required",
+                                             false, 0));
+        }
+
+        process_record_update_t update = {
+            .has_saved = 1,
+            .saved = strcmp(method, "process.save") == 0 ? 1 : 0,
+        };
+        int found = 0;
+        if (rewrite_process_records(state, process.process_id, &update, 0,
+                                    &found) < 0 || !found) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to update process",
+                                             true, saved_errno));
+        }
+        process.saved = update.saved;
+        unlock_state(lock_fd);
+
         char result[2048];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4498,8 +4587,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         if (!process_is_terminal_state(process.state) &&
             process_is_terminal_state(latest_state)) {
             int found = 0;
+            process_record_update_t update = {.state = latest_state};
             if (rewrite_process_records(state, process.process_id,
-                                        latest_state, 0, &found) == 0 &&
+                                        &update, 0, &found) == 0 &&
                 found) {
                 snprintf(process.state, sizeof(process.state), "%s",
                          latest_state);
@@ -4605,6 +4695,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         size_t candidate_count = 0;
         size_t candidate_capacity = 0;
         size_t skipped_live_count = 0;
+        size_t skipped_saved_count = 0;
         FILE *file = open_state_file_for_read(state, "processes.tsv");
         if (file != NULL) {
             char line[PATH_MAX + 512];
@@ -4621,6 +4712,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                                      latest_state,
                                                      sizeof(latest_state))) {
                     ++skipped_live_count;
+                    continue;
+                }
+                if (process.saved) {
+                    ++skipped_saved_count;
                     continue;
                 }
 
@@ -4691,8 +4786,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         char result[256];
         int length = snprintf(
             result, sizeof(result),
-            "{\"removed_count\":%zu,\"skipped_live_count\":%zu,\"failed_count\":0}",
-            removed_count, skipped_live_count);
+            "{\"removed_count\":%zu,\"skipped_live_count\":%zu,\"skipped_saved_count\":%zu,\"failed_count\":0}",
+            removed_count, skipped_live_count, skipped_saved_count);
         if (length < 0 || (size_t)length >= sizeof(result)) {
             MANAGER_RETURN(-1);
         }

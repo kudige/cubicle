@@ -17,6 +17,7 @@ rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
 rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
+rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
 rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"
@@ -52,6 +53,8 @@ grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] 
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube signal NAME SIGNAL' "$PWD/cube-help.out"
 grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME\]' "$PWD/cube-help.out"
+grep -q 'cube save NAME' "$PWD/cube-help.out"
+grep -q 'cube unsave NAME' "$PWD/cube-help.out"
 grep -q 'cube remove NAME' "$PWD/cube-help.out"
 grep -q 'cube config show|paths|validate' "$PWD/cube-help.out"
 grep -q 'cube cleanup' "$PWD/cube-help.out"
@@ -79,6 +82,13 @@ if [ -s "$PWD/cube-logs-help.err" ]; then
     exit 1
 fi
 grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] NAME' "$PWD/cube-logs-help.out"
+
+cube save --help >"$PWD/cube-save-help.out" 2>"$PWD/cube-save-help.err"
+if [ -s "$PWD/cube-save-help.err" ]; then
+    echo "cube save help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube save NAME' "$PWD/cube-save-help.out"
 
 set +e
 cube --manager-socket "$PWD/missing-manager.sock" --workspace "Project A" ps \
@@ -121,6 +131,7 @@ rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
 rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
+rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
 rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"

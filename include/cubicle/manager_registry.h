@@ -24,6 +24,7 @@ typedef struct cubicle_process_record {
     char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     char control_socket[CUBICLE_PATH_MAX];
     char cwd[CUBICLE_PATH_MAX];
+    int saved;
 } cubicle_process_record_t;
 
 typedef struct cubicle_cursor_record {
