@@ -30,14 +30,10 @@
 // Border glyphs
 #define DESK_ACTIVE_HORIZONTAL "─"
 #define DESK_ACTIVE_VERTICAL "│"
-#define DESK_ACTIVE_TOP_JUNCTION "┬"
 #define DESK_ACTIVE_MIDDLE_JUNCTION "┼"
-#define DESK_ACTIVE_BOTTOM_JUNCTION "┴"
 #define DESK_INACTIVE_HORIZONTAL "╌"
 #define DESK_INACTIVE_VERTICAL "┊"
-#define DESK_INACTIVE_TOP_JUNCTION "┄"
 #define DESK_INACTIVE_MIDDLE_JUNCTION "┄"
-#define DESK_INACTIVE_BOTTOM_JUNCTION "┄"
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -52,14 +48,15 @@ typedef struct desk_terminal {
 typedef struct desk_layout {
     int left_width;
     int right_width;
-    int body_rows;
     int top_rows;
+    int bottom_rows;
 } desk_layout_t;
 
 typedef enum desk_active_cube {
     DESK_ACTIVE_CUBE_ONE = 1,
     DESK_ACTIVE_CUBE_TWO = 2,
-    DESK_ACTIVE_CUBE_THREE = 3
+    DESK_ACTIVE_CUBE_THREE = 3,
+    DESK_ACTIVE_CUBE_FOUR = 4
 } desk_active_cube_t;
 
 typedef struct desk_cell {
@@ -212,44 +209,19 @@ static void append_cell_text(char *buffer, size_t buffer_size, size_t *used,
 
 static desk_active_cube_t next_active_cube(desk_active_cube_t active)
 {
-    return active == DESK_ACTIVE_CUBE_THREE
+    return active == DESK_ACTIVE_CUBE_FOUR
                ? DESK_ACTIVE_CUBE_ONE
                : (desk_active_cube_t)(active + 1);
-}
-
-static const char *horizontal_border_glyph(desk_active_cube_t active,
-                                           desk_active_cube_t cube)
-{
-    return active == cube ? DESK_ACTIVE_HORIZONTAL : DESK_INACTIVE_HORIZONTAL;
-}
-
-static const char *vertical_border_glyph(desk_active_cube_t active,
-                                         desk_active_cube_t cube)
-{
-    return active == cube ? DESK_ACTIVE_VERTICAL : DESK_INACTIVE_VERTICAL;
-}
-
-static const char *top_junction_glyph(desk_active_cube_t active)
-{
-    return active == DESK_ACTIVE_CUBE_ONE || active == DESK_ACTIVE_CUBE_TWO
-               ? DESK_ACTIVE_TOP_JUNCTION
-               : DESK_INACTIVE_TOP_JUNCTION;
 }
 
 static const char *middle_junction_glyph(desk_active_cube_t active)
 {
     return active == DESK_ACTIVE_CUBE_ONE ||
                    active == DESK_ACTIVE_CUBE_TWO ||
-                   active == DESK_ACTIVE_CUBE_THREE
+                   active == DESK_ACTIVE_CUBE_THREE ||
+                   active == DESK_ACTIVE_CUBE_FOUR
                ? DESK_ACTIVE_MIDDLE_JUNCTION
                : DESK_INACTIVE_MIDDLE_JUNCTION;
-}
-
-static const char *bottom_junction_glyph(desk_active_cube_t active)
-{
-    return active == DESK_ACTIVE_CUBE_ONE || active == DESK_ACTIVE_CUBE_THREE
-               ? DESK_ACTIVE_BOTTOM_JUNCTION
-               : DESK_INACTIVE_BOTTOM_JUNCTION;
 }
 
 static int selected_workspace_path(char path[PATH_MAX])
@@ -462,14 +434,14 @@ static bool desk_get_layout(const desk_terminal_t *terminal,
     int rows = terminal->rows;
     int cols = terminal->cols;
 
-    if (rows < 6 || cols < 24) {
+    if (rows < 5 || cols < 24) {
         return false;
     }
 
     layout->left_width = cols / 2;
     layout->right_width = cols - layout->left_width - 1;
-    layout->body_rows = rows - 3;
-    layout->top_rows = layout->body_rows / 2;
+    layout->top_rows = rows / 2;
+    layout->bottom_rows = rows - layout->top_rows - 1;
     return true;
 }
 
@@ -489,40 +461,36 @@ static void desk_render_layout(const desk_terminal_t *terminal,
     }
 
     append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J");
-    append_text(frame, sizeof(frame), &used, "Cubicle Desk");
-    append_repeat(frame, sizeof(frame), &used, ' ', terminal->cols - 44);
-    append_text(frame, sizeof(frame), &used,
-                "Ctrl-Space switch | q quit | resize aware\r\n");
-    append_repeat_text(frame, sizeof(frame), &used,
-                       horizontal_border_glyph(active, DESK_ACTIVE_CUBE_ONE),
-                       layout.left_width);
-    append_text(frame, sizeof(frame), &used, top_junction_glyph(active));
-    append_repeat_text(frame, sizeof(frame), &used,
-                       horizontal_border_glyph(active, DESK_ACTIVE_CUBE_TWO),
-                       layout.right_width);
-    append_text(frame, sizeof(frame), &used, "\r\n");
-
-    for (int row = 0; row < layout.body_rows; ++row) {
+    for (int row = 0; row < terminal->rows; ++row) {
         const char *left = "";
         const char *right = "";
+        bool divider_row = row == layout.top_rows;
+        bool top_half = row < layout.top_rows;
+        desk_active_cube_t left_cube =
+            top_half ? DESK_ACTIVE_CUBE_ONE : DESK_ACTIVE_CUBE_THREE;
         desk_active_cube_t right_cube =
-            row <= layout.top_rows ? DESK_ACTIVE_CUBE_TWO
-                                   : DESK_ACTIVE_CUBE_THREE;
+            top_half ? DESK_ACTIVE_CUBE_TWO : DESK_ACTIVE_CUBE_FOUR;
 
         if (row == 0) {
-            right = "cube 2: editor";
+            left = "cube 1";
+            right = "cube 2";
         } else if (row == layout.top_rows + 1) {
-            right = "cube 3: logs";
+            left = "cube 3";
+            right = "cube 4";
         }
 
-        if (row == layout.top_rows) {
-            append_cell_text(frame, sizeof(frame), &used, left,
-                             layout.left_width);
+        if (divider_row) {
+            append_repeat_text(frame, sizeof(frame), &used,
+                               active == DESK_ACTIVE_CUBE_ONE ||
+                                       active == DESK_ACTIVE_CUBE_THREE
+                                   ? DESK_ACTIVE_HORIZONTAL
+                                   : DESK_INACTIVE_HORIZONTAL,
+                               layout.left_width);
             append_text(frame, sizeof(frame), &used,
                         middle_junction_glyph(active));
             append_repeat_text(frame, sizeof(frame), &used,
                                active == DESK_ACTIVE_CUBE_TWO ||
-                                       active == DESK_ACTIVE_CUBE_THREE
+                                       active == DESK_ACTIVE_CUBE_FOUR
                                    ? DESK_ACTIVE_HORIZONTAL
                                    : DESK_INACTIVE_HORIZONTAL,
                                layout.right_width);
@@ -530,25 +498,16 @@ static void desk_render_layout(const desk_terminal_t *terminal,
             append_cell_text(frame, sizeof(frame), &used, left,
                              layout.left_width);
             append_text(frame, sizeof(frame), &used,
-                        active == DESK_ACTIVE_CUBE_ONE || active == right_cube
-                            ? vertical_border_glyph(
-                                  active, active == DESK_ACTIVE_CUBE_ONE
-                                              ? DESK_ACTIVE_CUBE_ONE
-                                              : right_cube)
+                        active == left_cube || active == right_cube
+                            ? DESK_ACTIVE_VERTICAL
                             : DESK_INACTIVE_VERTICAL);
             append_cell_text(frame, sizeof(frame), &used, right,
                              layout.right_width);
         }
-        append_text(frame, sizeof(frame), &used, "\r\n");
+        if (row + 1 < terminal->rows) {
+            append_text(frame, sizeof(frame), &used, "\r\n");
+        }
     }
-
-    append_repeat_text(frame, sizeof(frame), &used,
-                       horizontal_border_glyph(active, DESK_ACTIVE_CUBE_ONE),
-                       layout.left_width);
-    append_text(frame, sizeof(frame), &used, bottom_junction_glyph(active));
-    append_repeat_text(frame, sizeof(frame), &used,
-                       horizontal_border_glyph(active, DESK_ACTIVE_CUBE_THREE),
-                       layout.right_width);
     (void)write_all(STDOUT_FILENO, frame, used);
 }
 
@@ -563,15 +522,15 @@ static void desk_render_cube_one(const desk_terminal_t *terminal,
         return;
     }
 
-    for (int row = 0; row < layout.body_rows; ++row) {
+    for (int row = 0; row < layout.top_rows; ++row) {
         char line[128];
         const char *text = "";
-        int terminal_row = row + 3;
+        int terminal_row = row + 1;
 
         if (row == 0) {
             text = "cube 1: counter";
         } else {
-            int scroll_rows = layout.body_rows - 1;
+            int scroll_rows = layout.top_rows - 1;
             unsigned long long first_visible = 1;
             unsigned long long line_number = 0;
 
@@ -1033,6 +992,7 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_grid_t *grid,
                                   const char *title)
 {
+    (void)title;
     char frame[65536];
     size_t used = 0;
     desk_layout_t layout;
@@ -1041,14 +1001,10 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
         return;
     }
 
-    append_text(frame, sizeof(frame), &used, "\x1b[3;1H");
-    append_text(frame, sizeof(frame), &used, "\x1b[0m");
-    append_cell_text(frame, sizeof(frame), &used, title, layout.left_width);
-
     for (int row = 0; row < grid->rows; ++row) {
         char cursor[32];
         char active_sgr[64] = "";
-        int terminal_row = row + 4;
+        int terminal_row = row + 1;
         int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;1H",
                                      terminal_row);
         if (cursor_length > 0 && (size_t)cursor_length < sizeof(cursor)) {
@@ -1088,11 +1044,11 @@ static int cube_one_content_size(const desk_terminal_t *terminal,
                                  unsigned int *cols)
 {
     desk_layout_t layout;
-    if (!desk_get_layout(terminal, &layout) || layout.body_rows <= 1 ||
+    if (!desk_get_layout(terminal, &layout) || layout.top_rows <= 0 ||
         layout.left_width <= 0) {
         return -1;
     }
-    *rows = (unsigned int)(layout.body_rows - 1);
+    *rows = (unsigned int)layout.top_rows;
     *cols = (unsigned int)layout.left_width;
     return 0;
 }
