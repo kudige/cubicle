@@ -1474,6 +1474,19 @@ static int read_selected_workspace(char *buffer, size_t buffer_size)
     return buffer[0] == '\0' ? -1 : 0;
 }
 
+static void clear_selected_workspace_if_matches(const char *workspace)
+{
+    char current[CUBICLE_NAME_MAX];
+    char path[PATH_MAX];
+    if (workspace == NULL ||
+        read_selected_workspace(current, sizeof(current)) < 0 ||
+        strcmp(current, workspace) != 0 ||
+        selected_workspace_path(path) < 0) {
+        return;
+    }
+    (void)unlink(path);
+}
+
 static int valid_name(const char *name)
 {
     return name != NULL && name[0] != '\0' &&
@@ -1710,11 +1723,12 @@ static int print_workspace_rpc_error(const cube_rpc_response_t *response,
                                      int from_selected_workspace)
 {
     if (response->code == CUBICLE_ERR_NOT_FOUND && from_selected_workspace) {
+        clear_selected_workspace_if_matches(workspace);
         fprintf(stderr,
                 "cube: selected workspace '%s' was not found by the manager\n",
                 workspace);
         fprintf(stderr,
-                "hint: run `cube workspace list` and then `cube workspace NAME` to select an existing workspace\n");
+                "hint: cleared the stale selection; run `cube workspace list` and then `cube workspace NAME` to select an existing workspace\n");
         return 1;
     }
     return print_rpc_error(response);
