@@ -37,11 +37,11 @@
 #define DESK_ACTIVE_T_LEFT "┤"
 #define DESK_INACTIVE_HORIZONTAL "╌"
 #define DESK_INACTIVE_VERTICAL "┊"
-#define DESK_INACTIVE_MIDDLE_JUNCTION "┄"
-#define DESK_INACTIVE_T_DOWN "┄"
-#define DESK_INACTIVE_T_UP "┄"
-#define DESK_INACTIVE_T_RIGHT "┄"
-#define DESK_INACTIVE_T_LEFT "┄"
+#define DESK_INACTIVE_MIDDLE_JUNCTION "┼"
+#define DESK_INACTIVE_T_DOWN "┬"
+#define DESK_INACTIVE_T_UP "┴"
+#define DESK_INACTIVE_T_RIGHT "├"
+#define DESK_INACTIVE_T_LEFT "┤"
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
