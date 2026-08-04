@@ -23,6 +23,7 @@
 #include <limits.h>
 #include <netdb.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,6 +53,8 @@ typedef struct manager_state {
 } manager_state_t;
 
 #define CUBICLE_MANAGER_MAX_SESSIONS 128
+#define CUBICLE_MANAGER_DEFAULT_MAX_CLIENTS 64
+#define CUBICLE_MANAGER_MAX_CLIENTS 1024
 
 typedef struct manager_session_record {
     int active;
@@ -67,6 +70,27 @@ typedef struct manager_session_store {
     manager_session_record_t records[CUBICLE_MANAGER_MAX_SESSIONS];
 } manager_session_store_t;
 
+typedef struct manager_runtime manager_runtime_t;
+
+typedef struct manager_worker_slot {
+    int active;
+    int fd;
+    manager_runtime_t *runtime;
+} manager_worker_slot_t;
+
+struct manager_runtime {
+    const manager_state_t *state;
+    manager_session_store_t sessions;
+    pthread_mutex_t sessions_mutex;
+    pthread_mutex_t workers_mutex;
+    pthread_cond_t workers_cond;
+    int shutdown_requested;
+    uint64_t started_at_ms;
+    int max_clients;
+    int active_workers;
+    manager_worker_slot_t workers[CUBICLE_MANAGER_MAX_CLIENTS];
+};
+
 typedef struct manager_connection {
     int has_peer_credentials;
     uid_t peer_uid;
@@ -78,7 +102,7 @@ typedef struct manager_connection {
     cubicle_session_info_t session;
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
     char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
-    manager_session_store_t *sessions;
+    manager_runtime_t *runtime;
 } manager_connection_t;
 
 typedef struct workspace_key_record {
@@ -98,7 +122,7 @@ typedef struct workspace_key_record {
     (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
      CUBICLE_PROTOCOL_CAP_PROCESS_TTY | CUBICLE_PROTOCOL_CAP_ATTACHMENT_DIRECT)
 
-static char manager_error_detail[PATH_MAX + 128];
+static _Thread_local char manager_error_detail[PATH_MAX + 128];
 
 static void clear_manager_error_detail(void)
 {
@@ -138,7 +162,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--foreground] [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N]\n"
+            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--foreground] [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N] [--max-clients N]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
@@ -3001,8 +3025,9 @@ static int session_info_json(const manager_state_t *state,
     return 0;
 }
 
-static manager_session_record_t *find_session(manager_session_store_t *store,
-                                              const char *session_id)
+static manager_session_record_t *find_session_unlocked(
+    manager_session_store_t *store,
+    const char *session_id)
 {
     if (store == NULL || session_id == NULL || session_id[0] == '\0') {
         return NULL;
@@ -3016,7 +3041,7 @@ static manager_session_record_t *find_session(manager_session_store_t *store,
     return NULL;
 }
 
-static size_t active_session_count(const manager_session_store_t *store)
+static size_t active_session_count_unlocked(const manager_session_store_t *store)
 {
     size_t count = 0;
     if (store == NULL) {
@@ -3030,16 +3055,16 @@ static size_t active_session_count(const manager_session_store_t *store)
     return count;
 }
 
-static int save_session(manager_session_store_t *store,
-                        const manager_connection_t *connection,
-                        uint64_t manager_generation)
+static int save_session_unlocked(manager_session_store_t *store,
+                                 const manager_connection_t *connection,
+                                 uint64_t manager_generation)
 {
     if (store == NULL || connection == NULL || !connection->authenticated) {
         errno = EINVAL;
         return -1;
     }
 
-    manager_session_record_t *record = find_session(
+    manager_session_record_t *record = find_session_unlocked(
         store, connection->session.session_id);
     if (record == NULL) {
         for (size_t i = 0; i < CUBICLE_MANAGER_MAX_SESSIONS; ++i) {
@@ -3070,6 +3095,76 @@ static int save_session(manager_session_store_t *store,
     snprintf(record->client_public_key_hex, sizeof(record->client_public_key_hex),
              "%s", connection->client_public_key_hex);
     return 0;
+}
+
+static int runtime_save_session(manager_runtime_t *runtime,
+                                const manager_connection_t *connection)
+{
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&runtime->sessions_mutex);
+    int result = save_session_unlocked(&runtime->sessions, connection,
+                                       runtime->started_at_ms);
+    int saved_errno = errno;
+    pthread_mutex_unlock(&runtime->sessions_mutex);
+    errno = saved_errno;
+    return result;
+}
+
+static int runtime_find_session_copy(manager_runtime_t *runtime,
+                                     const char *session_id,
+                                     manager_session_record_t *record)
+{
+    if (runtime == NULL || record == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int found = 0;
+    pthread_mutex_lock(&runtime->sessions_mutex);
+    manager_session_record_t *source = find_session_unlocked(
+        &runtime->sessions, session_id);
+    if (source != NULL) {
+        *record = *source;
+        found = 1;
+    }
+    pthread_mutex_unlock(&runtime->sessions_mutex);
+    return found;
+}
+
+static size_t runtime_active_session_count(manager_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return 0;
+    }
+    pthread_mutex_lock(&runtime->sessions_mutex);
+    size_t count = active_session_count_unlocked(&runtime->sessions);
+    pthread_mutex_unlock(&runtime->sessions_mutex);
+    return count;
+}
+
+static int runtime_shutdown_requested(manager_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return 1;
+    }
+    pthread_mutex_lock(&runtime->workers_mutex);
+    int requested = runtime->shutdown_requested;
+    pthread_mutex_unlock(&runtime->workers_mutex);
+    return requested;
+}
+
+static void runtime_request_shutdown(manager_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&runtime->workers_mutex);
+    runtime->shutdown_requested = 1;
+    pthread_cond_broadcast(&runtime->workers_cond);
+    pthread_mutex_unlock(&runtime->workers_mutex);
 }
 
 static int create_authenticated_session(const manager_state_t *state,
@@ -3109,9 +3204,7 @@ static int create_authenticated_session(const manager_state_t *state,
 }
 
 static int handle_manager_client(const manager_state_t *state, int client_fd,
-                                 manager_connection_t *connection,
-                                 int *shutdown_requested,
-                                 uint64_t started_at_ms)
+                                 manager_connection_t *connection)
 {
     char request[8192];
     if (read_api_frame(client_fd, request, sizeof(request)) < 0) {
@@ -3200,7 +3293,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
         transcript.capabilities =
             CUBICLE_API_CAPABILITIES | CUBICLE_PROTOCOL_CAP_AUTH_ED25519;
-        transcript.manager_generation = started_at_ms;
+        transcript.manager_generation = connection->runtime->started_at_ms;
         transcript.peer_uid = connection->peer_uid;
         transcript.peer_gid = connection->peer_gid;
         if (has_workspace_ref) {
@@ -3288,7 +3381,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "failed to create session",
                                              false, errno));
         }
-        if (save_session(connection->sessions, connection, started_at_ms) < 0) {
+        if (runtime_save_session(connection->runtime, connection) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_RESOURCE_LIMIT,
                                              "failed to save session",
@@ -3343,14 +3436,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, 0));
         }
 
-        manager_session_record_t *record = find_session(connection->sessions,
-                                                        session_id);
-        if (record == NULL ||
-            record->manager_generation != started_at_ms ||
-            record->peer_uid != connection->peer_uid ||
-            record->peer_gid != connection->peer_gid ||
-            (record->session.expires_at_ms > 0 &&
-             record->session.expires_at_ms < now_ms)) {
+        manager_session_record_t record;
+        if (!runtime_find_session_copy(connection->runtime, session_id,
+                                       &record) ||
+            record.manager_generation != connection->runtime->started_at_ms ||
+            record.peer_uid != connection->peer_uid ||
+            record.peer_gid != connection->peer_gid ||
+            (record.session.expires_at_ms > 0 &&
+             record.session.expires_at_ms < now_ms)) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_SESSION_EXPIRED,
                                              "session cannot be resumed",
@@ -3372,7 +3465,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "invalid session resume material",
                                              false, 0));
         }
-        resume.manager_generation = started_at_ms;
+        resume.manager_generation = connection->runtime->started_at_ms;
         resume.peer_uid = connection->peer_uid;
         resume.peer_gid = connection->peer_gid;
 
@@ -3383,8 +3476,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         if (cubicle_auth_encode_resume(&resume, resume_bytes,
                                        sizeof(resume_bytes),
                                        &resume_length) < 0 ||
-            cubicle_auth_hmac_sha256(record->resume_secret,
-                                     sizeof(record->resume_secret),
+            cubicle_auth_hmac_sha256(record.resume_secret,
+                                     sizeof(record.resume_secret),
                                      resume_bytes, resume_length,
                                      expected_authenticator) < 0 ||
             cubicle_auth_hex_decode(authenticator_hex,
@@ -3399,12 +3492,12 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         connection->authenticated = 1;
-        connection->session = record->session;
-        memcpy(connection->resume_secret, record->resume_secret,
+        connection->session = record.session;
+        memcpy(connection->resume_secret, record.resume_secret,
                sizeof(connection->resume_secret));
         snprintf(connection->client_public_key_hex,
                  sizeof(connection->client_public_key_hex), "%s",
-                 record->client_public_key_hex);
+                 record.client_public_key_hex);
 
         unsigned char server_nonce[CUBICLE_AUTH_NONCE_BYTES];
         char server_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
@@ -3475,7 +3568,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                               id, CUBICLE_PROTOCOL_MAJOR,
                               CUBICLE_PROTOCOL_MINOR,
                               (unsigned long long)now_ms,
-                              (unsigned long long)(now_ms - started_at_ms));
+                              (unsigned long long)(now_ms -
+                                  connection->runtime->started_at_ms));
         if (length < 0 || (size_t)length >= sizeof(result)) {
             MANAGER_RETURN(-1);
         }
@@ -3499,10 +3593,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                               id, CUBICLE_PROTOCOL_MAJOR,
                               CUBICLE_PROTOCOL_MINOR,
                               (unsigned long long)CUBICLE_API_CAPABILITIES,
-                              (unsigned long long)started_at_ms,
+                              (unsigned long long)connection->runtime->started_at_ms,
                               (unsigned long long)now_ms, workspace_count,
                               process_count, process_count,
-                              active_session_count(connection->sessions));
+                              runtime_active_session_count(connection->runtime));
         if (length < 0 || (size_t)length >= sizeof(result)) {
             MANAGER_RETURN(-1);
         }
@@ -3510,7 +3604,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     if (strcmp(method, "manager.shutdown") == 0) {
-        *shutdown_requested = 1;
+        runtime_request_shutdown(connection->runtime);
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
@@ -5568,21 +5662,152 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
 static int handle_manager_connection(const manager_state_t *state,
                                      int client_fd,
-                                     manager_session_store_t *sessions,
-                                     int *shutdown_requested,
-                                     uint64_t started_at_ms)
+                                     manager_runtime_t *runtime)
 {
     manager_connection_t connection;
     load_peer_credentials(client_fd, &connection);
-    connection.sessions = sessions;
-    while (!*shutdown_requested) {
-        if (handle_manager_client(state, client_fd, &connection,
-                                  shutdown_requested, started_at_ms) == 0) {
+    connection.runtime = runtime;
+    while (!runtime_shutdown_requested(runtime)) {
+        if (handle_manager_client(state, client_fd, &connection) == 0) {
             continue;
         }
         return errno == ECONNRESET ? 0 : -1;
     }
     return 0;
+}
+
+static int manager_runtime_init(manager_runtime_t *runtime,
+                                const manager_state_t *state,
+                                int max_clients)
+{
+    memset(runtime, 0, sizeof(*runtime));
+    runtime->state = state;
+    runtime->started_at_ms = manager_time_ms();
+    runtime->max_clients = max_clients;
+    for (int i = 0; i < CUBICLE_MANAGER_MAX_CLIENTS; ++i) {
+        runtime->workers[i].fd = -1;
+    }
+
+    int result = pthread_mutex_init(&runtime->sessions_mutex, NULL);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    result = pthread_mutex_init(&runtime->workers_mutex, NULL);
+    if (result != 0) {
+        pthread_mutex_destroy(&runtime->sessions_mutex);
+        errno = result;
+        return -1;
+    }
+    result = pthread_cond_init(&runtime->workers_cond, NULL);
+    if (result != 0) {
+        pthread_mutex_destroy(&runtime->workers_mutex);
+        pthread_mutex_destroy(&runtime->sessions_mutex);
+        errno = result;
+        return -1;
+    }
+    return 0;
+}
+
+static void manager_runtime_destroy(manager_runtime_t *runtime)
+{
+    pthread_cond_destroy(&runtime->workers_cond);
+    pthread_mutex_destroy(&runtime->workers_mutex);
+    pthread_mutex_destroy(&runtime->sessions_mutex);
+}
+
+static void *manager_worker_main(void *argument)
+{
+    manager_worker_slot_t *slot = argument;
+    manager_runtime_t *runtime = slot->runtime;
+    int client_fd = slot->fd;
+
+    if (handle_manager_connection(runtime->state, client_fd, runtime) < 0) {
+        manager_log_error(errno);
+    }
+    close(client_fd);
+
+    pthread_mutex_lock(&runtime->workers_mutex);
+    slot->fd = -1;
+    slot->active = 0;
+    if (runtime->active_workers > 0) {
+        --runtime->active_workers;
+    }
+    pthread_cond_broadcast(&runtime->workers_cond);
+    pthread_mutex_unlock(&runtime->workers_mutex);
+    return NULL;
+}
+
+static int manager_runtime_start_worker(manager_runtime_t *runtime,
+                                        int client_fd)
+{
+    pthread_mutex_lock(&runtime->workers_mutex);
+    if (runtime->shutdown_requested ||
+        runtime->active_workers >= runtime->max_clients) {
+        pthread_mutex_unlock(&runtime->workers_mutex);
+        errno = EBUSY;
+        return -1;
+    }
+
+    manager_worker_slot_t *slot = NULL;
+    for (int i = 0; i < runtime->max_clients; ++i) {
+        if (!runtime->workers[i].active) {
+            slot = &runtime->workers[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        pthread_mutex_unlock(&runtime->workers_mutex);
+        errno = EBUSY;
+        return -1;
+    }
+
+    slot->active = 1;
+    slot->fd = client_fd;
+    slot->runtime = runtime;
+    ++runtime->active_workers;
+    pthread_mutex_unlock(&runtime->workers_mutex);
+
+    pthread_t thread;
+    int result = pthread_create(&thread, NULL, manager_worker_main, slot);
+    if (result != 0) {
+        pthread_mutex_lock(&runtime->workers_mutex);
+        slot->active = 0;
+        slot->fd = -1;
+        if (runtime->active_workers > 0) {
+            --runtime->active_workers;
+        }
+        pthread_cond_broadcast(&runtime->workers_cond);
+        pthread_mutex_unlock(&runtime->workers_mutex);
+        errno = result;
+        return -1;
+    }
+    result = pthread_detach(thread);
+    if (result != 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager",
+                    "failed to detach manager client worker");
+    }
+    return 0;
+}
+
+static void manager_runtime_shutdown_worker_sockets(manager_runtime_t *runtime)
+{
+    pthread_mutex_lock(&runtime->workers_mutex);
+    for (int i = 0; i < runtime->max_clients; ++i) {
+        if (runtime->workers[i].active && runtime->workers[i].fd >= 0) {
+            shutdown(runtime->workers[i].fd, SHUT_RDWR);
+        }
+    }
+    pthread_mutex_unlock(&runtime->workers_mutex);
+}
+
+static void manager_runtime_wait_workers(manager_runtime_t *runtime)
+{
+    pthread_mutex_lock(&runtime->workers_mutex);
+    while (runtime->active_workers > 0) {
+        pthread_cond_wait(&runtime->workers_cond, &runtime->workers_mutex);
+    }
+    pthread_mutex_unlock(&runtime->workers_mutex);
 }
 
 static int daemonize_manager(void)
@@ -5634,6 +5859,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     int allow_insecure = 0;
     int foreground = 0;
     int poll_interval_ms = 250;
+    int max_clients = CUBICLE_MANAGER_DEFAULT_MAX_CLIENTS;
 
     for (int i = 0; i < argc; ++i) {
         if (strcmp(argv[i], "--control-socket") == 0 && i + 1 < argc) {
@@ -5646,6 +5872,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             foreground = 1;
         } else if (strcmp(argv[i], "--event-interval-ms") == 0 && i + 1 < argc) {
             poll_interval_ms = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--max-clients") == 0 && i + 1 < argc) {
+            max_clients = atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown daemon option: %s\n", argv[i]);
             return 2;
@@ -5654,6 +5882,11 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
 
     if (poll_interval_ms < 0) {
         fprintf(stderr, "daemon requires nonnegative --event-interval-ms\n");
+        return 2;
+    }
+    if (max_clients < 1 || max_clients > CUBICLE_MANAGER_MAX_CLIENTS) {
+        fprintf(stderr, "daemon requires --max-clients between 1 and %d\n",
+                CUBICLE_MANAGER_MAX_CLIENTS);
         return 2;
     }
     if (requested_socket != NULL && requested_uri != NULL) {
@@ -5721,11 +5954,18 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     int result = 0;
-    int shutdown_requested = 0;
-    uint64_t started_at_ms = manager_time_ms();
-    manager_session_store_t sessions;
-    memset(&sessions, 0, sizeof(sessions));
-    while (!shutdown_requested) {
+    manager_runtime_t runtime;
+    if (manager_runtime_init(&runtime, state, max_clients) < 0) {
+        manager_log_error(errno);
+        close(listen_fd);
+        if (cleanup_path[0] != '\0') {
+            unlink(cleanup_path);
+        }
+        unlock_state(daemon_lock_fd);
+        return 1;
+    }
+
+    while (!runtime_shutdown_requested(&runtime)) {
         if (poll_workspace_events(state, NULL, NULL) != 0) {
             manager_log_error(errno);
         }
@@ -5768,17 +6008,18 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 break;
             }
 
-            if (handle_manager_connection(state, client_fd, &sessions,
-                                          &shutdown_requested,
-                                          started_at_ms) < 0) {
+            if (manager_runtime_start_worker(&runtime, client_fd) < 0) {
                 manager_log_error(errno);
-                result = 1;
+                shutdown(client_fd, SHUT_RDWR);
+                close(client_fd);
             }
-            close(client_fd);
         }
     }
 
     close(listen_fd);
+    manager_runtime_shutdown_worker_sockets(&runtime);
+    manager_runtime_wait_workers(&runtime);
+    manager_runtime_destroy(&runtime);
     if (cleanup_path[0] != '\0') {
         unlink(cleanup_path);
     }

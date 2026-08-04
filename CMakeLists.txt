@@ -3,6 +3,7 @@ project(cubicle VERSION 0.1.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
 pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
 
@@ -96,7 +97,7 @@ add_executable(cubicle-manager
     src/manager/registry.c
 )
 
-target_link_libraries(cubicle-manager PRIVATE cubicle_common)
+target_link_libraries(cubicle-manager PRIVATE cubicle_common Threads::Threads)
 target_include_directories(cubicle-manager PRIVATE third_party/yyjson)
 
 target_compile_options(cubicle-manager PRIVATE
@@ -474,6 +475,14 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_daemon_test.sh
+)
+
+add_test(
+    NAME cubicle-manager-parallel-connections-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_parallel_connections_test.py
 )
 
 add_test(
