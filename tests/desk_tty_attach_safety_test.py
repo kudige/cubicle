@@ -226,6 +226,7 @@ def run_desk_with_terminal_noise(desk, cube, env):
             if not sent_noise and b"terminal-noise" in captured:
                 os.write(
                     master_fd,
+                    b"\x1b[I"
                     b"\x1b[10;1R"
                     b"\x1b]10;rgb:e3e3/e3e3/eaea\x1b\\"
                     b"\x1b]11;rgb:0808/0505/2b2b\x1b\\"

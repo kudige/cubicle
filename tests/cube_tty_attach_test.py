@@ -249,6 +249,15 @@ def main():
                 "        break\n"
                 "sys.stdout.write('GOT_INPUT\\n' if data else 'NO_INPUT\\n')\n"
                 "sys.stdout.flush()\n"
+                "deadline = time.time() + 2.0\n"
+                "while time.time() < deadline:\n"
+                "    ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
+                "    if ready:\n"
+                "        data = os.read(0, 256)\n"
+                "        if data:\n"
+                "            sys.stdout.write('GOT_INPUT\\n')\n"
+                "            sys.stdout.flush()\n"
+                "            break\n"
                 "time.sleep(5)\n"
             )
             check_call(
@@ -306,6 +315,14 @@ def main():
             os.close(replay_slave_fd)
             try:
                 read_until(replay_master_fd, b"NO_INPUT")
+                os.write(
+                    replay_master_fd,
+                    b"\x1b[I"
+                    b"\x1b[1;1R"
+                    b"\x1b]10;rgb:0000/ffff/0000\x1b\\"
+                    b"\x1b]11;rgb:0000/0000/0000\x1b\\"
+                    b"\x1b[?61;1;2;4c",
+                )
                 time.sleep(0.1)
                 os.write(replay_master_fd, b"\x1cd")
                 replay_connect.wait(timeout=5)

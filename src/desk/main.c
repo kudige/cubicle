@@ -2820,7 +2820,8 @@ static bool is_terminal_csi_response(const unsigned char *input,
     if (cursor >= length) {
         return false;
     }
-    if (input[cursor] != 'R' && input[cursor] != 'c') {
+    if (input[cursor] != 'R' && input[cursor] != 'c' &&
+        input[cursor] != 'I' && input[cursor] != 'O') {
         return false;
     }
     *consumed = cursor - offset + 1;

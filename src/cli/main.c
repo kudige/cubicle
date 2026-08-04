@@ -2456,6 +2456,69 @@ static int attachment_write_all(cubicle_attachment_t *attachment,
     return 0;
 }
 
+static int is_terminal_csi_response(const unsigned char *input,
+                                    size_t length,
+                                    size_t offset,
+                                    size_t *consumed)
+{
+    size_t cursor = offset;
+    if (cursor + 2 >= length || input[cursor] != '\033' ||
+        input[cursor + 1] != '[') {
+        return 0;
+    }
+    cursor += 2;
+    while (cursor < length &&
+           ((input[cursor] >= '0' && input[cursor] <= '9') ||
+            input[cursor] == ';' || input[cursor] == '?' ||
+            input[cursor] == '>')) {
+        ++cursor;
+    }
+    if (cursor >= length) {
+        return 0;
+    }
+    if (input[cursor] != 'R' && input[cursor] != 'c' &&
+        input[cursor] != 'I' && input[cursor] != 'O') {
+        return 0;
+    }
+    *consumed = cursor - offset + 1;
+    return 1;
+}
+
+static int is_terminal_osc_response(const unsigned char *input,
+                                    size_t length,
+                                    size_t offset,
+                                    size_t *consumed)
+{
+    size_t cursor = offset;
+    if (cursor + 2 >= length || input[cursor] != '\033' ||
+        input[cursor + 1] != ']') {
+        return 0;
+    }
+    cursor += 2;
+    while (cursor < length) {
+        if (input[cursor] == '\a') {
+            *consumed = cursor - offset + 1;
+            return 1;
+        }
+        if (input[cursor] == '\033' && cursor + 1 < length &&
+            input[cursor + 1] == '\\') {
+            *consumed = cursor - offset + 2;
+            return 1;
+        }
+        ++cursor;
+    }
+    return 0;
+}
+
+static int is_terminal_response_sequence(const unsigned char *input,
+                                         size_t length,
+                                         size_t offset,
+                                         size_t *consumed)
+{
+    return is_terminal_csi_response(input, length, offset, consumed) ||
+           is_terminal_osc_response(input, length, offset, consumed);
+}
+
 static int process_input_chunk(cubicle_attachment_t *attachment,
                                const char *buffer,
                                size_t length,
@@ -2465,6 +2528,12 @@ static int process_input_chunk(cubicle_attachment_t *attachment,
     char output[4096];
     size_t used = 0;
     for (size_t i = 0; i < length; ++i) {
+        size_t consumed = 0;
+        if (is_terminal_response_sequence((const unsigned char *)buffer,
+                                          length, i, &consumed)) {
+            i += consumed - 1;
+            continue;
+        }
         unsigned char byte = (unsigned char)buffer[i];
         if (*escape_pending) {
             *escape_pending = 0;
