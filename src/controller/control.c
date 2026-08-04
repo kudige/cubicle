@@ -881,6 +881,17 @@ static int dispatch_api_request(control_client_t *client,
         if (terminal_size != NULL && terminal_size->known &&
             terminal_size->rows == (unsigned short)rows &&
             terminal_size->columns == (unsigned short)columns) {
+            char event[128];
+            int event_length = snprintf(
+                event, sizeof(event),
+                "type=terminal_resize_skipped rows=%llu columns=%llu reason=unchanged",
+                (unsigned long long)rows, (unsigned long long)columns);
+            if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+                append_event(state, event) < 0) {
+                CONTROLLER_API_RETURN(enqueue_api_error(
+                    client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                    errno));
+            }
             CONTROLLER_API_RETURN(enqueue_api_success(client, request_id,
                                                       "{}"));
         }
@@ -906,6 +917,16 @@ static int dispatch_api_request(control_client_t *client,
             terminal_size->rows = (unsigned short)rows;
             terminal_size->columns = (unsigned short)columns;
             terminal_size->known = 1;
+        }
+        char event[128];
+        int event_length = snprintf(
+            event, sizeof(event), "type=terminal_resized rows=%llu columns=%llu",
+            (unsigned long long)rows, (unsigned long long)columns);
+        if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+            append_event(state, event) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                errno));
         }
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
