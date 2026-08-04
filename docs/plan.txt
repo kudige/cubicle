@@ -430,6 +430,14 @@
   - workspace.create bootstraps the authenticated same-UID caller key as workspace owner
   - cube access add/list/set-role/remove manages workspace public-key access
   - manager Unix sockets support configurable socket_mode and socket_group
+- Refactored shared client/UI code:
+  - introduced libcubicle URI connection support used by cube and desk
+  - introduced internal cubeui helpers for local endpoint, selected-workspace, and terminal utilities
+  - switched desk to libcubicle for manager connections and cubeui for local terminal helpers
+  - moved cube manager RPC transport/session/auth handling through libcubicle
+  - added typed libcubicle attachment helpers for request, connect, read, write, resize, status, detach, channels, and replay
+  - switched cube connect and foreground TTY run attachment paths to libcubicle attachment APIs
+  - removed cube's private direct controller socket/RPC/auth implementation
 
 ## Next
 
@@ -440,8 +448,6 @@
    - Harden ownership and permission policy for configured directories.
 
 2. Continue implementing the cube CLI specification.
-   - Replace cube's direct RPC helper with libcubicle client APIs once the CLI behavior stabilizes.
-   - Add foreground cube run attach behavior through manager-issued attachment grants.
    - Harden post-exit connect draining through manager-retained output fallback.
    - Add defaults config and command-rule phases from docs/cli-command-spec.md.
    - Keep cube talking to the controller only for authorized process attachments.
