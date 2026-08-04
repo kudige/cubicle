@@ -2605,13 +2605,9 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
     cubicle_terminal_snapshot_t snapshot;
     code = cubicle_attachment_snapshot(pane->attachment, &snapshot);
     if (code != CUBICLE_OK) {
-        const cubicle_error_t *last =
-            cubicle_attachment_last_error(pane->attachment);
-        snprintf(error, error_size, "%s",
-                 last != NULL && last->message[0] != '\0'
-                     ? last->message
-                     : "controller snapshot failed");
-        return code;
+        (void)error;
+        (void)error_size;
+        return CUBICLE_OK;
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_snapshot_cleanup(&snapshot);

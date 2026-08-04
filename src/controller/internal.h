@@ -18,7 +18,7 @@
 #define CUBICLE_MAX_CONTROL_CLIENTS 32
 #define CUBICLE_LINE_REQUEST_MAX 256
 #define CUBICLE_REQUEST_MAX 8192
-#define CUBICLE_RESPONSE_MAX 65792
+#define CUBICLE_RESPONSE_MAX (4U * 1024U * 1024U)
 
 typedef enum control_client_kind {
     CONTROL_CLIENT_EMPTY = 0,
@@ -69,7 +69,8 @@ typedef struct control_client {
     size_t request_length;
     int framed_request;
     size_t framed_length;
-    char response[CUBICLE_RESPONSE_MAX];
+    char *response;
+    size_t response_capacity;
     size_t response_length;
     size_t response_offset;
 } control_client_t;

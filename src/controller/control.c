@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -131,11 +132,30 @@ int open_control_socket(const char *path)
 static int enqueue_response(control_client_t *client, const char *buffer,
                             size_t length)
 {
-    if (client->response_length + length > sizeof(client->response)) {
+    if (length > CUBICLE_RESPONSE_MAX ||
+        client->response_length > CUBICLE_RESPONSE_MAX - length) {
         errno = ENOBUFS;
         return -1;
     }
 
+    size_t required = client->response_length + length;
+    if (required > client->response_capacity) {
+        size_t capacity = client->response_capacity == 0 ? 4096
+                                                         : client->response_capacity;
+        while (capacity < required) {
+            if (capacity > CUBICLE_RESPONSE_MAX / 2) {
+                capacity = CUBICLE_RESPONSE_MAX;
+            } else {
+                capacity *= 2;
+            }
+        }
+        char *response = realloc(client->response, capacity);
+        if (response == NULL) {
+            return -1;
+        }
+        client->response = response;
+        client->response_capacity = capacity;
+    }
     memcpy(client->response + client->response_length, buffer, length);
     client->response_length += length;
     return 0;
@@ -158,7 +178,7 @@ static int enqueue_api_frame(control_client_t *client, const char *json)
 {
     size_t length = strlen(json);
     if (length > UINT32_MAX ||
-        length + sizeof(uint32_t) > sizeof(client->response)) {
+        length > CUBICLE_RESPONSE_MAX - sizeof(uint32_t)) {
         errno = ENOBUFS;
         return -1;
     }
@@ -191,12 +211,19 @@ static int enqueue_api_success(control_client_t *client,
                                const char *request_id,
                                const char *result)
 {
-    char response[131072];
-    if (cubicle_rpc_success(response, sizeof(response), request_id,
-                            result) < 0) {
+    size_t response_size = strlen(request_id) + strlen(result) + 128;
+    char *response = malloc(response_size);
+    if (response == NULL) {
         return -1;
     }
-    return enqueue_api_frame(client, response);
+    if (cubicle_rpc_success(response, response_size, request_id,
+                            result) < 0) {
+        free(response);
+        return -1;
+    }
+    int enqueue_result = enqueue_api_frame(client, response);
+    free(response);
+    return enqueue_result;
 }
 
 void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS])
@@ -209,6 +236,8 @@ void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLI
         clients[i].framed_length = 0;
         clients[i].response_length = 0;
         clients[i].response_offset = 0;
+        clients[i].response_capacity = 0;
+        clients[i].response = NULL;
     }
 }
 
@@ -232,6 +261,9 @@ void close_control_client(control_client_t *client, controller_state_t *state)
     client->framed_length = 0;
     client->response_length = 0;
     client->response_offset = 0;
+    client->response_capacity = 0;
+    free(client->response);
+    client->response = NULL;
 }
 
 void close_all_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
@@ -785,14 +817,22 @@ static int dispatch_api_request(control_client_t *client,
                 client, request_id, CUBICLE_ERR_INVALID_STATE,
                 "terminal snapshot is unavailable", false, 0));
         }
-        char result[131072];
+        char *result = malloc(CUBICLE_RESPONSE_MAX);
+        if (result == NULL) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INTERNAL,
+                "snapshot allocation failed", false, ENOMEM));
+        }
         if (snapshot_json(terminal_model, (uint64_t)state->stdout_offset,
-                          result, sizeof(result)) < 0) {
+                          result, CUBICLE_RESPONSE_MAX) < 0) {
+            free(result);
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
                 "snapshot failed", false, errno));
         }
-        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+        int snapshot_result = enqueue_api_success(client, request_id, result);
+        free(result);
+        CONTROLLER_API_RETURN(snapshot_result);
     }
 
     if (strcmp(envelope.method, "controller.write") == 0) {
