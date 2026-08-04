@@ -51,7 +51,6 @@
 #define DESK_MIN_PANE_COLS 4
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
-#define DESK_INPUT_ARM_QUIET_TICKS 2
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -118,7 +117,7 @@ typedef struct desk_pane_layout {
 } desk_pane_layout_t;
 
 typedef struct desk_cell {
-    char ch;
+    char text[32];
     char sgr[96];
 } desk_cell_t;
 
@@ -135,6 +134,9 @@ typedef struct desk_grid {
     bool csi_active;
     char csi[64];
     size_t csi_length;
+    char utf8[8];
+    size_t utf8_length;
+    size_t utf8_expected;
 } desk_grid_t;
 
 typedef struct desk_attachment {
@@ -1726,7 +1728,7 @@ static void grid_clear(desk_grid_t *grid)
     if (grid->cells != NULL) {
         size_t count = (size_t)grid->rows * (size_t)grid->cols;
         for (size_t i = 0; i < count; ++i) {
-            grid->cells[i].ch = ' ';
+            snprintf(grid->cells[i].text, sizeof(grid->cells[i].text), " ");
             grid->cells[i].sgr[0] = '\0';
         }
     }
@@ -1735,6 +1737,11 @@ static void grid_clear(desk_grid_t *grid)
     grid->scroll_top = 0;
     grid->scroll_bottom = grid->rows > 0 ? grid->rows - 1 : 0;
     grid->current_sgr[0] = '\0';
+    grid->escape_active = false;
+    grid->csi_active = false;
+    grid->csi_length = 0;
+    grid->utf8_length = 0;
+    grid->utf8_expected = 0;
 }
 
 static int grid_resize(desk_grid_t *grid, int rows, int cols)
@@ -1787,7 +1794,8 @@ static void grid_apply_snapshot(desk_grid_t *grid,
                                  (size_t)col];
             desk_cell_t *target =
                 &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
-            target->ch = source->text[0] == '\0' ? ' ' : source->text[0];
+            snprintf(target->text, sizeof(target->text), "%s",
+                     source->text[0] == '\0' ? " " : source->text);
             snprintf(target->sgr, sizeof(target->sgr), "%s", source->sgr);
         }
     }
@@ -1806,8 +1814,9 @@ static void grid_clear_row(desk_grid_t *grid, int row)
     }
     desk_cell_t *line = grid->cells + (size_t)row * (size_t)grid->cols;
     for (int col = 0; col < grid->cols; ++col) {
-        line[col].ch = ' ';
-        line[col].sgr[0] = '\0';
+        snprintf(line[col].text, sizeof(line[col].text), " ");
+        snprintf(line[col].sgr, sizeof(line[col].sgr), "%s",
+                 grid->current_sgr);
     }
 }
 
@@ -1899,6 +1908,24 @@ static void grid_newline(desk_grid_t *grid)
     grid_index(grid);
 }
 
+static void grid_put_text(desk_grid_t *grid, const char *text)
+{
+    if (grid->cursor_row < 0 || grid->cursor_row >= grid->rows ||
+        grid->cursor_col < 0 || grid->cursor_col >= grid->cols) {
+        return;
+    }
+    desk_cell_t *cell =
+        &grid->cells[(size_t)grid->cursor_row * (size_t)grid->cols +
+                     (size_t)grid->cursor_col];
+    snprintf(cell->text, sizeof(cell->text), "%s", text);
+    snprintf(cell->sgr, sizeof(cell->sgr), "%s", grid->current_sgr);
+    if (grid->cursor_col + 1 >= grid->cols) {
+        grid_newline(grid);
+    } else {
+        grid->cursor_col++;
+    }
+}
+
 static void grid_put_char(desk_grid_t *grid, unsigned char ch)
 {
     if (ch == '\r') {
@@ -1918,27 +1945,16 @@ static void grid_put_char(desk_grid_t *grid, unsigned char ch)
     if (ch == '\t') {
         int spaces = 8 - (grid->cursor_col % 8);
         for (int i = 0; i < spaces; ++i) {
-            grid_put_char(grid, ' ');
+            grid_put_text(grid, " ");
         }
         return;
     }
     if (ch < 0x20) {
         return;
     }
-    if (grid->cursor_row < 0 || grid->cursor_row >= grid->rows ||
-        grid->cursor_col < 0 || grid->cursor_col >= grid->cols) {
-        return;
-    }
-    desk_cell_t *cell =
-        &grid->cells[(size_t)grid->cursor_row * (size_t)grid->cols +
-                     (size_t)grid->cursor_col];
-    cell->ch = (char)ch;
-    snprintf(cell->sgr, sizeof(cell->sgr), "%s", grid->current_sgr);
-    if (grid->cursor_col + 1 >= grid->cols) {
-        grid_newline(grid);
-    } else {
-        grid->cursor_col++;
-    }
+
+    char text[2] = {(char)ch, '\0'};
+    grid_put_text(grid, text);
 }
 
 static int parse_csi_number(const char *text, int default_value)
@@ -1983,8 +1999,8 @@ static void grid_clear_cell(desk_grid_t *grid, int row, int col)
     }
     desk_cell_t *cell =
         &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
-    cell->ch = ' ';
-    cell->sgr[0] = '\0';
+    snprintf(cell->text, sizeof(cell->text), " ");
+    snprintf(cell->sgr, sizeof(cell->sgr), "%s", grid->current_sgr);
 }
 
 static void grid_clear_line_range(desk_grid_t *grid, int start_col,
@@ -2151,6 +2167,64 @@ static size_t grid_apply_csi(desk_grid_t *grid,
     return 0;
 }
 
+static size_t utf8_expected_length(unsigned char ch)
+{
+    if (ch < 0x80) {
+        return 1;
+    }
+    if (ch >= 0xc2 && ch <= 0xdf) {
+        return 2;
+    }
+    if (ch >= 0xe0 && ch <= 0xef) {
+        return 3;
+    }
+    if (ch >= 0xf0 && ch <= 0xf4) {
+        return 4;
+    }
+    return 0;
+}
+
+static bool utf8_is_continuation(unsigned char ch)
+{
+    return ch >= 0x80 && ch <= 0xbf;
+}
+
+static void grid_reset_utf8(desk_grid_t *grid)
+{
+    grid->utf8_length = 0;
+    grid->utf8_expected = 0;
+    grid->utf8[0] = '\0';
+}
+
+static void grid_put_utf8_byte(desk_grid_t *grid, unsigned char ch)
+{
+    if (grid->utf8_expected > 0) {
+        if (!utf8_is_continuation(ch) ||
+            grid->utf8_length + 1 >= sizeof(grid->utf8)) {
+            grid_reset_utf8(grid);
+            grid_put_char(grid, ch);
+            return;
+        }
+        grid->utf8[grid->utf8_length++] = (char)ch;
+        if (grid->utf8_length == grid->utf8_expected) {
+            grid->utf8[grid->utf8_length] = '\0';
+            grid_put_text(grid, grid->utf8);
+            grid_reset_utf8(grid);
+        }
+        return;
+    }
+
+    size_t expected = utf8_expected_length(ch);
+    if (expected <= 1) {
+        grid_put_char(grid, ch);
+        return;
+    }
+    grid->utf8[0] = (char)ch;
+    grid->utf8[1] = '\0';
+    grid->utf8_length = 1;
+    grid->utf8_expected = expected;
+}
+
 static void grid_feed(desk_grid_t *grid, const unsigned char *data,
                       size_t length,
                       cubicle_attachment_t *attachment)
@@ -2196,10 +2270,11 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
             continue;
         }
         if (ch == 0x1b) {
+            grid_reset_utf8(grid);
             grid->escape_active = true;
             continue;
         }
-        grid_put_char(grid, ch);
+        grid_put_utf8_byte(grid, ch);
     }
 }
 
@@ -2228,13 +2303,13 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
             append_text(frame, sizeof(frame), &used, cursor);
         }
         for (int col = 0; col < rect.cols; ++col) {
-            char ch = ' ';
+            const char *text = " ";
             const char *sgr = "";
             if (row < grid->rows && col < grid->cols) {
                 const desk_cell_t *cell =
                     &grid->cells[(size_t)row * (size_t)grid->cols +
                                  (size_t)col];
-                ch = cell->ch;
+                text = cell->text;
                 sgr = cell->sgr;
             }
             if (strcmp(active_sgr, sgr) != 0) {
@@ -2242,10 +2317,8 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                             sgr[0] == '\0' ? "\x1b[0m" : sgr);
                 snprintf(active_sgr, sizeof(active_sgr), "%s", sgr);
             }
-            if (used + 1 < sizeof(frame)) {
-                frame[used++] = ch;
-                frame[used] = '\0';
-            }
+            append_text(frame, sizeof(frame), &used,
+                        text[0] == '\0' ? " " : text);
         }
         if (active_sgr[0] != '\0') {
             append_text(frame, sizeof(frame), &used, "\x1b[0m");
@@ -2874,8 +2947,6 @@ static int desk_run_workspace(const char *workspace_arg,
 
     render_all_panes(&terminal, &session);
     drain_terminal_input_once();
-    bool input_armed = false;
-    int output_quiet_ticks = 0;
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
@@ -2901,24 +2972,11 @@ static int desk_run_workspace(const char *workspace_arg,
         if (result != 0) {
             break;
         }
-
-        if (output_seen) {
-            output_quiet_ticks = 0;
-            input_armed = false;
-            drain_terminal_input_once();
-        } else if (!input_armed) {
-            drain_terminal_input_once();
-            ++output_quiet_ticks;
-            if (output_quiet_ticks >= DESK_INPUT_ARM_QUIET_TICKS) {
-                input_armed = true;
-            }
-        }
+        (void)output_seen;
 
         fd_set read_set;
         FD_ZERO(&read_set);
-        if (input_armed) {
-            FD_SET(STDIN_FILENO, &read_set);
-        }
+        FD_SET(STDIN_FILENO, &read_set);
         struct timeval timeout = {0, 50000};
         int ready = select(STDIN_FILENO + 1, &read_set, NULL, NULL, &timeout);
         if (ready < 0) {
@@ -2928,7 +2986,7 @@ static int desk_run_workspace(const char *workspace_arg,
             result = 2;
             break;
         }
-        if (input_armed && ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
+        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
             unsigned char input[256];
             ssize_t input_length = read(STDIN_FILENO, input, sizeof(input));
             if (input_length < 0) {
@@ -2960,7 +3018,6 @@ static int desk_run_workspace(const char *workspace_arg,
             if (resize_all_panes(&session, &terminal, &sizes_changed) == 0) {
                 (void)desk_save_layout(&session);
                 render_all_panes(&terminal, &session);
-                drain_terminal_input_once();
             }
         }
         if (quit_requested) {
