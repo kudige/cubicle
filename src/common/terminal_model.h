@@ -1,27 +1,14 @@
 #ifndef CUBICLE_TERMINAL_MODEL_H
 #define CUBICLE_TERMINAL_MODEL_H
 
+#include "cubicle/terminal_snapshot.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
 typedef struct cubicle_terminal_model cubicle_terminal_model_t;
-
-typedef struct cubicle_terminal_cell {
-    char text[32];
-    char sgr[96];
-} cubicle_terminal_cell_t;
-
-typedef struct cubicle_terminal_snapshot {
-    unsigned int rows;
-    unsigned int cols;
-    unsigned int cursor_row;
-    unsigned int cursor_col;
-    bool cursor_visible;
-    uint64_t offset;
-    cubicle_terminal_cell_t *cells;
-} cubicle_terminal_snapshot_t;
 
 int cubicle_terminal_model_create(unsigned int rows, unsigned int cols,
                                   cubicle_terminal_model_t **model_out);

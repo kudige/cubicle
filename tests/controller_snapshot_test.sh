@@ -96,6 +96,8 @@ if [ "$(json_field "$snapshot" result.offset)" -le 0 ]; then
     exit 1
 fi
 
+"$CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT" "$tty_socket"
+
 python3 "$CUBICLE_CONTROL_CLIENT" "$tty_socket" terminate >/dev/null
 set +e
 wait "$tty_pid"

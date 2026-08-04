@@ -3,6 +3,7 @@
 
 #include "cubicle/client_error.h"
 #include "cubicle/process.h"
+#include "cubicle/terminal_snapshot.h"
 #include "cubicle/types.h"
 
 #include <sys/types.h>
@@ -87,6 +88,7 @@ cubicle_error_code_t cubicle_attachment_resize(cubicle_attachment_t *attachment,
 cubicle_error_code_t cubicle_attachment_resize_tracked(cubicle_attachment_t *attachment, cubicle_resize_tracker_t *tracker, unsigned int rows, unsigned int cols, bool force, bool *sent_out);
 cubicle_error_code_t cubicle_attachment_close_input(cubicle_attachment_t *attachment);
 cubicle_error_code_t cubicle_attachment_status(cubicle_attachment_t *attachment, cubicle_attachment_status_t *status_out);
+cubicle_error_code_t cubicle_attachment_snapshot(cubicle_attachment_t *attachment, cubicle_terminal_snapshot_t *snapshot_out);
 cubicle_error_code_t cubicle_attachment_detach(cubicle_attachment_t *attachment);
 const cubicle_error_t *cubicle_attachment_last_error(const cubicle_attachment_t *attachment);
 void cubicle_attachment_disconnect(cubicle_attachment_t *attachment);

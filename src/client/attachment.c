@@ -481,6 +481,103 @@ cubicle_error_code_t cubicle_attachment_status(
     return CUBICLE_OK;
 }
 
+cubicle_error_code_t cubicle_attachment_snapshot(
+    cubicle_attachment_t *attachment,
+    cubicle_terminal_snapshot_t *snapshot_out)
+{
+    if (attachment == NULL || snapshot_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    memset(snapshot_out, 0, sizeof(*snapshot_out));
+
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment,
+                                               "controller.snapshot", "{}",
+                                               &response);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+
+    const char *result = json_object_field(response, "result");
+    cubicle_json_doc_t document;
+    if (result == NULL || cubicle_json_parse(&document, result) < 0) {
+        free(response);
+        return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                    "invalid snapshot response");
+    }
+
+    uint64_t rows = 0;
+    uint64_t cols = 0;
+    uint64_t cursor_row = 0;
+    uint64_t cursor_col = 0;
+    uint64_t offset = 0;
+    bool cursor_visible = true;
+    yyjson_val *cells = NULL;
+    cubicle_validation_error_t error;
+    if (cubicle_json_get_required_u64(document.root, "rows", &rows, &error) < 0 ||
+        cubicle_json_get_required_u64(document.root, "columns", &cols, &error) < 0 ||
+        cubicle_json_get_required_u64(document.root, "cursor_row", &cursor_row, &error) < 0 ||
+        cubicle_json_get_required_u64(document.root, "cursor_column", &cursor_col, &error) < 0 ||
+        cubicle_json_get_optional_bool(document.root, "cursor_visible",
+                                       &cursor_visible, NULL, &error) < 0 ||
+        cubicle_json_get_required_u64(document.root, "offset", &offset, &error) < 0 ||
+        cubicle_json_get_required_array(document.root, "cells", &cells,
+                                        &error) < 0 ||
+        rows == 0 || cols == 0 || rows > 1000 || cols > 1000 ||
+        rows > SIZE_MAX / cols) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                    "invalid snapshot response");
+    }
+
+    size_t cell_count = (size_t)rows * (size_t)cols;
+    if (cubicle_json_array_size(cells) != cell_count) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                    "invalid snapshot cell count");
+    }
+
+    cubicle_terminal_cell_t *parsed_cells =
+        calloc(cell_count, sizeof(*parsed_cells));
+    if (parsed_cells == NULL) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        return attachment_set_error(attachment, CUBICLE_ERR_INTERNAL, ENOMEM,
+                                    "failed to allocate snapshot");
+    }
+
+    for (size_t i = 0; i < cell_count; ++i) {
+        yyjson_val *cell = cubicle_json_array_get(cells, i);
+        if (!yyjson_is_obj(cell) ||
+            cubicle_json_get_required_string(cell, "t", parsed_cells[i].text,
+                                             sizeof(parsed_cells[i].text),
+                                             &error) < 0 ||
+            cubicle_json_get_required_string(cell, "sgr", parsed_cells[i].sgr,
+                                             sizeof(parsed_cells[i].sgr),
+                                             &error) < 0) {
+            free(parsed_cells);
+            cubicle_json_cleanup(&document);
+            free(response);
+            return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                        "invalid snapshot cell");
+        }
+    }
+
+    snapshot_out->rows = (unsigned int)rows;
+    snapshot_out->cols = (unsigned int)cols;
+    snapshot_out->cursor_row = (unsigned int)cursor_row;
+    snapshot_out->cursor_col = (unsigned int)cursor_col;
+    snapshot_out->cursor_visible = cursor_visible;
+    snapshot_out->offset = offset;
+    snapshot_out->cells = parsed_cells;
+
+    cubicle_json_cleanup(&document);
+    free(response);
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_attachment_detach(cubicle_attachment_t *attachment)
 {
     if (attachment == NULL) {

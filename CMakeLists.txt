@@ -260,6 +260,18 @@ add_executable(cubicle-manager-auth-client
 target_link_libraries(cubicle-manager-auth-client PRIVATE cubicle_common)
 target_include_directories(cubicle-manager-auth-client PRIVATE third_party/yyjson)
 
+add_executable(cubicle-attachment-snapshot-client
+    tests/attachment_snapshot_client.c
+)
+
+target_link_libraries(cubicle-attachment-snapshot-client PRIVATE cubicle_client)
+
+target_compile_options(cubicle-attachment-snapshot-client PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 target_compile_options(cubicle-manager-auth-client PRIVATE
     -Wall
     -Wextra
@@ -641,6 +653,7 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT=$<TARGET_FILE:cubicle-attachment-snapshot-client>
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_snapshot_test.sh
 )
 
