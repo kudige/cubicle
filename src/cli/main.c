@@ -2,23 +2,19 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "../common/auth_crypto.h"
-#include "../common/auth_protocol.h"
 #include "../common/json.h"
-#include "../common/rpc_internal.h"
 #include "../cubeui/cubeui.h"
 
 #include "cubicle/auth.h"
+#include "cubicle/attachment.h"
 #include "cubicle/client.h"
 #include "cubicle/config.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <netdb.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
@@ -26,18 +22,14 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
 #include <termios.h>
 #include <time.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX CUBICLE_PATH_MAX
 #endif
 
-#define CUBE_MAX_FRAME 65536
 #define CUBE_CHANNEL_STDIN 1U
 #define CUBE_CHANNEL_STDOUT 2U
 #define CUBE_CHANNEL_STDERR 4U
@@ -65,18 +57,6 @@ typedef struct cube_rpc_response {
     char error_message[CUBICLE_ERROR_MESSAGE_MAX];
 } cube_rpc_response_t;
 
-typedef struct cube_attach_grant {
-    char endpoint_uri[CUBICLE_ENDPOINT_URI_MAX];
-    char token[CUBICLE_TOKEN_MAX];
-    unsigned int channels;
-} cube_attach_grant_t;
-
-typedef struct cube_attach_offsets {
-    uint64_t stdout_offset;
-    uint64_t stderr_offset;
-    uint64_t tty_offset;
-} cube_attach_offsets_t;
-
 typedef struct cube_log_options {
     int follow;
     int stdout_only;
@@ -85,14 +65,6 @@ typedef struct cube_log_options {
     uint64_t end;
     int has_end;
 } cube_log_options_t;
-
-typedef struct cube_cached_session {
-    cubicle_session_info_t session;
-    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
-    uint64_t manager_generation;
-    uid_t peer_uid;
-    gid_t peer_gid;
-} cube_cached_session_t;
 
 static struct termios cube_saved_terminal;
 static int cube_terminal_restore_active = 0;
@@ -394,330 +366,6 @@ static int command_config(const cubicle_config_t *config,
     return 2;
 }
 
-static int write_all(int fd, const void *buffer, size_t length)
-{
-    const unsigned char *cursor = buffer;
-    while (length > 0) {
-        ssize_t written = send(fd, cursor, length, MSG_NOSIGNAL);
-        if (written < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (written == 0) {
-            errno = EPIPE;
-            return -1;
-        }
-        cursor += (size_t)written;
-        length -= (size_t)written;
-    }
-    return 0;
-}
-
-static int read_all(int fd, void *buffer, size_t length)
-{
-    unsigned char *cursor = buffer;
-    while (length > 0) {
-        ssize_t nread = recv(fd, cursor, length, 0);
-        if (nread < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (nread == 0) {
-            errno = ECONNRESET;
-            return -1;
-        }
-        cursor += (size_t)nread;
-        length -= (size_t)nread;
-    }
-    return 0;
-}
-
-static int split_tcp_endpoint(const char *endpoint, char *host,
-                              size_t host_size, char *port,
-                              size_t port_size)
-{
-    const char prefix[] = "tcp://";
-    if (strncmp(endpoint, prefix, strlen(prefix)) != 0) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    const char *authority = endpoint + strlen(prefix);
-    const char *port_start = NULL;
-    size_t host_length = 0;
-    if (authority[0] == '[') {
-        const char *end = strchr(authority, ']');
-        if (end == NULL || end[1] != ':') {
-            errno = EINVAL;
-            return -1;
-        }
-        host_length = (size_t)(end - authority - 1);
-        authority += 1;
-        port_start = end + 2;
-    } else {
-        const char *colon = strrchr(authority, ':');
-        if (colon == NULL) {
-            errno = EINVAL;
-            return -1;
-        }
-        host_length = (size_t)(colon - authority);
-        port_start = colon + 1;
-    }
-    if (host_length == 0 || port_start == NULL || port_start[0] == '\0' ||
-        host_length >= host_size || strlen(port_start) >= port_size) {
-        errno = EINVAL;
-        return -1;
-    }
-    memcpy(host, authority, host_length);
-    host[host_length] = '\0';
-    snprintf(port, port_size, "%s", port_start);
-    return 0;
-}
-
-static int connect_unix_endpoint(const char *peer_name,
-                                 const char *endpoint,
-                                 cube_rpc_response_t *response)
-{
-    const char *socket_path = endpoint;
-    if (strncmp(endpoint, "unix://", 7) == 0) {
-        socket_path = endpoint + 7;
-    }
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    if (strlen(socket_path) >= sizeof(address.sun_path)) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "%s socket path is too long", peer_name);
-        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
-        return -1;
-    }
-    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
-
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to create socket");
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to connect to %s", peer_name);
-        response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
-        return -1;
-    }
-    return fd;
-}
-
-static int connect_tcp_endpoint(const char *endpoint,
-                                cube_rpc_response_t *response)
-{
-    char host[256];
-    char port[32];
-    if (split_tcp_endpoint(endpoint, host, sizeof(host), port,
-                           sizeof(port)) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid manager TCP endpoint");
-        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
-        return -1;
-    }
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_family = AF_UNSPEC;
-
-    struct addrinfo *addresses = NULL;
-    int gai_result = getaddrinfo(host, port, &hints, &addresses);
-    if (gai_result != 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to resolve manager TCP endpoint");
-        response->code = CUBICLE_ERR_INVALID_ARGUMENT;
-        return -1;
-    }
-
-    int fd = -1;
-    int saved_errno = ECONNREFUSED;
-    for (struct addrinfo *address = addresses; address != NULL;
-         address = address->ai_next) {
-        fd = socket(address->ai_family, address->ai_socktype,
-                    address->ai_protocol);
-        if (fd < 0) {
-            saved_errno = errno;
-            continue;
-        }
-        if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
-            break;
-        }
-        saved_errno = errno;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(addresses);
-
-    if (fd < 0) {
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to connect to manager");
-        response->code = CUBICLE_ERR_MANAGER_UNAVAILABLE;
-    }
-    return fd;
-}
-
-static int connect_rpc_endpoint(const char *peer_name,
-                                const char *endpoint,
-                                cube_rpc_response_t *response)
-{
-    if (strncmp(endpoint, "tcp://", 6) == 0) {
-        return connect_tcp_endpoint(endpoint, response);
-    }
-    if (strncmp(endpoint, "unix://", 7) == 0 || endpoint[0] == '/') {
-        return connect_unix_endpoint(peer_name, endpoint, response);
-    }
-
-    snprintf(response->error_message, sizeof(response->error_message),
-             "%s endpoint must be a Unix path, unix:// URI, or tcp:// URI",
-             peer_name);
-    response->code = CUBICLE_ERR_INVALID_ARGUMENT;
-    return -1;
-}
-
-static int endpoint_is_unix(const char *endpoint)
-{
-    return strncmp(endpoint, "unix://", 7) == 0 ||
-           strncmp(endpoint, "tcp://", 6) != 0;
-}
-
-static int cube_client_key_dir(char path[PATH_MAX])
-{
-    const char *config_home = getenv("XDG_CONFIG_HOME");
-    if (config_home != NULL && config_home[0] != '\0') {
-        int length = snprintf(path, PATH_MAX, "%s/cubicle/keys",
-                              config_home);
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-
-    const char *home = getenv("HOME");
-    if (home != NULL && home[0] != '\0') {
-        int length = snprintf(path, PATH_MAX, "%s/.config/cubicle/keys",
-                              home);
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-
-    int length = snprintf(path, PATH_MAX, ".cubicle/keys");
-    return length < 0 || length >= PATH_MAX ? -1 : 0;
-}
-
-static int cube_client_private_key_path(char path[PATH_MAX],
-                                        const char *key_dir)
-{
-    int length = snprintf(path, PATH_MAX, "%s/client.key", key_dir);
-    return length < 0 || length >= PATH_MAX ? -1 : 0;
-}
-
-static uint64_t cube_endpoint_hash(const char *text)
-{
-    uint64_t hash = 1469598103934665603ULL;
-    for (const unsigned char *cursor = (const unsigned char *)text;
-         *cursor != '\0'; ++cursor) {
-        hash ^= (uint64_t)*cursor;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-static uint64_t cube_now_ms(void)
-{
-    time_t now = time(NULL);
-    if (now < 0) {
-        return 0;
-    }
-    return (uint64_t)now * 1000ULL;
-}
-
-static int cube_session_cache_path(const char *endpoint,
-                                   char directory[PATH_MAX],
-                                   char path[PATH_MAX])
-{
-    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
-    if (runtime_dir == NULL || runtime_dir[0] == '\0') {
-        errno = ENOENT;
-        return -1;
-    }
-
-    int length = snprintf(directory, PATH_MAX,
-                          "%s/cubicle/sessions/by-endpoint", runtime_dir);
-    if (length < 0 || length >= PATH_MAX) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    length = snprintf(path, PATH_MAX, "%s/%016llx.session", directory,
-                      (unsigned long long)cube_endpoint_hash(endpoint));
-    if (length < 0 || length >= PATH_MAX) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    return 0;
-}
-
-static int cube_cache_field(const char *data,
-                            const char *key,
-                            char *buffer,
-                            size_t buffer_size)
-{
-    size_t key_length = strlen(key);
-    const char *cursor = data;
-    while (*cursor != '\0') {
-        const char *line_end = strchr(cursor, '\n');
-        size_t line_length =
-            line_end == NULL ? strlen(cursor) : (size_t)(line_end - cursor);
-        if (line_length > key_length && cursor[key_length] == '=' &&
-            strncmp(cursor, key, key_length) == 0) {
-            size_t value_length = line_length - key_length - 1;
-            if (value_length >= buffer_size) {
-                errno = ENOSPC;
-                return -1;
-            }
-            memcpy(buffer, cursor + key_length + 1, value_length);
-            buffer[value_length] = '\0';
-            return 0;
-        }
-        if (line_end == NULL) {
-            break;
-        }
-        cursor = line_end + 1;
-    }
-    errno = ENOENT;
-    return -1;
-}
-
-static int cube_cache_field_u64(const char *data,
-                                const char *key,
-                                uint64_t *value_out)
-{
-    char value[32];
-    char *end = NULL;
-    if (cube_cache_field(data, key, value, sizeof(value)) < 0) {
-        return -1;
-    }
-    errno = 0;
-    unsigned long long parsed = strtoull(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0') {
-        errno = EINVAL;
-        return -1;
-    }
-    *value_out = (uint64_t)parsed;
-    return 0;
-}
-
 static int parse_u64_arg(const char *value, uint64_t *value_out)
 {
     char *end = NULL;
@@ -728,610 +376,6 @@ static int parse_u64_arg(const char *value, uint64_t *value_out)
     }
     *value_out = (uint64_t)parsed;
     return 0;
-}
-
-static int cube_load_cached_session(const char *endpoint,
-                                    cube_cached_session_t *cached)
-{
-    char directory[PATH_MAX];
-    char path[PATH_MAX];
-    if (cube_session_cache_path(endpoint, directory, path) < 0) {
-        return -1;
-    }
-
-    struct stat status;
-    if (stat(path, &status) < 0) {
-        return -1;
-    }
-    if (!S_ISREG(status.st_mode) || status.st_uid != getuid() ||
-        (status.st_mode & 0077) != 0 || status.st_size <= 0 ||
-        status.st_size > 4096) {
-        errno = EACCES;
-        return -1;
-    }
-
-    FILE *file = fopen(path, "r");
-    if (file == NULL) {
-        return -1;
-    }
-    char data[4097];
-    size_t length = fread(data, 1, sizeof(data) - 1, file);
-    int read_failed = ferror(file);
-    fclose(file);
-    if (read_failed) {
-        errno = EIO;
-        return -1;
-    }
-    data[length] = '\0';
-
-    memset(cached, 0, sizeof(*cached));
-    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
-    uint64_t value = 0;
-    if (cube_cache_field(data, "session_id", cached->session.session_id,
-                         sizeof(cached->session.session_id)) < 0 ||
-        cube_cache_field(data, "manager_id", cached->session.manager_id,
-                         sizeof(cached->session.manager_id)) < 0 ||
-        cube_cache_field(data, "client_key_id", cached->session.client_key_id,
-                         sizeof(cached->session.client_key_id)) < 0 ||
-        cube_cache_field(data, "resume_secret", resume_secret_hex,
-                         sizeof(resume_secret_hex)) < 0 ||
-        cubicle_auth_hex_decode(resume_secret_hex, cached->resume_secret,
-                                sizeof(cached->resume_secret)) < 0 ||
-        cube_cache_field_u64(data, "protocol_major", &value) < 0) {
-        return -1;
-    }
-    cached->session.protocol_major = (uint32_t)value;
-    if (cube_cache_field_u64(data, "protocol_minor", &value) == 0) {
-        cached->session.protocol_minor = (uint32_t)value;
-    }
-    (void)cube_cache_field_u64(data, "negotiated_capabilities",
-                               &cached->session.negotiated_capabilities);
-    (void)cube_cache_field_u64(data, "authenticated_at_ms",
-                               &cached->session.authenticated_at_ms);
-    (void)cube_cache_field_u64(data, "expires_at_ms",
-                               &cached->session.expires_at_ms);
-    (void)cube_cache_field_u64(data, "manager_generation",
-                               &cached->manager_generation);
-    if (cube_cache_field_u64(data, "peer_uid", &value) == 0) {
-        cached->peer_uid = (uid_t)value;
-    }
-    if (cube_cache_field_u64(data, "peer_gid", &value) == 0) {
-        cached->peer_gid = (gid_t)value;
-    }
-    if (cached->session.expires_at_ms > 0 &&
-        cached->session.expires_at_ms <= cube_now_ms()) {
-        errno = ETIMEDOUT;
-        return -1;
-    }
-    return 0;
-}
-
-static void cube_save_cached_session(const char *endpoint,
-                                     const cubicle_session_info_t *session,
-                                     const unsigned char *resume_secret,
-                                     uint64_t manager_generation,
-                                     uid_t peer_uid,
-                                     gid_t peer_gid)
-{
-    char directory[PATH_MAX];
-    char path[PATH_MAX];
-    if (cube_session_cache_path(endpoint, directory, path) < 0 ||
-        cubicle_mkdir_p(directory) < 0 ||
-        chmod(directory, 0700) < 0) {
-        return;
-    }
-
-    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
-    if (cubicle_auth_hex_encode(resume_secret, CUBICLE_AUTH_SECRET_BYTES,
-                                resume_secret_hex,
-                                sizeof(resume_secret_hex)) < 0) {
-        return;
-    }
-
-    char temporary[PATH_MAX];
-    int length = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
-                          (long)getpid());
-    if (length < 0 || length >= PATH_MAX) {
-        return;
-    }
-
-    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
-        return;
-    }
-    char content[1024];
-    length = snprintf(
-        content, sizeof(content),
-        "session_id=%s\nmanager_id=%s\nclient_key_id=%s\nprotocol_major=%u\nprotocol_minor=%u\nnegotiated_capabilities=%llu\nauthenticated_at_ms=%llu\nexpires_at_ms=%llu\nresume_secret=%s\nmanager_generation=%llu\npeer_uid=%llu\npeer_gid=%llu\n",
-        session->session_id, session->manager_id, session->client_key_id,
-        session->protocol_major, session->protocol_minor,
-        (unsigned long long)session->negotiated_capabilities,
-        (unsigned long long)session->authenticated_at_ms,
-        (unsigned long long)session->expires_at_ms, resume_secret_hex,
-        (unsigned long long)manager_generation,
-        (unsigned long long)peer_uid, (unsigned long long)peer_gid);
-    int write_result =
-        length < 0 || (size_t)length >= sizeof(content) ||
-        cubicle_write_all(fd, content, (size_t)length) < 0 ||
-        fsync(fd) < 0;
-    int close_result = close(fd);
-    if (write_result || close_result < 0) {
-        unlink(temporary);
-        return;
-    }
-    if (rename(temporary, path) < 0) {
-        unlink(temporary);
-    }
-}
-
-static int call_rpc_peer_fd(const char *peer_name,
-                            const char *endpoint,
-                            int fd,
-                            const char *request_id,
-                            const char *session_id,
-                            const char *method,
-                            const char *params,
-                            cube_rpc_response_t *response)
-{
-    cleanup_rpc_response(response);
-    response->code = CUBICLE_OK;
-    response->error_message[0] = '\0';
-
-    char request[8192];
-    if (cubicle_rpc_request(request, sizeof(request), request_id,
-                            session_id, method, params) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to encode request");
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-
-    uint32_t request_length = htonl((uint32_t)strlen(request));
-    if (write_all(fd, &request_length, sizeof(request_length)) < 0 ||
-        write_all(fd, request, strlen(request)) < 0) {
-        int saved_errno = errno;
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to write %s request", peer_name);
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-
-    uint32_t response_length_network = 0;
-    if (read_all(fd, &response_length_network,
-                 sizeof(response_length_network)) < 0) {
-        int saved_errno = errno;
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read %s response from %s: %s",
-                 peer_name, endpoint, strerror(saved_errno));
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-    uint32_t response_length = ntohl(response_length_network);
-    if (response_length == 0 || response_length > CUBE_MAX_FRAME) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid %s response length", peer_name);
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-
-    char *response_json = calloc((size_t)response_length + 1, 1);
-    if (response_json == NULL) {
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-    if (read_all(fd, response_json, response_length) < 0) {
-        int saved_errno = errno;
-        free(response_json);
-        errno = saved_errno;
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to read %s response from %s: %s",
-                 peer_name, endpoint, strerror(saved_errno));
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-
-    cubicle_rpc_response_envelope_t envelope;
-    if (cubicle_rpc_decode_response(&envelope, response_json,
-                                    request_id) < 0) {
-        free(response_json);
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid %s response", peer_name);
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-
-    if (!envelope.success) {
-        cubicle_error_t error;
-        if (cubicle_rpc_decode_error_value(envelope.error, &error) == 0) {
-            response->code = error.code;
-            snprintf(response->error_message, sizeof(response->error_message),
-                     "%s", error.message);
-        } else {
-            response->code = CUBICLE_ERR_PROTOCOL;
-            snprintf(response->error_message, sizeof(response->error_message),
-                     "invalid %s error response", peer_name);
-        }
-        cubicle_rpc_response_envelope_cleanup(&envelope);
-        free(response_json);
-        return -1;
-    }
-
-    response->result_json = yyjson_val_write(envelope.result, 0, NULL);
-    cubicle_rpc_response_envelope_cleanup(&envelope);
-    free(response_json);
-    if (response->result_json == NULL) {
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-    response->code = CUBICLE_OK;
-    return 0;
-}
-
-static int cube_parse_session_info(yyjson_val *object,
-                                   cubicle_session_info_t *session)
-{
-    uint64_t value = 0;
-    memset(session, 0, sizeof(*session));
-    if (json_string_field(object, "session_id", session->session_id,
-                          sizeof(session->session_id)) < 0 ||
-        json_string_field(object, "manager_id", session->manager_id,
-                          sizeof(session->manager_id)) < 0 ||
-        json_string_field(object, "client_key_id", session->client_key_id,
-                          sizeof(session->client_key_id)) < 0 ||
-        cubicle_json_get_u64(object, "protocol_major", &value) < 0) {
-        return -1;
-    }
-    session->protocol_major = (uint32_t)value;
-    if (cubicle_json_get_u64(object, "protocol_minor", &value) == 0) {
-        session->protocol_minor = (uint32_t)value;
-    }
-    (void)cubicle_json_get_u64(object, "negotiated_capabilities",
-                               &session->negotiated_capabilities);
-    (void)cubicle_json_get_u64(object, "authenticated_at_ms",
-                               &session->authenticated_at_ms);
-    (void)cubicle_json_get_u64(object, "expires_at_ms",
-                               &session->expires_at_ms);
-    return 0;
-}
-
-static int resume_manager_fd(const char *endpoint,
-                             int fd,
-                             char session_id[CUBICLE_ID_STRING_LENGTH],
-                             cube_rpc_response_t *response)
-{
-    cube_cached_session_t cached;
-    if (cube_load_cached_session(endpoint, &cached) < 0) {
-        return 1;
-    }
-
-    cubicle_auth_resume_t resume;
-    memset(&resume, 0, sizeof(resume));
-    snprintf(resume.manager_key_id, sizeof(resume.manager_key_id), "%s",
-             cached.session.manager_id);
-    snprintf(resume.session_id, sizeof(resume.session_id), "%s",
-             cached.session.session_id);
-    if (cubicle_auth_random_bytes(resume.client_nonce,
-                                  sizeof(resume.client_nonce)) < 0 ||
-        cubicle_auth_random_bytes(resume.connection_id,
-                                  sizeof(resume.connection_id)) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to create resume nonce");
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-    resume.manager_generation = cached.manager_generation;
-    resume.peer_uid = cached.peer_uid;
-    resume.peer_gid = cached.peer_gid;
-
-    unsigned char resume_bytes[512];
-    size_t resume_length = 0;
-    unsigned char authenticator[CUBICLE_AUTH_SECRET_BYTES];
-    char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
-    char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
-    char authenticator_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
-    if (cubicle_auth_encode_resume(&resume, resume_bytes,
-                                   sizeof(resume_bytes),
-                                   &resume_length) < 0 ||
-        cubicle_auth_hmac_sha256(cached.resume_secret,
-                                 sizeof(cached.resume_secret),
-                                 resume_bytes, resume_length,
-                                 authenticator) < 0 ||
-        cubicle_auth_hex_encode(resume.client_nonce,
-                                sizeof(resume.client_nonce),
-                                client_nonce_hex,
-                                sizeof(client_nonce_hex)) < 0 ||
-        cubicle_auth_hex_encode(resume.connection_id,
-                                sizeof(resume.connection_id),
-                                connection_id_hex,
-                                sizeof(connection_id_hex)) < 0 ||
-        cubicle_auth_hex_encode(authenticator, sizeof(authenticator),
-                                authenticator_hex,
-                                sizeof(authenticator_hex)) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to create resume authenticator");
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-
-    char params[512];
-    int length = snprintf(
-        params, sizeof(params),
-        "{\"session_id\":\"%s\",\"client_nonce\":\"%s\",\"connection_id\":\"%s\",\"authenticator\":\"%s\"}",
-        cached.session.session_id, client_nonce_hex, connection_id_hex,
-        authenticator_hex);
-    if (length < 0 || (size_t)length >= sizeof(params)) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "auth resume request is too large");
-        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
-        return -1;
-    }
-
-    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-resume", "",
-                         "auth.resume", params, response) < 0) {
-        cleanup_rpc_response(response);
-        memset(response, 0, sizeof(*response));
-        return 1;
-    }
-
-    cubicle_json_doc_t session_doc = {0};
-    cubicle_session_info_t resumed;
-    int parse_failed = cubicle_json_parse(&session_doc,
-                                          response->result_json) < 0;
-    if (!parse_failed) {
-        parse_failed = cube_parse_session_info(session_doc.root,
-                                               &resumed) < 0 ||
-                       strcmp(resumed.session_id,
-                              cached.session.session_id) != 0;
-    }
-    cubicle_json_cleanup(&session_doc);
-    cleanup_rpc_response(response);
-    memset(response, 0, sizeof(*response));
-    if (parse_failed) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid auth resume response");
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-
-    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "%s",
-             cached.session.session_id);
-    return 0;
-}
-
-static int authenticate_manager_fd(const char *endpoint,
-                                   int fd,
-                                   char session_id[CUBICLE_ID_STRING_LENGTH],
-                                   cube_rpc_response_t *response)
-{
-    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "local-session");
-    if (!endpoint_is_unix(endpoint)) {
-        return 0;
-    }
-
-    int resume_result = resume_manager_fd(endpoint, fd, session_id, response);
-    if (resume_result == 0) {
-        return 0;
-    }
-    if (resume_result < 0) {
-        return -1;
-    }
-
-    char key_dir[PATH_MAX];
-    char private_key_path[PATH_MAX];
-    cubicle_auth_identity_t identity;
-    if (cube_client_key_dir(key_dir) < 0 ||
-        cube_client_private_key_path(private_key_path, key_dir) < 0 ||
-        cubicle_auth_ensure_identity(key_dir, "client.key", "client.pub",
-                                     &identity) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to initialize client identity: %s",
-                 strerror(errno));
-        response->code = CUBICLE_ERR_IO;
-        return -1;
-    }
-
-    unsigned char client_nonce[CUBICLE_AUTH_NONCE_BYTES];
-    char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
-    if (cubicle_auth_random_bytes(client_nonce, sizeof(client_nonce)) < 0 ||
-        cubicle_auth_hex_encode(client_nonce, sizeof(client_nonce),
-                                client_nonce_hex,
-                                sizeof(client_nonce_hex)) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to create auth nonce");
-        response->code = CUBICLE_ERR_INTERNAL;
-        return -1;
-    }
-
-    char params[512];
-    int length = snprintf(
-        params, sizeof(params),
-        "{\"client_public_key\":\"%s\",\"client_nonce\":\"%s\"}",
-        identity.public_key_hex, client_nonce_hex);
-    if (length < 0 || (size_t)length >= sizeof(params)) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "auth challenge request is too large");
-        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
-        return -1;
-    }
-
-    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-1", "",
-                         "auth.challenge", params, response) < 0) {
-        if (response->code == CUBICLE_ERR_UNSUPPORTED) {
-            cleanup_rpc_response(response);
-            memset(response, 0, sizeof(*response));
-            snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "local-session");
-            return 0;
-        }
-        return -1;
-    }
-
-    cubicle_json_doc_t challenge_doc;
-    if (cubicle_json_parse(&challenge_doc, response->result_json) < 0) {
-        cleanup_rpc_response(response);
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid auth challenge response");
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-
-    char manager_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
-    char manager_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
-    char connection_id_hex[CUBICLE_AUTH_CONNECTION_ID_BYTES * 2 + 1];
-    cubicle_auth_transcript_t transcript;
-    memset(&transcript, 0, sizeof(transcript));
-    uint64_t value = 0;
-    int parse_failed =
-        json_string_field(challenge_doc.root, "manager_public_key",
-                          manager_public_key_hex,
-                          sizeof(manager_public_key_hex)) < 0 ||
-        json_string_field(challenge_doc.root, "manager_nonce",
-                          manager_nonce_hex,
-                          sizeof(manager_nonce_hex)) < 0 ||
-        json_string_field(challenge_doc.root, "connection_id",
-                          connection_id_hex,
-                          sizeof(connection_id_hex)) < 0 ||
-        cubicle_json_get_u64(challenge_doc.root, "protocol_major",
-                             &value) < 0;
-    if (!parse_failed) {
-        transcript.protocol_major = (uint32_t)value;
-        if (cubicle_json_get_u64(challenge_doc.root, "protocol_minor",
-                                 &value) == 0) {
-            transcript.protocol_minor = (uint32_t)value;
-        }
-        parse_failed =
-            cubicle_auth_hex_decode(manager_public_key_hex,
-                                    transcript.manager_public_key,
-                                    sizeof(transcript.manager_public_key)) < 0 ||
-            cubicle_auth_hex_decode(manager_nonce_hex,
-                                    transcript.manager_nonce,
-                                    sizeof(transcript.manager_nonce)) < 0 ||
-            cubicle_auth_hex_decode(connection_id_hex,
-                                    transcript.connection_id,
-                                    sizeof(transcript.connection_id)) < 0;
-    }
-    if (!parse_failed) {
-        memcpy(transcript.client_public_key, identity.public_key,
-               sizeof(transcript.client_public_key));
-        memcpy(transcript.client_nonce, client_nonce,
-               sizeof(transcript.client_nonce));
-        (void)cubicle_json_get_u64(challenge_doc.root, "capabilities",
-                                   &transcript.capabilities);
-        (void)cubicle_json_get_u64(challenge_doc.root, "manager_generation",
-                                   &transcript.manager_generation);
-        if (cubicle_json_get_u64(challenge_doc.root, "peer_uid",
-                                 &value) == 0) {
-            transcript.peer_uid = (uid_t)value;
-        }
-        if (cubicle_json_get_u64(challenge_doc.root, "peer_gid",
-                                 &value) == 0) {
-            transcript.peer_gid = (gid_t)value;
-        }
-    }
-    cubicle_json_cleanup(&challenge_doc);
-    cleanup_rpc_response(response);
-    if (parse_failed) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid auth challenge response");
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-
-    unsigned char transcript_bytes[512];
-    size_t transcript_length = 0;
-    unsigned char signature[CUBICLE_AUTH_SIGNATURE_BYTES];
-    char signature_hex[CUBICLE_AUTH_SIGNATURE_BYTES * 2 + 1];
-    if (cubicle_auth_encode_transcript(&transcript, transcript_bytes,
-                                       sizeof(transcript_bytes),
-                                       &transcript_length) < 0 ||
-        cubicle_auth_sign_file_key(private_key_path, transcript_bytes,
-                                   transcript_length, signature) < 0 ||
-        cubicle_auth_hex_encode(signature, sizeof(signature), signature_hex,
-                                sizeof(signature_hex)) < 0) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "failed to sign auth transcript");
-        response->code = CUBICLE_ERR_AUTHENTICATION_FAILED;
-        return -1;
-    }
-
-    length = snprintf(params, sizeof(params), "{\"signature\":\"%s\"}",
-                      signature_hex);
-    if (length < 0 || (size_t)length >= sizeof(params)) {
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "auth signature request is too large");
-        response->code = CUBICLE_ERR_RESOURCE_LIMIT;
-        return -1;
-    }
-    if (call_rpc_peer_fd("manager", endpoint, fd, "cube-auth-2", "",
-                         "auth.authenticate", params, response) < 0) {
-        return -1;
-    }
-
-    cubicle_json_doc_t session_doc = {0};
-    cubicle_session_info_t session;
-    char resume_secret_hex[CUBICLE_AUTH_SECRET_BYTES * 2 + 1];
-    unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
-    int session_parse_failed =
-        cubicle_json_parse(&session_doc, response->result_json) < 0;
-    if (!session_parse_failed) {
-        session_parse_failed =
-            cube_parse_session_info(session_doc.root, &session) < 0 ||
-            json_string_field(session_doc.root, "resume_secret",
-                              resume_secret_hex,
-                              sizeof(resume_secret_hex)) < 0 ||
-            cubicle_auth_hex_decode(resume_secret_hex, resume_secret,
-                                    sizeof(resume_secret)) < 0;
-    }
-    if (session_parse_failed) {
-        cubicle_json_cleanup(&session_doc);
-        cleanup_rpc_response(response);
-        snprintf(response->error_message, sizeof(response->error_message),
-                 "invalid auth session response");
-        response->code = CUBICLE_ERR_PROTOCOL;
-        return -1;
-    }
-    snprintf(session_id, CUBICLE_ID_STRING_LENGTH, "%s", session.session_id);
-    cube_save_cached_session(endpoint, &session, resume_secret,
-                             transcript.manager_generation,
-                             transcript.peer_uid,
-                             transcript.peer_gid);
-    cubicle_json_cleanup(&session_doc);
-    cleanup_rpc_response(response);
-    memset(response, 0, sizeof(*response));
-    return 0;
-}
-
-static int call_rpc_peer(const char *peer_name,
-                         const char *endpoint,
-                         const char *method,
-                         const char *params,
-                         int authenticate_manager,
-                         cube_rpc_response_t *response)
-{
-    memset(response, 0, sizeof(*response));
-
-    int fd = connect_rpc_endpoint(peer_name, endpoint, response);
-    if (fd < 0) {
-        return -1;
-    }
-
-    char session_id[CUBICLE_ID_STRING_LENGTH];
-    snprintf(session_id, sizeof(session_id), "local-session");
-    if (authenticate_manager &&
-        authenticate_manager_fd(endpoint, fd, session_id, response) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-        return -1;
-    }
-
-    int result = call_rpc_peer_fd(peer_name, endpoint, fd, "cube-1",
-                                  session_id, method, params, response);
-    int saved_errno = errno;
-    close(fd);
-    errno = saved_errno;
-    return result;
 }
 
 static int call_manager(const char *socket_path,
@@ -1368,15 +412,6 @@ static int call_manager(const char *socket_path,
     response->code = CUBICLE_OK;
     response->result_json = result_json;
     return 0;
-}
-
-static int call_controller(const char *socket_path,
-                           const char *method,
-                           const char *params,
-                           cube_rpc_response_t *response)
-{
-    return call_rpc_peer("controller", socket_path, method, params, 0,
-                         response);
 }
 
 static void cleanup_rpc_response(cube_rpc_response_t *response)
@@ -3391,258 +2426,33 @@ static int process_events(const char *manager_socket,
     } while (1);
 }
 
-static int unix_socket_path_from_uri(const char *uri,
-                                     char *path,
-                                     size_t path_size)
+static int attachment_write_all(cubicle_attachment_t *attachment,
+                                const char *buffer,
+                                size_t length)
 {
-    const char *prefix = "unix://";
-    size_t prefix_length = strlen(prefix);
-    if (strncmp(uri, prefix, prefix_length) != 0 ||
-        uri[prefix_length] == '\0') {
-        return -1;
-    }
-    int length = snprintf(path, path_size, "%s", uri + prefix_length);
-    return length < 0 || (size_t)length >= path_size ? -1 : 0;
-}
-
-static int channel_mask_from_string(const char *text, unsigned int *channels)
-{
-    unsigned int mask = 0;
-    if (strstr(text, "stdin") != NULL) {
-        mask |= CUBE_CHANNEL_STDIN;
-    }
-    if (strstr(text, "stdout") != NULL) {
-        mask |= CUBE_CHANNEL_STDOUT;
-    }
-    if (strstr(text, "stderr") != NULL) {
-        mask |= CUBE_CHANNEL_STDERR;
-    }
-    if (strstr(text, "tty") != NULL) {
-        mask |= CUBE_CHANNEL_TTY;
-    }
-    *channels = mask;
-    return mask == 0 ? -1 : 0;
-}
-
-static int request_attachment_grant(const char *manager_socket,
-                                    const char *process_id,
-                                    unsigned int channels,
-                                    const char *mode,
-                                    cube_attach_grant_t *grant)
-{
-    char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
-    if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
-                            process_id) < 0) {
-        fprintf(stderr, "cube: process id is too long\n");
-        return 2;
-    }
-
-    char params[1024];
-    snprintf(params, sizeof(params),
-             "{\"process_id\":\"%s\",\"channels\":%u,\"mode\":\"%s\",\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"rows\":0,\"cols\":0}",
-             escaped_process_id, channels, mode);
-    cube_rpc_response_t response;
-    if (call_manager(manager_socket, "attachment.request", params,
-                     &response) < 0) {
-        return print_rpc_error(&response);
-    }
-
-    cubicle_json_doc_t document;
-    if (cubicle_json_parse(&document, response.result_json) < 0) {
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid attachment grant response\n");
-        return 2;
-    }
-
-    yyjson_val *endpoint = yyjson_obj_get(document.root, "endpoint");
-    char granted_channels[128];
-    if (!yyjson_is_obj(endpoint) ||
-        json_string_field(endpoint, "uri", grant->endpoint_uri,
-                          sizeof(grant->endpoint_uri)) < 0 ||
-        json_string_field(document.root, "token", grant->token,
-                          sizeof(grant->token)) < 0 ||
-        json_string_field(document.root, "granted_channels",
-                          granted_channels, sizeof(granted_channels)) < 0 ||
-        channel_mask_from_string(granted_channels, &grant->channels) < 0) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid attachment grant response\n");
-        return 2;
-    }
-
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&response);
-    return 0;
-}
-
-static int controller_attach(const char *controller_socket,
-                             const cube_attach_grant_t *grant,
-                             unsigned int requested_channels,
-                             cube_attach_offsets_t *offsets)
-{
-    char escaped_token[CUBICLE_TOKEN_MAX * 2];
-    if (cubicle_json_escape(escaped_token, sizeof(escaped_token),
-                            grant->token) < 0) {
-        fprintf(stderr, "cube: attachment token is too long\n");
-        return 2;
-    }
-
-    char params[2048];
-    snprintf(params, sizeof(params),
-             "{\"token\":\"%s\",\"channels\":%u,\"mode\":\"%s\"}",
-             escaped_token, requested_channels,
-             (requested_channels & CUBE_CHANNEL_STDIN) != 0 ? "interactive"
-                                                            : "observer");
-    cube_rpc_response_t response;
-    if (call_controller(controller_socket, "controller.attach", params,
-                        &response) < 0) {
-        return print_rpc_error(&response);
-    }
-
-    cubicle_json_doc_t document;
-    if (cubicle_json_parse(&document, response.result_json) < 0) {
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller attach response\n");
-        return 2;
-    }
-    if (json_u64_field(document.root, "stdout_offset",
-                       &offsets->stdout_offset) < 0 ||
-        json_u64_field(document.root, "stderr_offset",
-                       &offsets->stderr_offset) < 0 ||
-        json_u64_field(document.root, "tty_offset",
-                       &offsets->tty_offset) < 0) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller attach response\n");
-        return 2;
-    }
-
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&response);
-    return 0;
-}
-
-static int controller_read_stream(const char *controller_socket,
-                                  const char *stream,
-                                  uint64_t *offset,
-                                  FILE *output,
-                                  int *end_of_stream)
-{
-    char params[512];
-    snprintf(params, sizeof(params),
-             "{\"stream\":\"%s\",\"offset\":%llu,\"maximum_length\":8192}",
-             stream, (unsigned long long)*offset);
-    cube_rpc_response_t response;
-    if (call_controller(controller_socket, "controller.read", params,
-                        &response) < 0) {
-        if (response.code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
-            response.code == CUBICLE_ERR_IO) {
-            return 1;
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = cubicle_attachment_write(attachment, buffer + written,
+                                                  length - written);
+        if (result < 0) {
+            const cubicle_error_t *error =
+                cubicle_attachment_last_error(attachment);
+            fprintf(stderr, "cube: %s\n",
+                    error != NULL && error->message[0] != '\0'
+                        ? error->message
+                        : "failed to write attachment input");
+            return 2;
         }
-        return print_rpc_error(&response);
-    }
-
-    cubicle_json_doc_t document;
-    if (cubicle_json_parse(&document, response.result_json) < 0) {
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller read response\n");
-        return 2;
-    }
-
-    yyjson_val *data = yyjson_obj_get(document.root, "data");
-    uint64_t next_offset = 0;
-    if (!yyjson_is_str(data) ||
-        json_u64_field(document.root, "next_offset", &next_offset) < 0 ||
-        json_bool_field(document.root, "end_of_stream", end_of_stream) < 0 ||
-        next_offset < *offset) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller read response\n");
-        return 2;
-    }
-    fputs(yyjson_get_str(data), output);
-    fflush(output);
-    *offset = next_offset;
-
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&response);
-    return 0;
-}
-
-static int controller_write_stdin(const char *controller_socket,
-                                  const char *data)
-{
-    char escaped_data[8192];
-    if (cubicle_json_escape(escaped_data, sizeof(escaped_data), data) < 0) {
-        fprintf(stderr, "cube: input chunk is too large\n");
-        return 2;
-    }
-    char params[16384];
-    snprintf(params, sizeof(params), "{\"data\":\"%s\"}", escaped_data);
-    cube_rpc_response_t response;
-    if (call_controller(controller_socket, "controller.write", params,
-                        &response) < 0) {
-        return print_rpc_error(&response);
-    }
-    cleanup_rpc_response(&response);
-    return 0;
-}
-
-static int controller_resize_tty(const char *controller_socket)
-{
-    if (!isatty(STDOUT_FILENO)) {
-        return 0;
-    }
-    struct winsize size;
-    memset(&size, 0, sizeof(size));
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0 ||
-        size.ws_row == 0 || size.ws_col == 0) {
-        return 0;
-    }
-    char params[128];
-    snprintf(params, sizeof(params), "{\"rows\":%u,\"columns\":%u}",
-             (unsigned int)size.ws_row, (unsigned int)size.ws_col);
-    cube_rpc_response_t response;
-    if (call_controller(controller_socket, "controller.resize", params,
-                        &response) < 0) {
-        return print_rpc_error(&response);
-    }
-    cleanup_rpc_response(&response);
-    return 0;
-}
-
-static int controller_is_completed(const char *controller_socket,
-                                   int *completed)
-{
-    cube_rpc_response_t response;
-    if (call_controller(controller_socket, "controller.status", "{}",
-                        &response) < 0) {
-        if (response.code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
-            response.code == CUBICLE_ERR_IO) {
-            return 1;
+        if (result == 0) {
+            fprintf(stderr, "cube: failed to write attachment input\n");
+            return 2;
         }
-        return print_rpc_error(&response);
+        written += (size_t)result;
     }
-    cubicle_json_doc_t document;
-    char state[32];
-    if (cubicle_json_parse(&document, response.result_json) < 0) {
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller status response\n");
-        return 2;
-    }
-    if (json_string_field(document.root, "state", state, sizeof(state)) < 0) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&response);
-        fprintf(stderr, "cube: invalid controller status response\n");
-        return 2;
-    }
-    *completed = strcmp(state, "completed") == 0 ? 1 : 0;
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&response);
     return 0;
 }
 
-static int process_input_chunk(const char *controller_socket,
+static int process_input_chunk(cubicle_attachment_t *attachment,
                                const char *buffer,
                                size_t length,
                                int *escape_pending,
@@ -3664,9 +2474,8 @@ static int process_input_chunk(const char *controller_socket,
             continue;
         }
         output[used++] = (char)byte;
-        if (used + 1 >= sizeof(output)) {
-            output[used] = '\0';
-            int result = controller_write_stdin(controller_socket, output);
+        if (used >= sizeof(output)) {
+            int result = attachment_write_all(attachment, output, used);
             if (result != 0) {
                 return result;
             }
@@ -3674,29 +2483,96 @@ static int process_input_chunk(const char *controller_socket,
         }
     }
     if (used > 0) {
-        output[used] = '\0';
-        return controller_write_stdin(controller_socket, output);
+        return attachment_write_all(attachment, output, used);
     }
     return 0;
 }
 
-static int attachment_loop(const char *controller_socket,
+static int attachment_read_stream(cubicle_attachment_t *attachment,
+                                  cubicle_stream_kind_t stream,
+                                  FILE *output,
+                                  int *end_of_stream)
+{
+    char buffer[8192];
+    bool end = false;
+    ssize_t nread = cubicle_attachment_read_stream(
+        attachment, stream, buffer, sizeof(buffer), &end);
+    if (nread < 0) {
+        const cubicle_error_t *error = cubicle_attachment_last_error(attachment);
+        if (error != NULL &&
+            (error->code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+             error->code == CUBICLE_ERR_IO)) {
+            return 1;
+        }
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment read failed");
+        return 2;
+    }
+    if (nread > 0) {
+        fwrite(buffer, 1, (size_t)nread, output);
+        fflush(output);
+    }
+    *end_of_stream = end ? 1 : 0;
+    return 0;
+}
+
+static int attachment_resize_tty(cubicle_attachment_t *attachment)
+{
+    if (!isatty(STDOUT_FILENO)) {
+        return 0;
+    }
+    struct winsize size;
+    memset(&size, 0, sizeof(size));
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0 ||
+        size.ws_row == 0 || size.ws_col == 0) {
+        return 0;
+    }
+    cubicle_error_code_t code = cubicle_attachment_resize(
+        attachment, (unsigned int)size.ws_row, (unsigned int)size.ws_col);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_attachment_last_error(attachment);
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment resize failed");
+        return 2;
+    }
+    return 0;
+}
+
+static int attachment_is_completed(cubicle_attachment_t *attachment,
+                                   int *completed)
+{
+    cubicle_attachment_status_t status;
+    memset(&status, 0, sizeof(status));
+    cubicle_error_code_t code = cubicle_attachment_status(attachment, &status);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_attachment_last_error(attachment);
+        if (error != NULL &&
+            (error->code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+             error->code == CUBICLE_ERR_IO)) {
+            return 1;
+        }
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment status failed");
+        return 2;
+    }
+    *completed = status.state == CUBICLE_PROCESS_COMPLETED ||
+                 status.state == CUBICLE_PROCESS_FAILED ||
+                 status.state == CUBICLE_PROCESS_LOST;
+    return 0;
+}
+
+static int attachment_loop(cubicle_attachment_t *attachment,
                            unsigned int channels,
                            const char *process_name,
                            const char *mode,
-                           int read_only,
-                           const cube_attach_offsets_t *offsets,
-                           uint64_t replay_bytes)
+                           int read_only)
 {
-    uint64_t stdout_offset = offsets->stdout_offset > replay_bytes
-                                 ? offsets->stdout_offset - replay_bytes
-                                 : 0;
-    uint64_t stderr_offset = offsets->stderr_offset > replay_bytes
-                                 ? offsets->stderr_offset - replay_bytes
-                                 : 0;
-    uint64_t tty_offset = offsets->tty_offset > replay_bytes
-                              ? offsets->tty_offset - replay_bytes
-                              : 0;
     int stdin_open = !read_only && (channels & CUBE_CHANNEL_STDIN) != 0;
     int stdin_is_tty = isatty(STDIN_FILENO);
     int detach_requested = 0;
@@ -3751,7 +2627,7 @@ static int attachment_loop(const char *controller_socket,
     fprintf(stderr, "Connected to [%s]. Detach with Ctrl-\\ d\n",
             process_name);
     int result = 0;
-    result = controller_resize_tty(controller_socket);
+    result = attachment_resize_tty(attachment);
 
     while (result == 0 && !detach_requested) {
         int completed = 0;
@@ -3761,24 +2637,24 @@ static int attachment_loop(const char *controller_socket,
 
         if (terminal_mode &&
             (channels & (CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT)) != 0) {
-            result = controller_read_stream(controller_socket, "tty",
-                                            &tty_offset, stdout, &tty_end);
+            result = attachment_read_stream(attachment, CUBICLE_STREAM_TTY,
+                                            stdout, &tty_end);
             if (result == 0 && strcmp(mode, "term") == 0 &&
                 (channels & CUBE_CHANNEL_STDERR) != 0) {
-                result = controller_read_stream(controller_socket, "stderr",
-                                                &stderr_offset, stderr,
-                                                &stderr_end);
+                result = attachment_read_stream(attachment,
+                                                CUBICLE_STREAM_STDERR,
+                                                stderr, &stderr_end);
             }
         } else {
             if ((channels & CUBE_CHANNEL_STDOUT) != 0) {
-                result = controller_read_stream(controller_socket, "stdout",
-                                                &stdout_offset, stdout,
-                                                &stdout_end);
+                result = attachment_read_stream(attachment,
+                                                CUBICLE_STREAM_STDOUT,
+                                                stdout, &stdout_end);
             }
             if (result == 0 && (channels & CUBE_CHANNEL_STDERR) != 0) {
-                result = controller_read_stream(controller_socket, "stderr",
-                                                &stderr_offset, stderr,
-                                                &stderr_end);
+                result = attachment_read_stream(attachment,
+                                                CUBICLE_STREAM_STDERR,
+                                                stderr, &stderr_end);
             }
         }
         if (result == 1 && (!stdin_open || terminal_mode)) {
@@ -3793,8 +2669,7 @@ static int attachment_loop(const char *controller_socket,
             break;
         }
 
-        int status_result = controller_is_completed(controller_socket,
-                                                   &completed);
+        int status_result = attachment_is_completed(attachment, &completed);
         if (status_result == 1 &&
             ((stdout_end && stderr_end && tty_end && !stdin_open) ||
              terminal_mode)) {
@@ -3848,8 +2723,7 @@ static int attachment_loop(const char *controller_socket,
             if (nread == 0) {
                 stdin_open = 0;
             } else {
-                buffer[nread] = '\0';
-                result = process_input_chunk(controller_socket, buffer,
+                result = process_input_chunk(attachment, buffer,
                                              (size_t)nread, &escape_pending,
                                              &detach_requested);
                 if (!stdin_is_tty) {
@@ -3889,38 +2763,60 @@ static int attach_to_process_id(const char *manager_socket,
         requested_channels |= CUBE_CHANNEL_STDIN;
     }
 
-    cube_attach_grant_t grant;
+    cubicle_client_t *client = NULL;
+    cubicle_error_code_t code = cubicle_client_connect_uri(manager_socket, NULL,
+                                                           &client);
+    if (code != CUBICLE_OK) {
+        fprintf(stderr, "cube: failed to connect to manager\n");
+        return 2;
+    }
+
+    cubicle_attachment_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.process_id = process_id;
+    request.channels = (cubicle_channel_mask_t)requested_channels;
+    request.mode = read_only ? CUBICLE_ATTACHMENT_OBSERVER
+                             : CUBICLE_ATTACHMENT_INTERACTIVE;
+
+    cubicle_attachment_grant_t grant;
     memset(&grant, 0, sizeof(grant));
-    int grant_result = request_attachment_grant(
-        manager_socket, process_id, requested_channels,
-        read_only ? "observer" : "interactive", &grant);
-    if (grant_result != 0) {
-        return grant_result;
-    }
-
-    char controller_socket[PATH_MAX];
-    if (unix_socket_path_from_uri(grant.endpoint_uri, controller_socket,
-                                  sizeof(controller_socket)) < 0) {
-        fprintf(stderr, "cube: unsupported attachment endpoint '%s'\n",
-                grant.endpoint_uri);
+    code = cubicle_attachment_request(client, &request, &grant);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_client_last_error(client);
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment request failed");
+        cubicle_client_disconnect(client);
         return 2;
     }
-    unsigned int accepted_channels = requested_channels & grant.channels;
+    cubicle_client_disconnect(client);
+
+    cubicle_attachment_t *attachment = NULL;
+    cubicle_attachment_options_t attachment_options;
+    memset(&attachment_options, 0, sizeof(attachment_options));
+    code = cubicle_attachment_connect(&grant, &attachment_options,
+                                      &attachment);
+    if (code != CUBICLE_OK) {
+        fprintf(stderr, "cube: failed to attach to process\n");
+        return 2;
+    }
+
+    unsigned int accepted_channels =
+        (unsigned int)cubicle_attachment_channels(attachment);
     if (accepted_channels == 0) {
-        fprintf(stderr, "cube: attachment grant did not include requested channels\n");
+        fprintf(stderr,
+                "cube: attachment grant did not include requested channels\n");
+        cubicle_attachment_disconnect(attachment);
         return 2;
     }
 
-    cube_attach_offsets_t offsets;
-    memset(&offsets, 0, sizeof(offsets));
-    int attach_result = controller_attach(controller_socket, &grant,
-                                          accepted_channels, &offsets);
-    if (attach_result != 0) {
-        return attach_result;
-    }
-
-    return attachment_loop(controller_socket, accepted_channels, process_name,
-                           mode, read_only, &offsets, replay_bytes);
+    cubicle_attachment_replay(attachment, replay_bytes);
+    int result = attachment_loop(attachment, accepted_channels, process_name,
+                                 mode, read_only);
+    (void)cubicle_attachment_detach(attachment);
+    cubicle_attachment_disconnect(attachment);
+    return result;
 }
 
 static int process_connect(const char *manager_socket,

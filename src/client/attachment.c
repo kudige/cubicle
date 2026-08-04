@@ -220,6 +220,29 @@ cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t
     return CUBICLE_OK;
 }
 
+cubicle_channel_mask_t cubicle_attachment_channels(
+    const cubicle_attachment_t *attachment)
+{
+    return attachment == NULL ? CUBICLE_CHANNEL_NONE : attachment->channels;
+}
+
+void cubicle_attachment_replay(cubicle_attachment_t *attachment,
+                               uint64_t replay_bytes)
+{
+    if (attachment == NULL) {
+        return;
+    }
+    attachment->stdout_offset = attachment->stdout_offset > replay_bytes
+                                    ? attachment->stdout_offset - replay_bytes
+                                    : 0;
+    attachment->stderr_offset = attachment->stderr_offset > replay_bytes
+                                    ? attachment->stderr_offset - replay_bytes
+                                    : 0;
+    attachment->tty_offset = attachment->tty_offset > replay_bytes
+                                 ? attachment->tty_offset - replay_bytes
+                                 : 0;
+}
+
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length)
 {
     if (attachment == NULL) {
