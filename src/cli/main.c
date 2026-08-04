@@ -5,6 +5,7 @@
 #include "../common/auth_protocol.h"
 #include "../common/json.h"
 #include "../common/rpc_internal.h"
+#include "../cubeui/cubeui.h"
 
 #include "cubicle/auth.h"
 #include "cubicle/config.h"
@@ -329,27 +330,6 @@ static int command_requires_manager(const char *command)
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0 ||
            strcmp(command, "defaults") == 0;
-}
-
-static const char *resolve_manager_endpoint(const cube_options_t *options,
-                                            const cubicle_config_t *config,
-                                            char *configured_endpoint,
-                                            size_t configured_endpoint_size)
-{
-    if (options->manager_socket != NULL &&
-        options->manager_socket[0] != '\0') {
-        return options->manager_socket;
-    }
-    const char *environment = getenv("CUBICLE_MANAGER_SOCKET");
-    if (environment != NULL && environment[0] != '\0') {
-        return environment;
-    }
-    int result = snprintf(configured_endpoint, configured_endpoint_size, "%s",
-                          config->client_manager_uri);
-    if (result < 0 || (size_t)result >= configured_endpoint_size) {
-        return NULL;
-    }
-    return configured_endpoint;
 }
 
 static int command_config(const cubicle_config_t *config,
@@ -1433,96 +1413,6 @@ static int json_u64_field(yyjson_val *object,
     return 0;
 }
 
-static int selected_workspace_path(char path[PATH_MAX])
-{
-    const char *state_home = getenv("XDG_STATE_HOME");
-    if (state_home != NULL && state_home[0] != '\0') {
-        int length = snprintf(path, PATH_MAX,
-                              "%s/cubicle/current-workspace", state_home);
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-
-    const char *home = getenv("HOME");
-    if (home == NULL || home[0] == '\0') {
-        int length = snprintf(path, PATH_MAX, ".cubicle/current-workspace");
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-    int length = snprintf(path, PATH_MAX,
-                          "%s/.local/state/cubicle/current-workspace", home);
-    return length < 0 || length >= PATH_MAX ? -1 : 0;
-}
-
-static int ensure_parent_dir(const char *path)
-{
-    char parent[PATH_MAX];
-    int length = snprintf(parent, sizeof(parent), "%s", path);
-    if (length < 0 || (size_t)length >= sizeof(parent)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    char *slash = strrchr(parent, '/');
-    if (slash == NULL) {
-        return 0;
-    }
-    *slash = '\0';
-    return cubicle_mkdir_p(parent);
-}
-
-static int store_selected_workspace(const char *workspace_name)
-{
-    char path[PATH_MAX];
-    if (selected_workspace_path(path) < 0 || ensure_parent_dir(path) < 0) {
-        return -1;
-    }
-
-    char line[CUBICLE_NAME_MAX + 2];
-    int length = snprintf(line, sizeof(line), "%s\n", workspace_name);
-    if (length < 0 || (size_t)length >= sizeof(line)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) {
-        return -1;
-    }
-    int result = cubicle_write_all(fd, line, strlen(line));
-    close(fd);
-    return result;
-}
-
-static int read_selected_workspace(char *buffer, size_t buffer_size)
-{
-    char path[PATH_MAX];
-    if (selected_workspace_path(path) < 0) {
-        return -1;
-    }
-    FILE *file = fopen(path, "r");
-    if (file == NULL) {
-        return -1;
-    }
-    if (fgets(buffer, (int)buffer_size, file) == NULL) {
-        fclose(file);
-        return -1;
-    }
-    fclose(file);
-    buffer[strcspn(buffer, "\n")] = '\0';
-    return buffer[0] == '\0' ? -1 : 0;
-}
-
-static void clear_selected_workspace_if_matches(const char *workspace)
-{
-    char current[CUBICLE_NAME_MAX];
-    char path[PATH_MAX];
-    if (workspace == NULL ||
-        read_selected_workspace(current, sizeof(current)) < 0 ||
-        strcmp(current, workspace) != 0 ||
-        selected_workspace_path(path) < 0) {
-        return;
-    }
-    (void)unlink(path);
-}
-
 static int valid_name(const char *name)
 {
     return name != NULL && name[0] != '\0' &&
@@ -1601,7 +1491,7 @@ static int workspace_create_or_select(const char *manager_socket,
         cubicle_json_builder_cleanup(&create_params);
     }
 
-    if (store_selected_workspace(name) < 0) {
+    if (cubeui_store_selected_workspace(name) < 0) {
         cleanup_rpc_response(&response);
         fprintf(stderr, "cube: failed to persist selected workspace: %s\n",
                 strerror(errno));
@@ -1669,7 +1559,7 @@ static int workspace_list(const char *manager_socket,
 static int workspace_show_current(const cube_options_t *options)
 {
     char workspace[CUBICLE_NAME_MAX];
-    if (read_selected_workspace(workspace, sizeof(workspace)) < 0) {
+    if (cubeui_read_selected_workspace(workspace, sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -1743,7 +1633,7 @@ static int resolve_workspace_selection(const cube_options_t *options,
     if (from_selected_workspace != NULL) {
         *from_selected_workspace = 1;
     }
-    return read_selected_workspace(workspace, workspace_size);
+    return cubeui_read_selected_workspace(workspace, workspace_size);
 }
 
 static int resolve_workspace_argument(const cube_options_t *options,
@@ -1759,7 +1649,7 @@ static int print_workspace_rpc_error(const cube_rpc_response_t *response,
                                      int from_selected_workspace)
 {
     if (response->code == CUBICLE_ERR_NOT_FOUND && from_selected_workspace) {
-        clear_selected_workspace_if_matches(workspace);
+        cubeui_clear_selected_workspace_if_matches(workspace);
         fprintf(stderr,
                 "cube: selected workspace '%s' was not found by the manager\n",
                 workspace);
@@ -4371,8 +4261,9 @@ int main(int argc, char **argv)
     }
 
     char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
-    const char *manager_endpoint = resolve_manager_endpoint(
-        &options, &config, configured_endpoint, sizeof(configured_endpoint));
+    const char *manager_endpoint = cubeui_resolve_manager_endpoint(
+        options.manager_socket, &config, configured_endpoint,
+        sizeof(configured_endpoint));
     if (manager_endpoint == NULL) {
         fprintf(stderr, "cube: manager endpoint is not configured\n");
         fprintf(stderr,

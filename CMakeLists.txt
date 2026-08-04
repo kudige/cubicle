@@ -55,6 +55,41 @@ target_compile_options(cubicle_common PRIVATE
     -Wpedantic
 )
 
+add_library(cubicle_client
+    src/client/attachment.c
+    src/client/auth.c
+    src/client/client.c
+    src/client/decode.c
+    src/client/events.c
+    src/client/process.c
+    src/client/rpc_client.c
+    src/client/transport_tcp.c
+    src/client/transport_unix.c
+    src/client/workspace.c
+)
+
+target_link_libraries(cubicle_client PUBLIC cubicle_common)
+target_include_directories(cubicle_client PRIVATE third_party/yyjson)
+
+target_compile_options(cubicle_client PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_library(cubeui
+    src/cubeui/endpoint.c
+    src/cubeui/local_state.c
+)
+
+target_link_libraries(cubeui PUBLIC cubicle_common)
+
+target_compile_options(cubeui PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 add_executable(cubicle-manager
     src/manager/main.c
     src/manager/registry.c
@@ -90,7 +125,7 @@ add_executable(cube
     src/cli/main.c
 )
 
-target_link_libraries(cube PRIVATE cubicle_common)
+target_link_libraries(cube PRIVATE cubicle_common cubeui)
 target_include_directories(cube PRIVATE third_party/yyjson)
 
 target_compile_options(cube PRIVATE
@@ -100,20 +135,10 @@ target_compile_options(cube PRIVATE
 )
 
 add_executable(desk
-    src/client/attachment.c
-    src/client/auth.c
-    src/client/client.c
-    src/client/decode.c
-    src/client/events.c
-    src/client/process.c
-    src/client/rpc_client.c
-    src/client/transport_tcp.c
-    src/client/transport_unix.c
-    src/client/workspace.c
     src/desk/main.c
 )
 
-target_link_libraries(desk PRIVATE cubicle_common)
+target_link_libraries(desk PRIVATE cubicle_client cubeui)
 target_include_directories(desk PRIVATE third_party/yyjson)
 
 target_compile_options(desk PRIVATE
@@ -123,20 +148,10 @@ target_compile_options(desk PRIVATE
 )
 
 add_executable(testdesk
-    src/client/attachment.c
-    src/client/auth.c
-    src/client/client.c
-    src/client/decode.c
-    src/client/events.c
-    src/client/process.c
-    src/client/rpc_client.c
-    src/client/transport_tcp.c
-    src/client/transport_unix.c
-    src/client/workspace.c
     tests/testdesk.c
 )
 
-target_link_libraries(testdesk PRIVATE cubicle_common)
+target_link_libraries(testdesk PRIVATE cubicle_client)
 target_include_directories(testdesk PRIVATE third_party/yyjson)
 
 target_compile_options(testdesk PRIVATE

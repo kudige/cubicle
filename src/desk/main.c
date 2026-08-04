@@ -25,6 +25,7 @@
 #include "cubicle/types.h"
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
+#include "../cubeui/cubeui.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX CUBICLE_PATH_MAX
@@ -1178,80 +1179,11 @@ static int DESK_UNUSED pane_layout_load_startup(desk_pane_layout_t *panes,
     return pane_layout_load_file(panes, path);
 }
 
-static int selected_workspace_path(char path[PATH_MAX])
-{
-    const char *state_home = getenv("XDG_STATE_HOME");
-    if (state_home != NULL && state_home[0] != '\0') {
-        int length = snprintf(path, PATH_MAX,
-                              "%s/cubicle/current-workspace", state_home);
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-
-    const char *home = getenv("HOME");
-    if (home == NULL || home[0] == '\0') {
-        int length = snprintf(path, PATH_MAX, ".cubicle/current-workspace");
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-    int length = snprintf(path, PATH_MAX,
-                          "%s/.local/state/cubicle/current-workspace", home);
-    return length < 0 || length >= PATH_MAX ? -1 : 0;
-}
-
-static int cubicle_state_dir(char path[PATH_MAX])
-{
-    const char *state_home = getenv("XDG_STATE_HOME");
-    if (state_home != NULL && state_home[0] != '\0') {
-        int length = snprintf(path, PATH_MAX, "%s/cubicle", state_home);
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-
-    const char *home = getenv("HOME");
-    if (home == NULL || home[0] == '\0') {
-        int length = snprintf(path, PATH_MAX, ".cubicle");
-        return length < 0 || length >= PATH_MAX ? -1 : 0;
-    }
-    int length = snprintf(path, PATH_MAX, "%s/.local/state/cubicle", home);
-    return length < 0 || length >= PATH_MAX ? -1 : 0;
-}
-
-static int read_selected_workspace(char *buffer, size_t buffer_size)
-{
-    char path[PATH_MAX];
-    if (selected_workspace_path(path) < 0) {
-        return -1;
-    }
-
-    FILE *file = fopen(path, "r");
-    if (file == NULL) {
-        return -1;
-    }
-    if (fgets(buffer, (int)buffer_size, file) == NULL) {
-        fclose(file);
-        return -1;
-    }
-    fclose(file);
-    buffer[strcspn(buffer, "\n")] = '\0';
-    return buffer[0] == '\0' ? -1 : 0;
-}
-
-static void clear_selected_workspace_if_matches(const char *workspace)
-{
-    char current[CUBICLE_NAME_MAX];
-    char path[PATH_MAX];
-    if (workspace == NULL ||
-        read_selected_workspace(current, sizeof(current)) < 0 ||
-        strcmp(current, workspace) != 0 ||
-        selected_workspace_path(path) < 0) {
-        return;
-    }
-    (void)unlink(path);
-}
-
 static int desk_layout_path_for_workspace(const char *workspace_id,
                                           char path[PATH_MAX])
 {
     char state_dir[PATH_MAX];
-    if (cubicle_state_dir(state_dir) < 0) {
+    if (cubeui_state_dir(state_dir) < 0) {
         return -1;
     }
     char layout_dir[PATH_MAX];
@@ -1266,23 +1198,6 @@ static int desk_layout_path_for_workspace(const char *workspace_id,
     return length < 0 || length >= PATH_MAX ? -1 : 0;
 }
 
-static int endpoint_from_uri(cubicle_endpoint_t *endpoint,
-                             const char *uri)
-{
-    memset(endpoint, 0, sizeof(*endpoint));
-    if (uri == NULL || uri[0] == '\0') {
-        errno = EINVAL;
-        return -1;
-    }
-    if (uri[0] == '/') {
-        int length = snprintf(endpoint->uri, sizeof(endpoint->uri),
-                              "unix://%s", uri);
-        return length < 0 || (size_t)length >= sizeof(endpoint->uri) ? -1 : 0;
-    }
-    int length = snprintf(endpoint->uri, sizeof(endpoint->uri), "%s", uri);
-    return length < 0 || (size_t)length >= sizeof(endpoint->uri) ? -1 : 0;
-}
-
 static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
                                            char *error,
                                            size_t error_size)
@@ -1294,13 +1209,12 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
 
-    const char *manager_uri = getenv("CUBICLE_MANAGER_SOCKET");
-    if (manager_uri == NULL || manager_uri[0] == '\0') {
-        manager_uri = config.client_manager_uri;
-    }
+    char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
+    const char *manager_uri = cubeui_resolve_manager_endpoint(
+        NULL, &config, configured_endpoint, sizeof(configured_endpoint));
 
     cubicle_endpoint_t endpoint;
-    if (endpoint_from_uri(&endpoint, manager_uri) < 0) {
+    if (cubeui_endpoint_from_uri(&endpoint, manager_uri) < 0) {
         snprintf(error, error_size, "manager endpoint is invalid");
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
@@ -1339,8 +1253,8 @@ static cubicle_error_code_t DESK_UNUSED resolve_attachment_target(
     size_t error_size)
 {
     memset(target, 0, sizeof(*target));
-    if (read_selected_workspace(target->workspace,
-                                sizeof(target->workspace)) < 0) {
+    if (cubeui_read_selected_workspace(target->workspace,
+                                       sizeof(target->workspace)) < 0) {
         snprintf(error, error_size, "no workspace selected");
         return CUBICLE_ERR_NOT_FOUND;
     }
@@ -2510,7 +2424,8 @@ static int resolve_workspace(desk_session_t *session,
     if (workspace_arg != NULL && workspace_arg[0] != '\0') {
         snprintf(workspace_name, sizeof(workspace_name), "%s", workspace_arg);
     } else {
-        if (read_selected_workspace(workspace_name, sizeof(workspace_name)) < 0) {
+        if (cubeui_read_selected_workspace(workspace_name,
+                                           sizeof(workspace_name)) < 0) {
             snprintf(error, error_size, "no workspace selected");
             return 1;
         }
@@ -2522,7 +2437,7 @@ static int resolve_workspace(desk_session_t *session,
     if (code != CUBICLE_OK) {
         const cubicle_error_t *last = cubicle_client_last_error(session->manager);
         if (code == CUBICLE_ERR_NOT_FOUND && from_selected) {
-            clear_selected_workspace_if_matches(workspace_name);
+            cubeui_clear_selected_workspace_if_matches(workspace_name);
             snprintf(error, error_size,
                      "selected workspace '%s' was not found by the manager\n"
                      "hint: cleared the stale selection; run `cube workspace list` and then `cube workspace NAME` to select an existing workspace",
