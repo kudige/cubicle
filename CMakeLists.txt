@@ -126,7 +126,7 @@ add_executable(cube
     src/cli/main.c
 )
 
-target_link_libraries(cube PRIVATE cubicle_common cubeui)
+target_link_libraries(cube PRIVATE cubicle_client cubeui)
 target_include_directories(cube PRIVATE third_party/yyjson)
 
 target_compile_options(cube PRIVATE

@@ -695,6 +695,40 @@ cubicle_error_code_t cubicle_client_session_info(const cubicle_client_t *client,
     return CUBICLE_OK;
 }
 
+cubicle_error_code_t cubicle_client_call_json(
+    cubicle_client_t *client,
+    const char *method,
+    const char *params_json,
+    char **result_json_out)
+{
+    if (client == NULL || method == NULL || result_json_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, method, params_json,
+                                           &response);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    const char *result = result_object(client, response);
+    if (result == NULL) {
+        free(response);
+        return CUBICLE_ERR_PROTOCOL;
+    }
+    size_t length = strlen(result);
+    char *copy = malloc(length + 1);
+    if (copy == NULL) {
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
+                                "failed to allocate result JSON");
+    }
+    memcpy(copy, result, length + 1);
+    free(response);
+    *result_json_out = copy;
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_manager_ping(cubicle_client_t *client,
                                           cubicle_manager_ping_result_t *result_out)
 {

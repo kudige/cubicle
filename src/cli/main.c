@@ -8,6 +8,7 @@
 #include "../cubeui/cubeui.h"
 
 #include "cubicle/auth.h"
+#include "cubicle/client.h"
 #include "cubicle/config.h"
 #include "cubicle/rpc.h"
 #include "cubicle/util.h"
@@ -1338,7 +1339,35 @@ static int call_manager(const char *socket_path,
                         const char *params,
                         cube_rpc_response_t *response)
 {
-    return call_rpc_peer("manager", socket_path, method, params, 1, response);
+    memset(response, 0, sizeof(*response));
+
+    cubicle_client_t *client = NULL;
+    cubicle_error_code_t code = cubicle_client_connect_uri(socket_path, NULL,
+                                                           &client);
+    if (code != CUBICLE_OK) {
+        response->code = code;
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "failed to connect to manager");
+        return -1;
+    }
+
+    char *result_json = NULL;
+    code = cubicle_client_call_json(client, method, params, &result_json);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_client_last_error(client);
+        response->code = code;
+        snprintf(response->error_message, sizeof(response->error_message),
+                 "%s", error != NULL && error->message[0] != '\0'
+                           ? error->message
+                           : "request failed");
+        cubicle_client_disconnect(client);
+        return -1;
+    }
+
+    cubicle_client_disconnect(client);
+    response->code = CUBICLE_OK;
+    response->result_json = result_json;
+    return 0;
 }
 
 static int call_controller(const char *socket_path,

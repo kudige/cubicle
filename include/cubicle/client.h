@@ -38,6 +38,12 @@ cubicle_error_code_t cubicle_client_session_info(
     const cubicle_client_t *client,
     cubicle_session_info_t *session_out);
 
+cubicle_error_code_t cubicle_client_call_json(
+    cubicle_client_t *client,
+    const char *method,
+    const char *params_json,
+    char **result_json_out);
+
 #ifdef __cplusplus
 }
 #endif
