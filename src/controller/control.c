@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 int make_control_socket_path(char path[PATH_MAX],
@@ -161,6 +162,15 @@ static int enqueue_response(control_client_t *client, const char *buffer,
     return 0;
 }
 
+static uint64_t control_now_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_nsec / 1000000ULL;
+}
+
 static int enqueue_error_response(control_client_t *client, const char *message)
 {
     char response[256];
@@ -171,6 +181,7 @@ static int enqueue_error_response(control_client_t *client, const char *message)
     }
 
     client->kind = CONTROL_CLIENT_RESPONDING;
+    client->close_after_response = 1;
     return enqueue_response(client, response, (size_t)length);
 }
 
@@ -185,6 +196,7 @@ static int enqueue_api_frame(control_client_t *client, const char *json)
 
     uint32_t length_network = htonl((uint32_t)length);
     client->kind = CONTROL_CLIENT_RESPONDING;
+    client->close_after_response = 0;
     return enqueue_response(client, (const char *)&length_network,
                             sizeof(length_network)) == 0 &&
                    enqueue_response(client, json, length) == 0
@@ -238,6 +250,8 @@ void initialize_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLI
         clients[i].response_offset = 0;
         clients[i].response_capacity = 0;
         clients[i].response = NULL;
+        clients[i].close_after_response = 0;
+        clients[i].last_activity_ms = 0;
     }
 }
 
@@ -264,6 +278,8 @@ void close_control_client(control_client_t *client, controller_state_t *state)
     client->response_capacity = 0;
     free(client->response);
     client->response = NULL;
+    client->close_after_response = 0;
+    client->last_activity_ms = 0;
 }
 
 void close_all_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
@@ -1401,7 +1417,18 @@ int flush_control_client_response(control_client_t *client,
     client->response_offset = 0;
 
     if (client->kind == CONTROL_CLIENT_RESPONDING) {
-        close_control_client(client, state);
+        if (client->framed_request && !client->close_after_response) {
+            client->kind = CONTROL_CLIENT_READING;
+            client->request_length = 0;
+            client->framed_length = 0;
+            client->response_length = 0;
+            client->response_offset = 0;
+            client->close_after_response = 0;
+            client->request[0] = '\0';
+            client->last_activity_ms = control_now_ms();
+        } else {
+            close_control_client(client, state);
+        }
     } else if (client->kind == CONTROL_CLIENT_ATTACHING_STDIN) {
         client->kind = CONTROL_CLIENT_ATTACHED_STDIN;
         append_event(state, "type=client_attached stream=stdin");
@@ -1459,8 +1486,28 @@ int accept_control_clients(int listen_fd,
         clients[slot].framed_length = 0;
         clients[slot].response_length = 0;
         clients[slot].response_offset = 0;
+        clients[slot].close_after_response = 0;
+        clients[slot].last_activity_ms = control_now_ms();
         clients[slot].request[0] = '\0';
         (void)state;
+    }
+}
+
+void reap_idle_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
+                               controller_state_t *state)
+{
+    uint64_t now = control_now_ms();
+    if (now == 0) {
+        return;
+    }
+    for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
+        if (clients[i].kind == CONTROL_CLIENT_EMPTY ||
+            clients[i].last_activity_ms == 0 ||
+            now - clients[i].last_activity_ms <=
+                CUBICLE_CONTROL_CLIENT_IDLE_TIMEOUT_MS) {
+            continue;
+        }
+        close_control_client(&clients[i], state);
     }
 }
 
@@ -1505,12 +1552,12 @@ int read_control_client_request(control_client_t *client,
             client->request[client->request_length] = '\0';
             return finish_control_request(client, state, child_pid,
                                           child_stdin_fd, resize_fd,
-                                          stderr_resize_fd,
-                                          terminal_size,
-                                          terminal_model,
-                                          process_completed,
+                                          stderr_resize_fd, terminal_size,
+                                          terminal_model, process_completed,
                                           child_result);
         }
+
+        client->last_activity_ms = control_now_ms();
 
         for (ssize_t i = 0; i < result; ++i) {
             if (client->request_length == 0 && buffer[i] == '\0') {

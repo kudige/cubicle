@@ -48,6 +48,55 @@ if [ "$(json_field "$status_response" result.state)" != "running" ]; then
     exit 1
 fi
 
+python3 - "$socket_path" <<'PY'
+import json
+import socket
+import struct
+import sys
+
+socket_path = sys.argv[1]
+
+
+def read_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise RuntimeError("short persistent controller response")
+        data += chunk
+    return data
+
+
+def call(sock, request_id, method, params):
+    payload = json.dumps({
+        "protocol_major": 0,
+        "protocol_minor": 1,
+        "request_id": request_id,
+        "session_id": "local-session",
+        "method": method,
+        "params": params,
+    }, separators=(",", ":")).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(payload)) + payload)
+    header = read_exact(sock, 4)
+    length = struct.unpack("!I", header)[0]
+    return json.loads(read_exact(sock, length).decode("utf-8"))
+
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(socket_path)
+    first = call(sock, "persist-1", "controller.status", {})
+    second = call(sock, "persist-2", "controller.read", {
+        "stream": "stdout",
+        "offset": 0,
+        "maximum_length": 6,
+    })
+
+if not first.get("success") or first.get("result", {}).get("state") != "running":
+    raise SystemExit(f"persistent controller.status failed: {first}")
+if not second.get("success") or "data" not in second.get("result", {}):
+    raise SystemExit(f"persistent controller.read failed: {second}")
+PY
+
 unsupported_response=$(api --allow-error call controller.no_such_method)
 if [ "$(json_field "$unsupported_response" success)" != "False" ]; then
     echo "unsupported controller method unexpectedly succeeded: $unsupported_response" >&2

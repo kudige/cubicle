@@ -473,8 +473,10 @@ static int stream_event_loop(stream_pipe_t pipes[2],
         }
 
         if (poll_result == 0) {
+            reap_idle_control_clients(clients, state);
             continue;
         }
+        reap_idle_control_clients(clients, state);
 
         if (control_index != (nfds_t)-1 &&
             (poll_fds[control_index].revents & POLLIN) != 0) {
@@ -756,8 +758,10 @@ static int completed_retention_loop(controller_state_t *state,
         }
 
         if (poll_result == 0) {
+            reap_idle_control_clients(clients, state);
             continue;
         }
+        reap_idle_control_clients(clients, state);
 
         if ((poll_fds[control_index].revents & POLLIN) != 0 &&
             accept_control_clients(control_fd, clients, state) < 0) {

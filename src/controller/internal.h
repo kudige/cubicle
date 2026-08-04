@@ -8,6 +8,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #ifndef PATH_MAX
@@ -19,6 +20,7 @@
 #define CUBICLE_LINE_REQUEST_MAX 256
 #define CUBICLE_REQUEST_MAX 8192
 #define CUBICLE_RESPONSE_MAX (4U * 1024U * 1024U)
+#define CUBICLE_CONTROL_CLIENT_IDLE_TIMEOUT_MS 120000ULL
 
 typedef enum control_client_kind {
     CONTROL_CLIENT_EMPTY = 0,
@@ -75,6 +77,8 @@ typedef struct control_client {
     size_t response_capacity;
     size_t response_length;
     size_t response_offset;
+    int close_after_response;
+    uint64_t last_activity_ms;
 } control_client_t;
 
 void close_if_open(int *fd);
@@ -123,6 +127,8 @@ int read_control_client_request(control_client_t *client,
                                 int child_result);
 int flush_control_client_response(control_client_t *client,
                                   controller_state_t *state);
+void reap_idle_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
+                               controller_state_t *state);
 void broadcast_attached_output(control_client_t clients[CUBICLE_MAX_CONTROL_CLIENTS],
                                controller_state_t *state,
                                const char *stream,
