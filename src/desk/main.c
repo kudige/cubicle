@@ -52,6 +52,7 @@
 #define DESK_MIN_PANE_COLS 4
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
+#define DESK_CURSOR_BLINK_MS 500
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -129,6 +130,7 @@ typedef struct desk_grid {
     int cols;
     int cursor_row;
     int cursor_col;
+    bool cursor_visible;
     int scroll_top;
     int scroll_bottom;
     char current_sgr[96];
@@ -170,6 +172,12 @@ typedef struct desk_session {
     bool prefix_pending;
     bool zoomed;
     bool terminal_size_dirty;
+    bool cursor_drawn;
+    bool cursor_blink_visible;
+    long long cursor_next_blink_ms;
+    int cursor_pane_id;
+    int cursor_row;
+    int cursor_col;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -1748,6 +1756,7 @@ static void grid_clear(desk_grid_t *grid)
     }
     grid->cursor_row = 0;
     grid->cursor_col = 0;
+    grid->cursor_visible = true;
     grid->scroll_top = 0;
     grid->scroll_bottom = grid->rows > 0 ? grid->rows - 1 : 0;
     grid->current_sgr[0] = '\0';
@@ -1830,6 +1839,7 @@ static void grid_apply_snapshot(desk_grid_t *grid,
     if (snapshot->cursor_col < (unsigned int)grid->cols) {
         grid->cursor_col = (int)snapshot->cursor_col;
     }
+    grid->cursor_visible = snapshot->cursor_visible;
 }
 
 static int refresh_pane_from_model(desk_pane_t *pane)
@@ -1843,17 +1853,6 @@ static int refresh_pane_from_model(desk_pane_t *pane)
             sizeof(dirty_rows) / sizeof(dirty_rows[0])) < 0) {
         return -1;
     }
-    bool any_dirty = false;
-    for (int row = 0; row < pane->grid.rows; ++row) {
-        if (dirty_rows[row]) {
-            any_dirty = true;
-            break;
-        }
-    }
-    if (!any_dirty) {
-        return 0;
-    }
-
     for (int row = 0; row < pane->grid.rows; ++row) {
         if (dirty_rows[row] && pane->grid.dirty_rows != NULL) {
             pane->grid.dirty_rows[row] = true;
@@ -2342,6 +2341,147 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
     }
 }
 
+static long long desk_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+        return 0;
+    }
+    return (long long)now.tv_sec * 1000LL + now.tv_nsec / 1000000LL;
+}
+
+static void desk_cursor_reset_blink(desk_session_t *session)
+{
+    session->cursor_blink_visible = true;
+    session->cursor_next_blink_ms =
+        desk_monotonic_ms() + DESK_CURSOR_BLINK_MS;
+}
+
+static desk_pane_t *desk_pane_for_id(desk_session_t *session, int pane_id)
+{
+    if (pane_id <= 0 || (size_t)pane_id > session->pane_count) {
+        return NULL;
+    }
+    return &session->panes[(size_t)pane_id - 1];
+}
+
+static bool desk_cursor_target(const desk_terminal_t *terminal,
+                               desk_session_t *session,
+                               int *pane_id,
+                               int *row,
+                               int *col)
+{
+    int active = session->layout.active_pane_id;
+    desk_pane_t *pane = desk_pane_for_id(session, active);
+    desk_rect_t rect;
+    if (pane == NULL || !pane->grid.cursor_visible ||
+        !pane_layout_rect_for_pane(&session->layout, terminal, active,
+                                   &rect)) {
+        return false;
+    }
+    if (pane->grid.cursor_row < 0 || pane->grid.cursor_col < 0 ||
+        pane->grid.cursor_row >= pane->grid.rows ||
+        pane->grid.cursor_col >= pane->grid.cols ||
+        pane->grid.cursor_row >= rect.rows ||
+        pane->grid.cursor_col >= rect.cols) {
+        return false;
+    }
+    *pane_id = active;
+    *row = pane->grid.cursor_row;
+    *col = pane->grid.cursor_col;
+    return true;
+}
+
+static void desk_render_grid_cell(const desk_terminal_t *terminal,
+                                  const desk_pane_layout_t *panes,
+                                  int pane_id,
+                                  const desk_grid_t *grid,
+                                  int row,
+                                  int col,
+                                  bool reverse)
+{
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
+        row < 0 || col < 0 || row >= grid->rows || col >= grid->cols ||
+        row >= rect.rows || col >= rect.cols) {
+        return;
+    }
+
+    const desk_cell_t *cell =
+        &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
+    const char *text = cell->text[0] == '\0' ? " " : cell->text;
+    const char *sgr = cell->sgr[0] == '\0' ? "\x1b[0m" : cell->sgr;
+    char frame[256];
+    int length = snprintf(frame, sizeof(frame), "\x1b[%d;%dH%s%s%s\x1b[0m",
+                          rect.row + row + 1, rect.col + col + 1, sgr,
+                          reverse ? "\x1b[7m" : "", text);
+    if (length > 0 && (size_t)length < sizeof(frame)) {
+        (void)cubeui_write_all(STDOUT_FILENO, frame, (size_t)length);
+    }
+}
+
+static void desk_cursor_erase(const desk_terminal_t *terminal,
+                              desk_session_t *session)
+{
+    if (!session->cursor_drawn) {
+        return;
+    }
+    desk_pane_t *pane = desk_pane_for_id(session, session->cursor_pane_id);
+    if (pane != NULL) {
+        desk_render_grid_cell(terminal, &session->layout,
+                              session->cursor_pane_id, &pane->grid,
+                              session->cursor_row, session->cursor_col, false);
+    }
+    session->cursor_drawn = false;
+}
+
+static void desk_cursor_render(const desk_terminal_t *terminal,
+                               desk_session_t *session)
+{
+    int pane_id = 0;
+    int row = 0;
+    int col = 0;
+    bool has_target =
+        desk_cursor_target(terminal, session, &pane_id, &row, &col);
+    bool should_draw = has_target && session->cursor_blink_visible;
+
+    if (session->cursor_drawn &&
+        (!should_draw || session->cursor_pane_id != pane_id ||
+         session->cursor_row != row || session->cursor_col != col)) {
+        desk_cursor_erase(terminal, session);
+    }
+    if (!should_draw || session->cursor_drawn) {
+        return;
+    }
+
+    desk_pane_t *pane = desk_pane_for_id(session, pane_id);
+    if (pane == NULL) {
+        return;
+    }
+    desk_render_grid_cell(terminal, &session->layout, pane_id, &pane->grid,
+                          row, col, true);
+    session->cursor_drawn = true;
+    session->cursor_pane_id = pane_id;
+    session->cursor_row = row;
+    session->cursor_col = col;
+}
+
+static void desk_cursor_tick(const desk_terminal_t *terminal,
+                             desk_session_t *session)
+{
+    long long now = desk_monotonic_ms();
+    if (session->cursor_next_blink_ms == 0) {
+        desk_cursor_reset_blink(session);
+    }
+    if (now < session->cursor_next_blink_ms) {
+        desk_cursor_render(terminal, session);
+        return;
+    }
+    session->cursor_blink_visible = !session->cursor_blink_visible;
+    session->cursor_next_blink_ms = now + DESK_CURSOR_BLINK_MS;
+    desk_cursor_render(terminal, session);
+}
+
 static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const desk_pane_layout_t *panes,
                                        int pane_id,
@@ -2806,12 +2946,15 @@ static int attach_all_panes(desk_session_t *session,
 static void render_all_panes(const desk_terminal_t *terminal,
                              desk_session_t *session)
 {
+    desk_cursor_erase(terminal, session);
     desk_render_layout(terminal, &session->layout);
     for (size_t i = 0; i < session->pane_count; ++i) {
         desk_render_cube_grid(terminal, &session->layout, (int)i + 1,
                               &session->panes[i].grid,
                               session->panes[i].process.friendly_name);
     }
+    desk_cursor_reset_blink(session);
+    desk_cursor_render(terminal, session);
 }
 
 static int read_and_render_pane_output(const desk_terminal_t *terminal,
@@ -2849,9 +2992,12 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
     }
 
     if (pane_changed) {
+        desk_cursor_erase(terminal, session);
         desk_render_dirty_cube_grid(terminal, &session->layout,
                                     (int)pane_index + 1, &pane->grid,
                                     pane->process.friendly_name);
+        desk_cursor_reset_blink(session);
+        desk_cursor_render(terminal, session);
     }
     return 0;
 }
@@ -3123,6 +3269,7 @@ static int desk_run_workspace(const char *workspace_arg,
             break;
         }
         (void)output_seen;
+        desk_cursor_tick(&terminal, &session);
 
         fd_set read_set;
         FD_ZERO(&read_set);
@@ -3161,6 +3308,8 @@ static int desk_run_workspace(const char *workspace_arg,
                     result = 2;
                     break;
                 }
+                desk_cursor_reset_blink(&session);
+                desk_cursor_render(&terminal, &session);
             }
         }
 

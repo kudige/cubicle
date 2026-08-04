@@ -405,6 +405,79 @@ def run_desk_echo_latency(desk, env):
         os.close(master_fd)
 
 
+def run_desk_cursor_overlay(desk, env, expect_cursor):
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 80, 0, 0))
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_quit = False
+    deadline = time.time() + 5
+    cursor_draw = b"\x1b[2;15H\x1b[0m\x1b[7m"
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if b"cursor-probe" in captured:
+                if expect_cursor and cursor_draw in captured and not sent_quit:
+                    os.write(master_fd, b"\x18q")
+                    sent_quit = True
+                elif not expect_cursor and time.time() > deadline - 1.0:
+                    os.write(master_fd, b"\x18q")
+                    sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_quit:
+            expectation = "draw cursor" if expect_cursor else "hide cursor"
+            raise AssertionError(
+                f"desk did not {expectation}; output={captured!r}"
+            )
+        if expect_cursor and cursor_draw not in captured:
+            raise AssertionError(
+                f"desk did not draw block cursor at expected cell: {captured!r}"
+            )
+        if not expect_cursor and cursor_draw in captured:
+            raise AssertionError(
+                f"desk drew cursor after app hid it: {captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def main():
     manager = os.environ["CUBICLE_MANAGER"]
     controller = os.environ["CUBICLE_CONTROLLER"]
@@ -618,6 +691,52 @@ def main():
             env,
         )
         run_desk_echo_latency(desk, env)
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "cursor-visible",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('\\x1b[2J\\x1b[2;3Hcursor-probe')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_cursor_overlay(desk, env, True)
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "cursor-hidden",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('\\x1b[2J\\x1b[?25l\\x1b[2;3Hcursor-probe')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_cursor_overlay(desk, env, False)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         emacs = shutil.which("emacs")
