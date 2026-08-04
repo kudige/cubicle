@@ -9,10 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
-#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -58,12 +56,7 @@
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
 
-typedef struct desk_terminal {
-    struct termios original;
-    bool raw_enabled;
-    int rows;
-    int cols;
-} desk_terminal_t;
+typedef cubeui_terminal_t desk_terminal_t;
 
 typedef struct desk_layout {
     int rows;
@@ -180,76 +173,6 @@ static void handle_signal(int signo)
         g_resize_requested = 1;
     } else {
         g_stop_requested = 1;
-    }
-}
-
-static int write_all(int fd, const char *buffer, size_t length)
-{
-    size_t written = 0;
-    while (written < length) {
-        ssize_t rc = write(fd, buffer + written, length - written);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        written += (size_t)rc;
-    }
-    return 0;
-}
-
-static int terminal_query_size(desk_terminal_t *terminal)
-{
-    struct winsize size;
-    memset(&size, 0, sizeof(size));
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) < 0) {
-        return -1;
-    }
-
-    terminal->rows = size.ws_row > 0 ? size.ws_row : 24;
-    terminal->cols = size.ws_col > 0 ? size.ws_col : 80;
-    return 0;
-}
-
-static int terminal_enter(desk_terminal_t *terminal)
-{
-    memset(terminal, 0, sizeof(*terminal));
-
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-        errno = ENOTTY;
-        return -1;
-    }
-    if (tcgetattr(STDIN_FILENO, &terminal->original) < 0) {
-        return -1;
-    }
-
-    struct termios raw = terminal->original;
-    raw.c_lflag &= (tcflag_t) ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_iflag &= (tcflag_t) ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
-    raw.c_oflag &= (tcflag_t) ~(OPOST);
-    raw.c_cflag |= CS8;
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 0;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
-        return -1;
-    }
-    terminal->raw_enabled = true;
-
-    if (terminal_query_size(terminal) < 0) {
-        return -1;
-    }
-
-    return write_all(STDOUT_FILENO, "\x1b[?1049h\x1b[?25l", 14);
-}
-
-static void terminal_leave(desk_terminal_t *terminal)
-{
-    (void)write_all(STDOUT_FILENO, "\x1b[?25h\x1b[?1049l", 14);
-    if (terminal->raw_enabled) {
-        (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &terminal->original);
-        terminal->raw_enabled = false;
     }
 }
 
@@ -1701,7 +1624,7 @@ static void desk_render_layout(const desk_terminal_t *terminal,
                                 true) < 0) {
         return;
     }
-    (void)write_all(STDOUT_FILENO, frame, used);
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
 }
 
 static int DESK_UNUSED desk_dump_layout(const desk_terminal_t *terminal,
@@ -1735,7 +1658,7 @@ static int DESK_UNUSED desk_prompt_layout_name(const desk_terminal_t *terminal,
         append_text(prompt, sizeof(prompt), &used, cursor);
     }
     append_text(prompt, sizeof(prompt), &used, "\x1b[2KLayout name: ");
-    (void)write_all(STDOUT_FILENO, prompt, used);
+    (void)cubeui_write_all(STDOUT_FILENO, prompt, used);
 
     size_t length = 0;
     name[0] = '\0';
@@ -1762,7 +1685,7 @@ static int DESK_UNUSED desk_prompt_layout_name(const desk_terminal_t *terminal,
             if (length > 0) {
                 length--;
                 name[length] = '\0';
-                (void)write_all(STDOUT_FILENO, "\b \b", 3);
+                (void)cubeui_write_all(STDOUT_FILENO, "\b \b", 3);
             }
             continue;
         }
@@ -1771,7 +1694,7 @@ static int DESK_UNUSED desk_prompt_layout_name(const desk_terminal_t *terminal,
             name[length++] = (char)ch;
             name[length] = '\0';
             char out[2] = {(char)ch, '\0'};
-            (void)write_all(STDOUT_FILENO, out, 1);
+            (void)cubeui_write_all(STDOUT_FILENO, out, 1);
         }
     }
     return -1;
@@ -1820,7 +1743,7 @@ static void DESK_UNUSED desk_render_cube_one(const desk_terminal_t *terminal,
         append_cell_text(frame, sizeof(frame), &used, text, rect.cols);
     }
 
-    (void)write_all(STDOUT_FILENO, frame, used);
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
 }
 
 static void grid_clear(desk_grid_t *grid)
@@ -2305,7 +2228,7 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
     }
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
-    (void)write_all(STDOUT_FILENO, frame, used);
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
 }
 
 static int pane_content_size(const desk_terminal_t *terminal,
@@ -2582,7 +2505,7 @@ static int refresh_pane_sizes(desk_session_t *session,
                               bool query_terminal,
                               bool *changed)
 {
-    if (query_terminal && terminal_query_size(terminal) < 0) {
+    if (query_terminal && cubeui_terminal_query_size(terminal) < 0) {
         return -1;
     }
     return resize_all_panes(session, terminal, changed);
@@ -2823,7 +2746,7 @@ static int desk_run_workspace(const char *workspace_arg,
     }
 
     desk_terminal_t terminal;
-    if (terminal_enter(&terminal) < 0) {
+    if (cubeui_terminal_enter_alt_raw(&terminal) < 0) {
         desk_session_cleanup(&session);
         return -1;
     }
@@ -2837,14 +2760,14 @@ static int desk_run_workspace(const char *workspace_arg,
 
     bool initial_size_changed = false;
     if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
-        terminal_leave(&terminal);
+        cubeui_terminal_leave_alt_raw(&terminal);
         fprintf(stderr, "desk: terminal too small for desk\n");
         desk_session_cleanup(&session);
         return 2;
     }
     result = attach_all_panes(&session, error, sizeof(error));
     if (result != 0) {
-        terminal_leave(&terminal);
+        cubeui_terminal_leave_alt_raw(&terminal);
         fprintf(stderr, "desk: %s\n", error);
         desk_session_cleanup(&session);
         return result;
@@ -2928,7 +2851,7 @@ static int desk_run_workspace(const char *workspace_arg,
         }
     }
 
-    terminal_leave(&terminal);
+    cubeui_terminal_leave_alt_raw(&terminal);
     desk_session_cleanup(&session);
     return result;
 }

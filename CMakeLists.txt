@@ -80,6 +80,7 @@ target_compile_options(cubicle_client PRIVATE
 add_library(cubeui
     src/cubeui/endpoint.c
     src/cubeui/local_state.c
+    src/cubeui/terminal.c
 )
 
 target_link_libraries(cubeui PUBLIC cubicle_common)
