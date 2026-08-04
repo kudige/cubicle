@@ -350,6 +350,39 @@ cubicle_error_code_t cubicle_attachment_resize(cubicle_attachment_t *attachment,
     return code;
 }
 
+cubicle_error_code_t cubicle_attachment_resize_tracked(
+    cubicle_attachment_t *attachment,
+    cubicle_resize_tracker_t *tracker,
+    unsigned int rows,
+    unsigned int cols,
+    bool force,
+    bool *sent_out)
+{
+    if (sent_out != NULL) {
+        *sent_out = false;
+    }
+    if (attachment == NULL || tracker == NULL || rows == 0 || cols == 0) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    if (!force && tracker->has_size && tracker->rows == rows &&
+        tracker->cols == cols) {
+        return CUBICLE_OK;
+    }
+
+    cubicle_error_code_t code = cubicle_attachment_resize(attachment, rows,
+                                                          cols);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    tracker->rows = rows;
+    tracker->cols = cols;
+    tracker->has_size = true;
+    if (sent_out != NULL) {
+        *sent_out = true;
+    }
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_attachment_close_input(cubicle_attachment_t *attachment)
 {
     if (attachment == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;

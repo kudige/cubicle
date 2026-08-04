@@ -155,6 +155,7 @@ typedef struct desk_pane {
     cubicle_attachment_t *attachment;
     cubicle_process_info_t process;
     desk_grid_t grid;
+    cubicle_resize_tracker_t resize;
     unsigned int rows;
     unsigned int cols;
 } desk_pane_t;
@@ -169,6 +170,7 @@ typedef struct desk_session {
     unsigned char prefix_key;
     bool prefix_pending;
     bool zoomed;
+    bool terminal_size_dirty;
 } desk_session_t;
 
 static void handle_signal(int signo)
@@ -2619,7 +2621,8 @@ static int load_or_create_layout(desk_session_t *session,
 
 static int resize_pane_attachment(desk_session_t *session,
                                   const desk_terminal_t *terminal,
-                                  size_t pane_index)
+                                  size_t pane_index,
+                                  bool *changed)
 {
     desk_pane_t *pane = &session->panes[pane_index];
     unsigned int rows = 0;
@@ -2629,24 +2632,43 @@ static int resize_pane_attachment(desk_session_t *session,
         grid_resize(&pane->grid, (int)rows, (int)cols) < 0) {
         return -1;
     }
-    if (pane->attachment != NULL &&
-        (pane->rows != rows || pane->cols != cols)) {
-        (void)cubicle_attachment_resize(pane->attachment, rows, cols);
+    bool size_changed = pane->rows != rows || pane->cols != cols;
+    if (pane->attachment != NULL) {
+        bool sent = false;
+        (void)cubicle_attachment_resize_tracked(pane->attachment,
+                                                &pane->resize, rows, cols,
+                                                false, &sent);
+        size_changed = size_changed || sent;
     }
     pane->rows = rows;
     pane->cols = cols;
+    if (changed != NULL && size_changed) {
+        *changed = true;
+    }
     return 0;
 }
 
 static int resize_all_panes(desk_session_t *session,
-                            const desk_terminal_t *terminal)
+                            const desk_terminal_t *terminal,
+                            bool *changed)
 {
     for (size_t i = 0; i < session->pane_count; ++i) {
-        if (resize_pane_attachment(session, terminal, i) < 0) {
+        if (resize_pane_attachment(session, terminal, i, changed) < 0) {
             return -1;
         }
     }
     return 0;
+}
+
+static int refresh_pane_sizes(desk_session_t *session,
+                              desk_terminal_t *terminal,
+                              bool query_terminal,
+                              bool *changed)
+{
+    if (query_terminal && terminal_query_size(terminal) < 0) {
+        return -1;
+    }
+    return resize_all_panes(session, terminal, changed);
 }
 
 static cubicle_error_code_t attach_pane(desk_session_t *session,
@@ -2683,7 +2705,9 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         snprintf(error, error_size, "controller attachment failed");
         return code;
     }
-    (void)cubicle_attachment_resize(pane->attachment, pane->rows, pane->cols);
+    (void)cubicle_attachment_resize_tracked(pane->attachment, &pane->resize,
+                                            pane->rows, pane->cols, true,
+                                            NULL);
     return CUBICLE_OK;
 }
 
@@ -2726,7 +2750,7 @@ static int write_active_pane(desk_session_t *session,
 }
 
 static bool handle_prefix_command(desk_session_t *session,
-                                  const desk_terminal_t *terminal,
+                                  desk_terminal_t *terminal,
                                   unsigned char key,
                                   bool *layout_changed,
                                   bool *quit_requested)
@@ -2769,7 +2793,7 @@ static bool handle_prefix_command(desk_session_t *session,
 }
 
 static int handle_input(desk_session_t *session,
-                        const desk_terminal_t *terminal,
+                        desk_terminal_t *terminal,
                         const unsigned char *input,
                         size_t length,
                         bool *layout_changed,
@@ -2794,6 +2818,11 @@ static int handle_input(desk_session_t *session,
             parse_resize_arrow(input, length, i, &side, &delta, &consumed)) {
             if (pane_layout_resize_side(&session->layout, terminal, side,
                                         delta) == 0) {
+                bool sizes_changed = false;
+                if (refresh_pane_sizes(session, terminal, false,
+                                       &sizes_changed) < 0) {
+                    return -1;
+                }
                 *layout_changed = true;
             }
             i += consumed - 1;
@@ -2825,6 +2854,7 @@ static int desk_run_workspace(const char *workspace_arg,
     desk_session_t session;
     memset(&session, 0, sizeof(session));
     session.prefix_key = prefix_key;
+    session.terminal_size_dirty = true;
 
     cubicle_error_code_t code = connect_client(&session.manager, error,
                                                sizeof(error));
@@ -2860,7 +2890,8 @@ static int desk_run_workspace(const char *workspace_arg,
     (void)sigaction(SIGWINCH, &action, NULL);
     (void)sigaction(SIGTERM, &action, NULL);
 
-    if (resize_all_panes(&session, &terminal) < 0) {
+    bool initial_size_changed = false;
+    if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
         terminal_leave(&terminal);
         fprintf(stderr, "desk: terminal too small for desk\n");
         desk_session_cleanup(&session);
@@ -2881,9 +2912,14 @@ static int desk_run_workspace(const char *workspace_arg,
 
         if (g_resize_requested) {
             g_resize_requested = 0;
-            if (terminal_query_size(&terminal) == 0 &&
-                resize_all_panes(&session, &terminal) == 0) {
-                layout_changed = true;
+            session.terminal_size_dirty = true;
+            bool sizes_changed = false;
+            if (refresh_pane_sizes(&session, &terminal, true,
+                                   &sizes_changed) == 0) {
+                session.terminal_size_dirty = false;
+                if (sizes_changed) {
+                    layout_changed = true;
+                }
             }
         }
 
@@ -2923,16 +2959,29 @@ static int desk_run_workspace(const char *workspace_arg,
             }
             if (input_length == 0) {
                 quit_requested = true;
-            } else if (handle_input(&session, &terminal, input,
-                                    (size_t)input_length, &layout_changed,
-                                    &quit_requested) < 0) {
-                result = 2;
-                break;
+            } else {
+                if (session.terminal_size_dirty) {
+                    bool sizes_changed = false;
+                    if (refresh_pane_sizes(&session, &terminal, true,
+                                           &sizes_changed) == 0) {
+                        session.terminal_size_dirty = false;
+                        if (sizes_changed) {
+                            layout_changed = true;
+                        }
+                    }
+                }
+                if (handle_input(&session, &terminal, input,
+                                 (size_t)input_length, &layout_changed,
+                                 &quit_requested) < 0) {
+                    result = 2;
+                    break;
+                }
             }
         }
 
         if (layout_changed) {
-            if (resize_all_panes(&session, &terminal) == 0) {
+            bool sizes_changed = false;
+            if (resize_all_panes(&session, &terminal, &sizes_changed) == 0) {
                 (void)desk_save_layout(&session);
                 render_all_panes(&terminal, &session);
             }

@@ -1,6 +1,7 @@
 #include "cubicle/cubicle.h"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,6 +264,17 @@ int main(void)
            CUBICLE_OK);
     assert(strcmp(grant.endpoint.uri, "unix:///tmp/controller.sock") == 0);
     assert((grant.granted_channels & CUBICLE_CHANNEL_STDOUT) != 0);
+
+    cubicle_resize_tracker_t resize_tracker = {
+        .rows = 24,
+        .cols = 80,
+        .has_size = true,
+    };
+    bool resize_sent = true;
+    assert(cubicle_attachment_resize_tracked((cubicle_attachment_t *)1,
+                                             &resize_tracker, 24, 80, false,
+                                             &resize_sent) == CUBICLE_OK);
+    assert(!resize_sent);
 
     cubicle_event_t *events = NULL;
     size_t event_count = 0;
