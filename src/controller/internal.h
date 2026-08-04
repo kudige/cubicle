@@ -4,6 +4,8 @@
 #include "cubicle/process.h"
 #include "cubicle/util.h"
 
+#include "../common/terminal_model.h"
+
 #include <limits.h>
 #include <stddef.h>
 #include <sys/types.h>
@@ -109,6 +111,7 @@ int read_control_client_request(control_client_t *client,
                                 int resize_fd,
                                 int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
+                                cubicle_terminal_model_t *terminal_model,
                                 int process_completed,
                                 int child_result);
 int flush_control_client_response(control_client_t *client,

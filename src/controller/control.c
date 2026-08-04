@@ -602,6 +602,108 @@ static int read_stream_json(const controller_state_t *state,
     return 0;
 }
 
+static int append_json_text(char *buffer, size_t buffer_size, size_t *used,
+                            const char *text)
+{
+    char escaped[512];
+    if (cubicle_json_escape(escaped, sizeof(escaped), text) < 0) {
+        return -1;
+    }
+    int length = snprintf(buffer + *used, buffer_size - *used, "\"%s\"",
+                          escaped);
+    if (length < 0 || (size_t)length >= buffer_size - *used) {
+        errno = ENOSPC;
+        return -1;
+    }
+    *used += (size_t)length;
+    return 0;
+}
+
+static int append_snapshot_json_cell(char *buffer,
+                                     size_t buffer_size,
+                                     size_t *used,
+                                     const cubicle_terminal_cell_t *cell)
+{
+    int length = snprintf(buffer + *used, buffer_size - *used, "{\"t\":");
+    if (length < 0 || (size_t)length >= buffer_size - *used) {
+        errno = ENOSPC;
+        return -1;
+    }
+    *used += (size_t)length;
+    if (append_json_text(buffer, buffer_size, used, cell->text) < 0) {
+        return -1;
+    }
+    length = snprintf(buffer + *used, buffer_size - *used, ",\"sgr\":");
+    if (length < 0 || (size_t)length >= buffer_size - *used) {
+        errno = ENOSPC;
+        return -1;
+    }
+    *used += (size_t)length;
+    if (append_json_text(buffer, buffer_size, used, cell->sgr) < 0) {
+        return -1;
+    }
+    length = snprintf(buffer + *used, buffer_size - *used, "}");
+    if (length < 0 || (size_t)length >= buffer_size - *used) {
+        errno = ENOSPC;
+        return -1;
+    }
+    *used += (size_t)length;
+    return 0;
+}
+
+static int snapshot_json(cubicle_terminal_model_t *terminal_model,
+                         uint64_t offset,
+                         char *result,
+                         size_t result_size)
+{
+    cubicle_terminal_snapshot_t snapshot;
+    if (cubicle_terminal_model_snapshot(terminal_model, offset, &snapshot) < 0) {
+        return -1;
+    }
+
+    int length = snprintf(
+        result, result_size,
+        "{\"rows\":%u,\"columns\":%u,\"cursor_row\":%u,\"cursor_column\":%u,\"cursor_visible\":%s,\"offset\":%llu,\"cells\":[",
+        snapshot.rows, snapshot.cols, snapshot.cursor_row,
+        snapshot.cursor_col, snapshot.cursor_visible ? "true" : "false",
+        (unsigned long long)snapshot.offset);
+    if (length < 0 || (size_t)length >= result_size) {
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        errno = ENOSPC;
+        return -1;
+    }
+    size_t used = (size_t)length;
+
+    size_t cell_count = (size_t)snapshot.rows * (size_t)snapshot.cols;
+    for (size_t i = 0; i < cell_count; ++i) {
+        if (i > 0) {
+            if (used + 1 >= result_size) {
+                cubicle_terminal_snapshot_cleanup(&snapshot);
+                errno = ENOSPC;
+                return -1;
+            }
+            result[used++] = ',';
+            result[used] = '\0';
+        }
+        if (append_snapshot_json_cell(result, result_size, &used,
+                                      &snapshot.cells[i]) < 0) {
+            cubicle_terminal_snapshot_cleanup(&snapshot);
+            return -1;
+        }
+    }
+
+    if (used + 2 >= result_size) {
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        errno = ENOSPC;
+        return -1;
+    }
+    result[used++] = ']';
+    result[used++] = '}';
+    result[used] = '\0';
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    return 0;
+}
+
 static int dispatch_api_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
@@ -609,6 +711,7 @@ static int dispatch_api_request(control_client_t *client,
                                 int resize_fd,
                                 int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
+                                cubicle_terminal_model_t *terminal_model,
                                 int process_completed,
                                 int child_result)
 {
@@ -672,6 +775,22 @@ static int dispatch_api_request(control_client_t *client,
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
                 "read failed", false, errno));
+        }
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+    }
+
+    if (strcmp(envelope.method, "controller.snapshot") == 0) {
+        if (terminal_model == NULL) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_STATE,
+                "terminal snapshot is unavailable", false, 0));
+        }
+        char result[131072];
+        if (snapshot_json(terminal_model, (uint64_t)state->stdout_offset,
+                          result, sizeof(result)) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "snapshot failed", false, errno));
         }
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
     }
@@ -741,12 +860,18 @@ static int dispatch_api_request(control_client_t *client,
                 client, request_id, CUBICLE_ERR_IO, "resize failed", true,
                 errno));
         }
+        if (terminal_model != NULL &&
+            cubicle_terminal_model_resize(terminal_model, (unsigned int)rows,
+                                          (unsigned int)columns) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                errno));
+        }
         if (terminal_size != NULL) {
             terminal_size->rows = (unsigned short)rows;
             terminal_size->columns = (unsigned short)columns;
             terminal_size->known = 1;
         }
-        kill(-child_pid, SIGWINCH);
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
 
@@ -966,6 +1091,7 @@ static int dispatch_control_request(control_client_t *client,
                                     int resize_fd,
                                     int stderr_resize_fd,
                                     terminal_size_state_t *terminal_size,
+                                    cubicle_terminal_model_t *terminal_model,
                                     int process_completed,
                                     int child_result)
 {
@@ -1046,12 +1172,17 @@ static int dispatch_control_request(control_client_t *client,
                  ioctl(stderr_resize_fd, TIOCSWINSZ, &size) < 0)) {
                 result = enqueue_error_response(client, "resize_failed");
             } else {
+                if (terminal_model != NULL &&
+                    cubicle_terminal_model_resize(terminal_model, rows,
+                                                  columns) < 0) {
+                    result = enqueue_error_response(client, "resize_failed");
+                    goto finish;
+                }
                 if (terminal_size != NULL) {
                     terminal_size->rows = (unsigned short)rows;
                     terminal_size->columns = (unsigned short)columns;
                     terminal_size->known = 1;
                 }
-                kill(-child_pid, SIGWINCH);
                 char event[128];
                 int event_length = snprintf(event, sizeof(event),
                                             "type=terminal_resized rows=%u columns=%u",
@@ -1124,6 +1255,7 @@ static int dispatch_control_request(control_client_t *client,
         result = enqueue_error_response(client, "unknown_command");
     }
 
+finish:
     if (result < 0) {
         close_control_client(client, state);
     }
@@ -1138,6 +1270,7 @@ static int finish_control_request(control_client_t *client,
                                   int resize_fd,
                                   int stderr_resize_fd,
                                   terminal_size_state_t *terminal_size,
+                                  cubicle_terminal_model_t *terminal_model,
                                   int process_completed,
                                   int child_result)
 {
@@ -1151,6 +1284,7 @@ static int finish_control_request(control_client_t *client,
                              resize_fd,
                              stderr_resize_fd,
                              terminal_size,
+                             terminal_model,
                              process_completed, child_result);
     return 0;
 }
@@ -1162,6 +1296,7 @@ static int finish_api_request(control_client_t *client,
                               int resize_fd,
                               int stderr_resize_fd,
                               terminal_size_state_t *terminal_size,
+                              cubicle_terminal_model_t *terminal_model,
                               int process_completed,
                               int child_result)
 {
@@ -1171,7 +1306,8 @@ static int finish_api_request(control_client_t *client,
     client->request_length = client->framed_length;
     return dispatch_api_request(client, state, child_pid, child_stdin_fd,
                                 resize_fd, stderr_resize_fd, terminal_size,
-                                process_completed, child_result);
+                                terminal_model, process_completed,
+                                child_result);
 }
 
 int flush_control_client_response(control_client_t *client,
@@ -1271,6 +1407,7 @@ int read_control_client_request(control_client_t *client,
                                 int resize_fd,
                                 int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
+                                cubicle_terminal_model_t *terminal_model,
                                 int process_completed,
                                 int child_result)
 {
@@ -1306,6 +1443,7 @@ int read_control_client_request(control_client_t *client,
                                           child_stdin_fd, resize_fd,
                                           stderr_resize_fd,
                                           terminal_size,
+                                          terminal_model,
                                           process_completed,
                                           child_result);
         }
@@ -1352,6 +1490,7 @@ int read_control_client_request(control_client_t *client,
                                               child_stdin_fd, resize_fd,
                                               stderr_resize_fd,
                                               terminal_size,
+                                              terminal_model,
                                               process_completed,
                                               child_result);
                 }
@@ -1363,6 +1502,7 @@ int read_control_client_request(control_client_t *client,
                                               child_stdin_fd, resize_fd,
                                               stderr_resize_fd,
                                               terminal_size,
+                                              terminal_model,
                                               process_completed,
                                               child_result);
             }

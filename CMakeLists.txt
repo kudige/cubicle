@@ -636,6 +636,15 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-snapshot-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            CUBICLE_CONTROL_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/control_socket_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_snapshot_test.sh
+)
+
+add_test(
     NAME cubicle-controller-completed-retention-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
