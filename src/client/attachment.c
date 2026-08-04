@@ -572,6 +572,7 @@ cubicle_error_code_t cubicle_attachment_snapshot(
     snapshot_out->cursor_visible = cursor_visible;
     snapshot_out->offset = offset;
     snapshot_out->cells = parsed_cells;
+    attachment->tty_offset = offset;
 
     cubicle_json_cleanup(&document);
     free(response);

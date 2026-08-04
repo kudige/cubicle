@@ -119,7 +119,7 @@ typedef struct desk_pane_layout {
 
 typedef struct desk_cell {
     char ch;
-    char sgr[64];
+    char sgr[96];
 } desk_cell_t;
 
 typedef struct desk_grid {
@@ -130,7 +130,7 @@ typedef struct desk_grid {
     int cursor_col;
     int scroll_top;
     int scroll_bottom;
-    char current_sgr[64];
+    char current_sgr[96];
     bool escape_active;
     bool csi_active;
     char csi[64];
@@ -1766,6 +1766,39 @@ static void grid_cleanup(desk_grid_t *grid)
     memset(grid, 0, sizeof(*grid));
 }
 
+static void grid_apply_snapshot(desk_grid_t *grid,
+                                const cubicle_terminal_snapshot_t *snapshot)
+{
+    if (grid->cells == NULL || snapshot->cells == NULL) {
+        return;
+    }
+
+    int rows = grid->rows < (int)snapshot->rows
+                   ? grid->rows
+                   : (int)snapshot->rows;
+    int cols = grid->cols < (int)snapshot->cols
+                   ? grid->cols
+                   : (int)snapshot->cols;
+    grid_clear(grid);
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < cols; ++col) {
+            const cubicle_terminal_cell_t *source =
+                &snapshot->cells[(size_t)row * (size_t)snapshot->cols +
+                                 (size_t)col];
+            desk_cell_t *target =
+                &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
+            target->ch = source->text[0] == '\0' ? ' ' : source->text[0];
+            snprintf(target->sgr, sizeof(target->sgr), "%s", source->sgr);
+        }
+    }
+    if (snapshot->cursor_row < (unsigned int)grid->rows) {
+        grid->cursor_row = (int)snapshot->cursor_row;
+    }
+    if (snapshot->cursor_col < (unsigned int)grid->cols) {
+        grid->cursor_col = (int)snapshot->cursor_col;
+    }
+}
+
 static void grid_clear_row(desk_grid_t *grid, int row)
 {
     if (row < 0 || row >= grid->rows) {
@@ -2187,7 +2220,7 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
 
     for (int row = 0; row < grid->rows; ++row) {
         char cursor[32];
-        char active_sgr[64] = "";
+        char active_sgr[96] = "";
         int terminal_row = rect.row + row + 1;
         int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
                                      terminal_row, rect.col + 1);
@@ -2568,6 +2601,20 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
                      : "initial controller resize failed");
         return code;
     }
+
+    cubicle_terminal_snapshot_t snapshot;
+    code = cubicle_attachment_snapshot(pane->attachment, &snapshot);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last =
+            cubicle_attachment_last_error(pane->attachment);
+        snprintf(error, error_size, "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "controller snapshot failed");
+        return code;
+    }
+    grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_snapshot_cleanup(&snapshot);
     return CUBICLE_OK;
 }
 
