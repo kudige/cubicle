@@ -1047,21 +1047,52 @@ Opaque handle:
 typedef struct cubicle_attachment cubicle_attachment_t;
 ```
 
+Terminal snapshot data:
+
+```c
+typedef struct cubicle_terminal_cell {
+    char text[32];
+    char sgr[96];
+} cubicle_terminal_cell_t;
+
+typedef struct cubicle_terminal_snapshot {
+    unsigned int rows;
+    unsigned int cols;
+    unsigned int cursor_row;
+    unsigned int cursor_col;
+    bool cursor_visible;
+    uint64_t offset;
+    cubicle_terminal_cell_t *cells;
+} cubicle_terminal_snapshot_t;
+```
+
 API:
 
 ```c
+cubicle_error_code_t cubicle_attachment_request(
+    cubicle_client_t *client,
+    const cubicle_attachment_request_t *request,
+    cubicle_attachment_grant_t *grant_out);
+
 cubicle_error_code_t cubicle_attachment_connect(
     const cubicle_attachment_grant_t *grant,
+    const cubicle_attachment_options_t *options,
     cubicle_attachment_t **attachment_out);
 
 ssize_t cubicle_attachment_read(
     cubicle_attachment_t *attachment,
-    cubicle_attachment_frame_t *frame_out,
-    int timeout_ms);
+    void *buffer,
+    size_t length);
+
+ssize_t cubicle_attachment_read_stream(
+    cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream,
+    void *buffer,
+    size_t length,
+    bool *end_of_stream_out);
 
 ssize_t cubicle_attachment_write(
     cubicle_attachment_t *attachment,
-    cubicle_channel_t channel,
     const void *data,
     size_t length);
 
@@ -1070,12 +1101,22 @@ cubicle_error_code_t cubicle_attachment_resize(
     unsigned int rows,
     unsigned int columns);
 
-cubicle_error_code_t cubicle_attachment_request_control(...);
-cubicle_error_code_t cubicle_attachment_release_control(...);
-void cubicle_attachment_close(cubicle_attachment_t *attachment);
+cubicle_error_code_t cubicle_attachment_resize_tracked(...);
+cubicle_error_code_t cubicle_attachment_status(...);
+cubicle_error_code_t cubicle_attachment_snapshot(
+    cubicle_attachment_t *attachment,
+    cubicle_terminal_snapshot_t *snapshot_out);
+void cubicle_terminal_snapshot_cleanup(
+    cubicle_terminal_snapshot_t *snapshot);
+cubicle_error_code_t cubicle_attachment_detach(
+    cubicle_attachment_t *attachment);
+void cubicle_attachment_disconnect(cubicle_attachment_t *attachment);
 ```
 
 These calls bypass the manager after grant issuance, except when relay routing is selected.
+For TTY attachments, `cubicle_attachment_snapshot` returns the current rendered
+terminal cells and advances the attachment TTY read offset to the snapshot
+offset, so subsequent reads consume only live output after the snapshot.
 
 ## 16. Transport abstraction inside `libcubicle`
 
