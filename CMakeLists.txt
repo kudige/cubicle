@@ -416,6 +416,17 @@ add_test(
 )
 
 add_test(
+    NAME desk-tty-attach-safety-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            DESK=$<TARGET_FILE:desk>
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/desk_tty_attach_safety_test.py
+)
+
+add_test(
     NAME cubicle-config-runtime-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBE=$<TARGET_FILE:cube>

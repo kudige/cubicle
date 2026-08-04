@@ -2651,6 +2651,10 @@ static int handle_input(desk_session_t *session,
             session->prefix_pending = true;
             continue;
         }
+        if (input[i] == 3) {
+            *quit_requested = true;
+            continue;
+        }
 
         desk_resize_side_t side;
         int delta = 0;
