@@ -329,6 +329,82 @@ def run_desk_until_emacs_render(desk, env):
         os.close(master_fd)
 
 
+def run_desk_echo_latency(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 80, 0, 0))
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_input = False
+    sent_at = 0.0
+    saw_echo = False
+    sent_quit = False
+    deadline = time.time() + 6
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.02)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_input and b"echo-latency" in captured:
+                sent_at = time.time()
+                os.write(master_fd, b"abc")
+                sent_input = True
+
+            if sent_input and not saw_echo and b"ECHO:abc" in captured:
+                if time.time() - sent_at > 1.0:
+                    raise AssertionError(
+                        f"desk echo was too slow; output={captured!r}"
+                    )
+                saw_echo = True
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_input:
+            raise AssertionError(
+                f"desk did not render echo-latency pane: {captured!r}"
+            )
+        if not saw_echo:
+            raise AssertionError(f"desk did not render echoed input: {captured!r}")
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def main():
     manager = os.environ["CUBICLE_MANAGER"]
     controller = os.environ["CUBICLE_CONTROLLER"]
@@ -509,6 +585,39 @@ def main():
             raise AssertionError(
                 f"desk forwarded terminal response bytes:\n{noise_logs.stdout}"
             )
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "echo-latency",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY echo-latency\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+8\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.02)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if b'abc' in data:\n"
+                    "            sys.stdout.write('ECHO:abc\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            break\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_echo_latency(desk, env)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         emacs = shutil.which("emacs")

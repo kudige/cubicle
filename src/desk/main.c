@@ -51,6 +51,8 @@
 #define DESK_MIN_PANE_COLS 4
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
+#define DESK_ACTIVE_SNAPSHOT_INTERVAL_MS 20
+#define DESK_INACTIVE_SNAPSHOT_INTERVAL_MS 80
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -154,6 +156,8 @@ typedef struct desk_pane {
     cubicle_resize_tracker_t resize;
     unsigned int rows;
     unsigned int cols;
+    bool snapshot_pending;
+    long long last_snapshot_ms;
 } desk_pane_t;
 
 typedef struct desk_session {
@@ -168,6 +172,12 @@ typedef struct desk_session {
     bool zoomed;
     bool terminal_size_dirty;
 } desk_session_t;
+
+static void desk_render_cube_grid(const desk_terminal_t *terminal,
+                                  const desk_pane_layout_t *panes,
+                                  int pane_id,
+                                  const desk_grid_t *grid,
+                                  const char *title);
 
 static void handle_signal(int signo)
 {
@@ -1817,6 +1827,28 @@ static int refresh_pane_snapshot(desk_pane_t *pane)
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_snapshot_cleanup(&snapshot);
+    pane->snapshot_pending = false;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+        pane->last_snapshot_ms = (long long)now.tv_sec * 1000 +
+                                 now.tv_nsec / 1000000;
+    }
+    return 0;
+}
+
+static int refresh_active_pane_snapshot(desk_session_t *session,
+                                        const desk_terminal_t *terminal)
+{
+    int active = session->layout.active_pane_id;
+    if (active <= 0 || (size_t)active > session->pane_count) {
+        return 0;
+    }
+    desk_pane_t *pane = &session->panes[(size_t)active - 1];
+    if (refresh_pane_snapshot(pane) < 0) {
+        return -1;
+    }
+    desk_render_cube_grid(terminal, &session->layout, active, &pane->grid,
+                          pane->process.friendly_name);
     return 0;
 }
 
@@ -2731,6 +2763,7 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
 {
     desk_pane_t *pane = &session->panes[pane_index];
     bool pane_changed = false;
+    bool active = session->layout.active_pane_id == (int)pane_index + 1;
 
     for (int burst = 0; burst < DESK_OUTPUT_READ_BURST; ++burst) {
         unsigned char output[4096];
@@ -2749,11 +2782,31 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         }
     }
 
-    if (pane_changed && refresh_pane_snapshot(pane) < 0) {
+    if (pane_changed) {
+        pane->snapshot_pending = true;
+    }
+
+    bool refresh_now = false;
+    if (pane->snapshot_pending) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            long long now_ms = (long long)now.tv_sec * 1000 +
+                               now.tv_nsec / 1000000;
+            long long interval = active ? DESK_ACTIVE_SNAPSHOT_INTERVAL_MS
+                                        : DESK_INACTIVE_SNAPSHOT_INTERVAL_MS;
+            refresh_now =
+                pane->last_snapshot_ms == 0 ||
+                now_ms - pane->last_snapshot_ms >= interval;
+        } else {
+            refresh_now = true;
+        }
+    }
+
+    if (refresh_now && refresh_pane_snapshot(pane) < 0) {
         return -1;
     }
 
-    if (pane_changed) {
+    if (pane_changed || refresh_now) {
         desk_render_cube_grid(terminal, &session->layout, (int)pane_index + 1,
                               &pane->grid, pane->process.friendly_name);
     }
@@ -3029,7 +3082,8 @@ static int desk_run_workspace(const char *workspace_arg,
         fd_set read_set;
         FD_ZERO(&read_set);
         FD_SET(STDIN_FILENO, &read_set);
-        struct timeval timeout = {0, 50000};
+        struct timeval timeout = output_seen ? (struct timeval){0, 0}
+                                             : (struct timeval){0, 50000};
         int ready = select(STDIN_FILENO + 1, &read_set, NULL, NULL, &timeout);
         if (ready < 0) {
             if (errno == EINTR) {
@@ -3059,6 +3113,11 @@ static int desk_run_workspace(const char *workspace_arg,
                 if (handle_input(&session, &terminal, input,
                                  (size_t)input_length, &layout_changed,
                                  &quit_requested) < 0) {
+                    result = 2;
+                    break;
+                }
+                if (!layout_changed && !quit_requested &&
+                    refresh_active_pane_snapshot(&session, &terminal) < 0) {
                     result = 2;
                     break;
                 }
