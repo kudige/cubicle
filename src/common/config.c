@@ -225,6 +225,29 @@ static int set_user_defaults(cubicle_config_t *config)
     return 0;
 }
 
+static int user_config_path(char *path, size_t path_size)
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    int length;
+    if (config_home != NULL && config_home[0] != '\0') {
+        length = snprintf(path, path_size, "%s/cubicle/config.cfg",
+                          config_home);
+    } else {
+        const char *home = user_home_directory();
+        if (home == NULL || home[0] == '\0') {
+            errno = ENOENT;
+            return -1;
+        }
+        length = snprintf(path, path_size, "%s/.config/cubicle/config.cfg",
+                          home);
+    }
+    if (length < 0 || (size_t)length >= path_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 void cubicle_config_defaults(cubicle_config_t *config)
 {
     memset(config, 0, sizeof(*config));
@@ -511,9 +534,9 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     cubicle_config_defaults(config);
 
     const char *override_path = getenv("CUBICLE_CONFIG");
-    econf_file *file = NULL;
     econf_err result;
     if (override_path != NULL && override_path[0] != '\0') {
+        econf_file *file = NULL;
         result = econf_readFile(&file, override_path, "=", "#");
         if (result != ECONF_SUCCESS) {
             if (error != NULL && error_size > 0) {
@@ -523,28 +546,62 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
             return -1;
         }
         snprintf(config->source, sizeof(config->source), "%s", override_path);
-    } else {
-        result = econf_readConfig(&file, "cubicle", "/usr/lib", "config",
-                                  "cfg", "=", "#");
-        if (result == ECONF_NOFILE) {
-            return cubicle_config_validate(config, error, error_size);
+        if (apply_econf_file(config, file, error, error_size) < 0) {
+            econf_free(file);
+            return -1;
         }
-        if (result != ECONF_SUCCESS) {
+        econf_free(file);
+        return cubicle_config_validate(config, error, error_size);
+    }
+
+    econf_file *system_file = NULL;
+    result = econf_readConfig(&system_file, "cubicle", "/usr/lib", "config",
+                              "cfg", "=", "#");
+    if (result != ECONF_NOFILE && result != ECONF_SUCCESS) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "system config: %s",
+                     econf_errString(result));
+        }
+        return -1;
+    }
+    if (result == ECONF_SUCCESS) {
+        snprintf(config->source, sizeof(config->source),
+                 "system configuration");
+        if (apply_econf_file(config, system_file, error, error_size) < 0) {
+            econf_free(system_file);
+            return -1;
+        }
+        econf_free(system_file);
+    }
+
+    char path[CUBICLE_PATH_MAX];
+    if (user_config_path(path, sizeof(path)) == 0) {
+        econf_file *user_file = NULL;
+        result = econf_readFile(&user_file, path, "=", "#");
+        if (result != ECONF_NOFILE && result != ECONF_SUCCESS) {
             if (error != NULL && error_size > 0) {
-                snprintf(error, error_size, "system config: %s",
+                snprintf(error, error_size, "%s: %s", path,
                          econf_errString(result));
             }
             return -1;
         }
-        snprintf(config->source, sizeof(config->source),
-                 "system configuration");
-    }
-
-    if (apply_econf_file(config, file, error, error_size) < 0) {
-        econf_free(file);
+        if (result == ECONF_SUCCESS) {
+            if (apply_econf_file(config, user_file, error, error_size) < 0) {
+                econf_free(user_file);
+                return -1;
+            }
+            econf_free(user_file);
+            snprintf(config->source, sizeof(config->source), "%s", path);
+        }
+    } else if (errno != ENOENT) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size,
+                     "user config path could not be resolved: %s",
+                     strerror(errno));
+        }
         return -1;
     }
-    econf_free(file);
+
     return cubicle_config_validate(config, error, error_size);
 }
 

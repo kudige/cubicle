@@ -688,7 +688,8 @@ Rule regular expressions must be bounded in size and evaluated by a regex implem
 
 ### Phase 3: User configuration and defaults
 
-- Load XDG user configuration.
+- Load main XDG user configuration. `DONE`
+- Load XDG user configuration drop-ins.
 - Apply user launch defaults.
 - Implement `cube defaults show/set/reset`.
 - Implement atomic user-config writes.

@@ -77,7 +77,9 @@ future command design is tracked separately in `docs/cli-command-spec.md`.
 
 Installed packages provide `/usr/lib/cubicle/config.cfg`. Administrators can
 override through system configuration handled by `libeconf`, such as
-`/etc/cubicle/config.cfg`. Setting `CUBICLE_CONFIG=/path/to/config.cfg` makes
+`/etc/cubicle/config.cfg`. User configuration is read from
+`$XDG_CONFIG_HOME/cubicle/config.cfg`, or `~/.config/cubicle/config.cfg` when
+`XDG_CONFIG_HOME` is unset. Setting `CUBICLE_CONFIG=/path/to/config.cfg` makes
 `cube` load that exact file.
 
 Examples:
@@ -483,8 +485,8 @@ the command supports it.
   manager is explicitly configured/listening for TCP.
 - JSON output is broad but not uniform across every command; lifecycle success
   commands often print `{}`.
-- The full user configuration hierarchy described in
-  `docs/configuration-spec.md` is not fully implemented yet.
+- User configuration drop-ins and config-editing commands described in
+  `docs/configuration-spec.md` are not fully implemented yet.
 
 ## See Also
 

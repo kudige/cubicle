@@ -3,6 +3,7 @@
 #include "cubicle/config.h"
 
 #include <assert.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,18 @@ static void temp_path(char *path, size_t path_size, const char *name)
     size_t used = strlen(path);
     length = snprintf(path + used, path_size - used, "/%s", name);
     assert(length >= 0 && (size_t)length < path_size - used);
+}
+
+static void temp_dir(char *path, size_t path_size)
+{
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0') {
+        tmpdir = "/tmp";
+    }
+    int length = snprintf(path, path_size, "%s/cubicle-config-test-XXXXXX",
+                          tmpdir);
+    assert(length >= 0 && (size_t)length < path_size);
+    assert(mkdtemp(path) != NULL);
 }
 
 static void test_defaults(void)
@@ -101,6 +114,51 @@ static void test_override_file(void)
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
     assert(config.default_kill_cleanup == 1);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
+}
+
+static void test_user_config_file(void)
+{
+    char xdg_home[CUBICLE_PATH_MAX];
+    temp_dir(xdg_home, sizeof(xdg_home));
+
+    char cubicle_dir[CUBICLE_PATH_MAX];
+    int length = snprintf(cubicle_dir, sizeof(cubicle_dir), "%s/cubicle",
+                          xdg_home);
+    assert(length >= 0 && (size_t)length < sizeof(cubicle_dir));
+    assert(mkdir(cubicle_dir, 0700) == 0);
+
+    char path[CUBICLE_PATH_MAX];
+    length = snprintf(path, sizeof(path), "%s/config.cfg", cubicle_dir);
+    assert(length >= 0 && (size_t)length < sizeof(path));
+    write_file(path,
+               "[manager]\n"
+               "state_dir=/tmp/user-cubicle-state\n"
+               "runtime_dir=/tmp/user-cubicle-run\n"
+               "log_dir=/tmp/user-cubicle-log\n"
+               "listen=unix:///tmp/user-cubicle-run/manager.sock\n"
+               "\n"
+               "[controller]\n"
+               "debug=input\n"
+               "\n"
+               "[client]\n"
+               "manager=unix:///tmp/user-cubicle-run/manager.sock\n");
+
+    assert(unsetenv("CUBICLE_CONFIG") == 0);
+    assert(setenv("XDG_CONFIG_HOME", xdg_home, 1) == 0);
+
+    cubicle_config_t config;
+    char error[256];
+    assert(cubicle_config_load(&config, error, sizeof(error)) == 0);
+    assert(strcmp(config.source, path) == 0);
+    assert(strcmp(config.manager_state_dir, "/tmp/user-cubicle-state") == 0);
+    assert(strcmp(config.manager_runtime_dir, "/tmp/user-cubicle-run") == 0);
+    assert(strcmp(config.manager_log_dir, "/tmp/user-cubicle-log") == 0);
+    assert(strcmp(config.manager_listen_uri,
+                  "unix:///tmp/user-cubicle-run/manager.sock") == 0);
+    assert(strcmp(config.client_manager_uri,
+                  "unix:///tmp/user-cubicle-run/manager.sock") == 0);
+    assert(config.controller_debug_input == 1);
+    assert(unsetenv("XDG_CONFIG_HOME") == 0);
 }
 
 static void test_invalid_values(void)
@@ -188,6 +246,7 @@ int main(void)
     assert(strcmp(cubicle_launch_default_name(CUBICLE_LAUNCH_BACKGROUND),
                   "background") == 0);
     test_override_file();
+    test_user_config_file();
     test_invalid_values();
     test_tcp_endpoints();
     test_unix_uri_path();
