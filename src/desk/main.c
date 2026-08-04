@@ -21,6 +21,7 @@
 #include "cubicle/types.h"
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
+#include "../common/terminal_model.h"
 #include "../cubeui/cubeui.h"
 
 #ifndef PATH_MAX
@@ -51,8 +52,6 @@
 #define DESK_MIN_PANE_COLS 4
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
-#define DESK_ACTIVE_SNAPSHOT_INTERVAL_MS 20
-#define DESK_INACTIVE_SNAPSHOT_INTERVAL_MS 80
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -125,6 +124,7 @@ typedef struct desk_cell {
 
 typedef struct desk_grid {
     desk_cell_t *cells;
+    bool *dirty_rows;
     int rows;
     int cols;
     int cursor_row;
@@ -154,10 +154,9 @@ typedef struct desk_pane {
     cubicle_process_info_t process;
     desk_grid_t grid;
     cubicle_resize_tracker_t resize;
+    cubicle_terminal_model_t *terminal_model;
     unsigned int rows;
     unsigned int cols;
-    bool snapshot_pending;
-    long long last_snapshot_ms;
 } desk_pane_t;
 
 typedef struct desk_session {
@@ -176,7 +175,7 @@ typedef struct desk_session {
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_pane_layout_t *panes,
                                   int pane_id,
-                                  const desk_grid_t *grid,
+                                  desk_grid_t *grid,
                                   const char *title);
 
 static void handle_signal(int signo)
@@ -1742,6 +1741,11 @@ static void grid_clear(desk_grid_t *grid)
             grid->cells[i].sgr[0] = '\0';
         }
     }
+    if (grid->dirty_rows != NULL) {
+        for (int row = 0; row < grid->rows; ++row) {
+            grid->dirty_rows[row] = true;
+        }
+    }
     grid->cursor_row = 0;
     grid->cursor_col = 0;
     grid->scroll_top = 0;
@@ -1765,12 +1769,17 @@ static int grid_resize(desk_grid_t *grid, int rows, int cols)
     }
 
     desk_cell_t *cells = malloc((size_t)rows * (size_t)cols * sizeof(*cells));
-    if (cells == NULL) {
+    bool *dirty_rows = malloc((size_t)rows * sizeof(*dirty_rows));
+    if (cells == NULL || dirty_rows == NULL) {
+        free(cells);
+        free(dirty_rows);
         return -1;
     }
     free(grid->cells);
+    free(grid->dirty_rows);
     memset(grid, 0, sizeof(*grid));
     grid->cells = cells;
+    grid->dirty_rows = dirty_rows;
     grid->rows = rows;
     grid->cols = cols;
     grid_clear(grid);
@@ -1780,6 +1789,7 @@ static int grid_resize(desk_grid_t *grid, int rows, int cols)
 static void grid_cleanup(desk_grid_t *grid)
 {
     free(grid->cells);
+    free(grid->dirty_rows);
     memset(grid, 0, sizeof(*grid));
 }
 
@@ -1790,23 +1800,28 @@ static void grid_apply_snapshot(desk_grid_t *grid,
         return;
     }
 
-    int rows = grid->rows < (int)snapshot->rows
-                   ? grid->rows
-                   : (int)snapshot->rows;
-    int cols = grid->cols < (int)snapshot->cols
-                   ? grid->cols
-                   : (int)snapshot->cols;
-    grid_clear(grid);
-    for (int row = 0; row < rows; ++row) {
-        for (int col = 0; col < cols; ++col) {
-            const cubicle_terminal_cell_t *source =
-                &snapshot->cells[(size_t)row * (size_t)snapshot->cols +
-                                 (size_t)col];
+    for (int row = 0; row < grid->rows; ++row) {
+        for (int col = 0; col < grid->cols; ++col) {
+            const char *source_text = " ";
+            const char *source_sgr = "";
+            if (row < (int)snapshot->rows && col < (int)snapshot->cols) {
+                const cubicle_terminal_cell_t *source =
+                    &snapshot->cells[(size_t)row * (size_t)snapshot->cols +
+                                     (size_t)col];
+                source_text = source->text[0] == '\0' ? " " : source->text;
+                source_sgr = source->sgr;
+            }
             desk_cell_t *target =
                 &grid->cells[(size_t)row * (size_t)grid->cols + (size_t)col];
-            snprintf(target->text, sizeof(target->text), "%s",
-                     source->text[0] == '\0' ? " " : source->text);
-            snprintf(target->sgr, sizeof(target->sgr), "%s", source->sgr);
+            if (strcmp(target->text, source_text) != 0 ||
+                strcmp(target->sgr, source_sgr) != 0) {
+                snprintf(target->text, sizeof(target->text), "%s",
+                         source_text);
+                snprintf(target->sgr, sizeof(target->sgr), "%s", source_sgr);
+                if (grid->dirty_rows != NULL) {
+                    grid->dirty_rows[row] = true;
+                }
+            }
         }
     }
     if (snapshot->cursor_row < (unsigned int)grid->rows) {
@@ -1817,38 +1832,42 @@ static void grid_apply_snapshot(desk_grid_t *grid,
     }
 }
 
-static int refresh_pane_snapshot(desk_pane_t *pane)
+static int refresh_pane_from_model(desk_pane_t *pane)
 {
+    if (pane->terminal_model == NULL) {
+        return 0;
+    }
+    bool dirty_rows[1000];
+    if (cubicle_terminal_model_get_dirty_rows(
+            pane->terminal_model, dirty_rows,
+            sizeof(dirty_rows) / sizeof(dirty_rows[0])) < 0) {
+        return -1;
+    }
+    bool any_dirty = false;
+    for (int row = 0; row < pane->grid.rows; ++row) {
+        if (dirty_rows[row]) {
+            any_dirty = true;
+            break;
+        }
+    }
+    if (!any_dirty) {
+        return 0;
+    }
+
+    for (int row = 0; row < pane->grid.rows; ++row) {
+        if (dirty_rows[row] && pane->grid.dirty_rows != NULL) {
+            pane->grid.dirty_rows[row] = true;
+        }
+    }
+
     cubicle_terminal_snapshot_t snapshot;
-    cubicle_error_code_t code = cubicle_attachment_snapshot(pane->attachment,
-                                                            &snapshot);
-    if (code != CUBICLE_OK) {
+    if (cubicle_terminal_model_snapshot(pane->terminal_model, 0,
+                                        &snapshot) < 0) {
         return -1;
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_snapshot_cleanup(&snapshot);
-    pane->snapshot_pending = false;
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
-        pane->last_snapshot_ms = (long long)now.tv_sec * 1000 +
-                                 now.tv_nsec / 1000000;
-    }
-    return 0;
-}
-
-static int refresh_active_pane_snapshot(desk_session_t *session,
-                                        const desk_terminal_t *terminal)
-{
-    int active = session->layout.active_pane_id;
-    if (active <= 0 || (size_t)active > session->pane_count) {
-        return 0;
-    }
-    desk_pane_t *pane = &session->panes[(size_t)active - 1];
-    if (refresh_pane_snapshot(pane) < 0) {
-        return -1;
-    }
-    desk_render_cube_grid(terminal, &session->layout, active, &pane->grid,
-                          pane->process.friendly_name);
+    cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
     return 0;
 }
 
@@ -2323,11 +2342,12 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
     }
 }
 
-static void desk_render_cube_grid(const desk_terminal_t *terminal,
-                                  const desk_pane_layout_t *panes,
-                                  int pane_id,
-                                  const desk_grid_t *grid,
-                                  const char *title)
+static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
+                                       const desk_pane_layout_t *panes,
+                                       int pane_id,
+                                       desk_grid_t *grid,
+                                       const char *title,
+                                       bool dirty_only)
 {
     (void)title;
     char frame[65536];
@@ -2339,6 +2359,10 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
     }
 
     for (int row = 0; row < grid->rows; ++row) {
+        if (dirty_only && grid->dirty_rows != NULL &&
+            !grid->dirty_rows[row]) {
+            continue;
+        }
         char cursor[32];
         char active_sgr[96] = "";
         int terminal_row = rect.row + row + 1;
@@ -2368,10 +2392,31 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
         if (active_sgr[0] != '\0') {
             append_text(frame, sizeof(frame), &used, "\x1b[0m");
         }
+        if (grid->dirty_rows != NULL) {
+            grid->dirty_rows[row] = false;
+        }
     }
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+}
+
+static void desk_render_cube_grid(const desk_terminal_t *terminal,
+                                  const desk_pane_layout_t *panes,
+                                  int pane_id,
+                                  desk_grid_t *grid,
+                                  const char *title)
+{
+    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title, false);
+}
+
+static void desk_render_dirty_cube_grid(const desk_terminal_t *terminal,
+                                        const desk_pane_layout_t *panes,
+                                        int pane_id,
+                                        desk_grid_t *grid,
+                                        const char *title)
+{
+    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title, true);
 }
 
 static int pane_content_size(const desk_terminal_t *terminal,
@@ -2613,6 +2658,10 @@ static int resize_pane_attachment(desk_session_t *session,
         grid_resize(&pane->grid, (int)rows, (int)cols) < 0) {
         return -1;
     }
+    if (pane->terminal_model != NULL &&
+        cubicle_terminal_model_resize(pane->terminal_model, rows, cols) < 0) {
+        return -1;
+    }
     bool size_changed = pane->rows != rows || pane->cols != cols;
     if (pane->attachment != NULL) {
         bool sent = false;
@@ -2727,7 +2776,16 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         (void)error_size;
         return CUBICLE_OK;
     }
+    if (cubicle_terminal_model_create(snapshot.rows, snapshot.cols,
+                                      &pane->terminal_model) < 0 ||
+        cubicle_terminal_model_load_snapshot(pane->terminal_model,
+                                             &snapshot) < 0) {
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        snprintf(error, error_size, "terminal model initialization failed");
+        return CUBICLE_ERR_INTERNAL;
+    }
     grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
     cubicle_terminal_snapshot_cleanup(&snapshot);
     return CUBICLE_OK;
 }
@@ -2763,7 +2821,6 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
 {
     desk_pane_t *pane = &session->panes[pane_index];
     bool pane_changed = false;
-    bool active = session->layout.active_pane_id == (int)pane_index + 1;
 
     for (int burst = 0; burst < DESK_OUTPUT_READ_BURST; ++burst) {
         unsigned char output[4096];
@@ -2776,39 +2833,25 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
             break;
         }
         grid_feed(&pane->grid, output, (size_t)nread, pane->attachment);
+        if (pane->terminal_model != NULL &&
+            cubicle_terminal_model_feed(pane->terminal_model, output,
+                                        (size_t)nread) < 0) {
+            return -1;
+        }
         pane_changed = true;
         if (output_seen != NULL) {
             *output_seen = true;
         }
     }
 
-    if (pane_changed) {
-        pane->snapshot_pending = true;
-    }
-
-    bool refresh_now = false;
-    if (pane->snapshot_pending) {
-        struct timespec now;
-        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
-            long long now_ms = (long long)now.tv_sec * 1000 +
-                               now.tv_nsec / 1000000;
-            long long interval = active ? DESK_ACTIVE_SNAPSHOT_INTERVAL_MS
-                                        : DESK_INACTIVE_SNAPSHOT_INTERVAL_MS;
-            refresh_now =
-                pane->last_snapshot_ms == 0 ||
-                now_ms - pane->last_snapshot_ms >= interval;
-        } else {
-            refresh_now = true;
-        }
-    }
-
-    if (refresh_now && refresh_pane_snapshot(pane) < 0) {
+    if (pane_changed && refresh_pane_from_model(pane) < 0) {
         return -1;
     }
 
-    if (pane_changed || refresh_now) {
-        desk_render_cube_grid(terminal, &session->layout, (int)pane_index + 1,
-                              &pane->grid, pane->process.friendly_name);
+    if (pane_changed) {
+        desk_render_dirty_cube_grid(terminal, &session->layout,
+                                    (int)pane_index + 1, &pane->grid,
+                                    pane->process.friendly_name);
     }
     return 0;
 }
@@ -2985,6 +3028,8 @@ static void desk_session_cleanup(desk_session_t *session)
     for (size_t i = 0; i < session->pane_count; ++i) {
         cubicle_attachment_disconnect(session->panes[i].attachment);
         session->panes[i].attachment = NULL;
+        cubicle_terminal_model_destroy(session->panes[i].terminal_model);
+        session->panes[i].terminal_model = NULL;
         grid_cleanup(&session->panes[i].grid);
     }
     cubicle_client_disconnect(session->manager);
@@ -3113,11 +3158,6 @@ static int desk_run_workspace(const char *workspace_arg,
                 if (handle_input(&session, &terminal, input,
                                  (size_t)input_length, &layout_changed,
                                  &quit_requested) < 0) {
-                    result = 2;
-                    break;
-                }
-                if (!layout_changed && !quit_requested &&
-                    refresh_active_pane_snapshot(&session, &terminal) < 0) {
                     result = 2;
                     break;
                 }

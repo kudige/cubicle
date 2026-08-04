@@ -17,11 +17,18 @@ int cubicle_terminal_model_resize(cubicle_terminal_model_t *model,
                                   unsigned int rows, unsigned int cols);
 int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
                                 const void *data, size_t length);
+int cubicle_terminal_model_get_dirty_rows(cubicle_terminal_model_t *model,
+                                          bool *rows,
+                                          size_t row_count);
+void cubicle_terminal_model_clear_dirty_rows(cubicle_terminal_model_t *model);
 ssize_t cubicle_terminal_model_take_response(cubicle_terminal_model_t *model,
                                              void *buffer, size_t length);
 int cubicle_terminal_model_snapshot(cubicle_terminal_model_t *model,
                                     uint64_t offset,
                                     cubicle_terminal_snapshot_t *snapshot_out);
+int cubicle_terminal_model_load_snapshot(
+    cubicle_terminal_model_t *model,
+    const cubicle_terminal_snapshot_t *snapshot);
 void cubicle_terminal_snapshot_cleanup(cubicle_terminal_snapshot_t *snapshot);
 
 #endif

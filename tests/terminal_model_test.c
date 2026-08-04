@@ -83,9 +83,32 @@ static void test_resize_and_terminal_response(void)
     cubicle_terminal_model_destroy(model);
 }
 
+static void test_dirty_rows(void)
+{
+    cubicle_terminal_model_t *model = NULL;
+    bool dirty[4] = {false, false, false, false};
+
+    expect_true(cubicle_terminal_model_create(4, 8, &model) == 0,
+                "expected terminal model creation to succeed");
+    if (model == NULL) {
+        return;
+    }
+    cubicle_terminal_model_clear_dirty_rows(model);
+    expect_true(cubicle_terminal_model_feed(model, "\x1b[3;1HX", 7) == 0,
+                "expected dirty-row feed to succeed");
+    expect_true(cubicle_terminal_model_get_dirty_rows(model, dirty,
+                                                     sizeof(dirty) /
+                                                         sizeof(dirty[0])) == 0,
+                "expected dirty rows to be readable");
+    expect_true(!dirty[0] && !dirty[1] && dirty[2] && !dirty[3],
+                "expected only row 3 to be dirty");
+    cubicle_terminal_model_destroy(model);
+}
+
 int main(void)
 {
     test_text_cursor_and_attrs();
     test_resize_and_terminal_response();
+    test_dirty_rows();
     return failures == 0 ? 0 : 1;
 }

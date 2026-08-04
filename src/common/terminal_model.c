@@ -14,14 +14,20 @@ struct cubicle_terminal_model {
     unsigned int rows;
     unsigned int cols;
     bool cursor_visible;
+    bool dirty_rows[1000];
     char response[4096];
     size_t response_length;
 };
 
-static int ignore_damage(VTermRect rect, void *user)
+static int track_damage(VTermRect rect, void *user)
 {
-    (void)rect;
-    (void)user;
+    cubicle_terminal_model_t *model = user;
+    int start = rect.start_row < 0 ? 0 : rect.start_row;
+    int end = rect.end_row > (int)model->rows ? (int)model->rows
+                                              : rect.end_row;
+    for (int row = start; row < end; ++row) {
+        model->dirty_rows[row] = true;
+    }
     return 1;
 }
 
@@ -102,7 +108,7 @@ static void capture_response(const char *data, size_t length, void *user)
 }
 
 static const VTermScreenCallbacks screen_callbacks = {
-    .damage = ignore_damage,
+    .damage = track_damage,
     .moverect = ignore_moverect,
     .movecursor = track_cursor,
     .settermprop = track_termprop,
@@ -292,8 +298,11 @@ int cubicle_terminal_model_create(unsigned int rows, unsigned int cols,
     vterm_output_set_callback(model->term, capture_response, model);
     vterm_screen_set_callbacks(model->screen, &screen_callbacks, model);
     vterm_screen_enable_altscreen(model->screen, 1);
-    vterm_screen_set_damage_merge(model->screen, VTERM_DAMAGE_SCREEN);
+    vterm_screen_set_damage_merge(model->screen, VTERM_DAMAGE_ROW);
     vterm_screen_reset(model->screen, 1);
+    for (unsigned int row = 0; row < rows; ++row) {
+        model->dirty_rows[row] = true;
+    }
 
     *model_out = model;
     return 0;
@@ -319,6 +328,9 @@ int cubicle_terminal_model_resize(cubicle_terminal_model_t *model,
     model->rows = rows;
     model->cols = cols;
     vterm_screen_flush_damage(model->screen);
+    for (unsigned int row = 0; row < rows; ++row) {
+        model->dirty_rows[row] = true;
+    }
     return 0;
 }
 
@@ -342,6 +354,27 @@ int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
     }
     vterm_screen_flush_damage(model->screen);
     return 0;
+}
+
+int cubicle_terminal_model_get_dirty_rows(cubicle_terminal_model_t *model,
+                                          bool *rows,
+                                          size_t row_count)
+{
+    if (model == NULL || rows == NULL || row_count < model->rows) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (unsigned int row = 0; row < model->rows; ++row) {
+        rows[row] = model->dirty_rows[row];
+    }
+    return 0;
+}
+
+void cubicle_terminal_model_clear_dirty_rows(cubicle_terminal_model_t *model)
+{
+    if (model != NULL) {
+        memset(model->dirty_rows, 0, sizeof(model->dirty_rows));
+    }
 }
 
 ssize_t cubicle_terminal_model_take_response(cubicle_terminal_model_t *model,
@@ -405,6 +438,64 @@ int cubicle_terminal_model_snapshot(cubicle_terminal_model_t *model,
     snapshot_out->cursor_visible = model->cursor_visible;
     snapshot_out->offset = offset;
     snapshot_out->cells = cells;
+    return 0;
+}
+
+int cubicle_terminal_model_load_snapshot(
+    cubicle_terminal_model_t *model,
+    const cubicle_terminal_snapshot_t *snapshot)
+{
+    if (model == NULL || snapshot == NULL || snapshot->cells == NULL ||
+        snapshot->rows == 0 || snapshot->cols == 0 ||
+        snapshot->rows > 1000 || snapshot->cols > 1000) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (cubicle_terminal_model_resize(model, snapshot->rows,
+                                      snapshot->cols) < 0) {
+        return -1;
+    }
+    vterm_screen_reset(model->screen, 1);
+
+    char active_sgr[96] = "";
+    for (unsigned int row = 0; row < snapshot->rows; ++row) {
+        char cursor[32];
+        int length = snprintf(cursor, sizeof(cursor), "\x1b[%u;1H", row + 1);
+        if (length < 0 || (size_t)length >= sizeof(cursor) ||
+            cubicle_terminal_model_feed(model, cursor, (size_t)length) < 0) {
+            return -1;
+        }
+        for (unsigned int col = 0; col < snapshot->cols; ++col) {
+            const cubicle_terminal_cell_t *cell =
+                &snapshot->cells[(size_t)row * (size_t)snapshot->cols + col];
+            const char *sgr = cell->sgr;
+            if (strcmp(active_sgr, sgr) != 0) {
+                const char *sequence = sgr[0] == '\0' ? "\x1b[0m" : sgr;
+                if (cubicle_terminal_model_feed(model, sequence,
+                                                strlen(sequence)) < 0) {
+                    return -1;
+                }
+                snprintf(active_sgr, sizeof(active_sgr), "%s", sgr);
+            }
+            const char *text = cell->text[0] == '\0' ? " " : cell->text;
+            if (cubicle_terminal_model_feed(model, text, strlen(text)) < 0) {
+                return -1;
+            }
+        }
+    }
+
+    char cursor[32];
+    int length = snprintf(cursor, sizeof(cursor), "\x1b[%u;%uH",
+                          snapshot->cursor_row + 1,
+                          snapshot->cursor_col + 1);
+    if (length < 0 || (size_t)length >= sizeof(cursor) ||
+        cubicle_terminal_model_feed(model, cursor, (size_t)length) < 0) {
+        return -1;
+    }
+    model->cursor_visible = snapshot->cursor_visible;
+    for (unsigned int row = 0; row < model->rows; ++row) {
+        model->dirty_rows[row] = true;
+    }
     return 0;
 }
 
