@@ -2635,9 +2635,11 @@ static int resize_pane_attachment(desk_session_t *session,
     bool size_changed = pane->rows != rows || pane->cols != cols;
     if (pane->attachment != NULL) {
         bool sent = false;
-        (void)cubicle_attachment_resize_tracked(pane->attachment,
-                                                &pane->resize, rows, cols,
-                                                false, &sent);
+        cubicle_error_code_t code = cubicle_attachment_resize_tracked(
+            pane->attachment, &pane->resize, rows, cols, false, &sent);
+        if (code != CUBICLE_OK) {
+            return -1;
+        }
         size_changed = size_changed || sent;
     }
     pane->rows = rows;
@@ -2669,6 +2671,25 @@ static int refresh_pane_sizes(desk_session_t *session,
         return -1;
     }
     return resize_all_panes(session, terminal, changed);
+}
+
+static int flush_pending_terminal_resize(desk_session_t *session,
+                                         desk_terminal_t *terminal,
+                                         bool *layout_changed)
+{
+    if (!session->terminal_size_dirty) {
+        return 0;
+    }
+
+    bool sizes_changed = false;
+    if (refresh_pane_sizes(session, terminal, true, &sizes_changed) < 0) {
+        return -1;
+    }
+    session->terminal_size_dirty = false;
+    if (sizes_changed && layout_changed != NULL) {
+        *layout_changed = true;
+    }
+    return 0;
 }
 
 static cubicle_error_code_t attach_pane(desk_session_t *session,
@@ -2705,9 +2726,18 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         snprintf(error, error_size, "controller attachment failed");
         return code;
     }
-    (void)cubicle_attachment_resize_tracked(pane->attachment, &pane->resize,
-                                            pane->rows, pane->cols, true,
-                                            NULL);
+    code = cubicle_attachment_resize_tracked(pane->attachment, &pane->resize,
+                                             pane->rows, pane->cols, true,
+                                             NULL);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last =
+            cubicle_attachment_last_error(pane->attachment);
+        snprintf(error, error_size, "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "initial controller resize failed");
+        return code;
+    }
     return CUBICLE_OK;
 }
 
@@ -2913,13 +2943,10 @@ static int desk_run_workspace(const char *workspace_arg,
         if (g_resize_requested) {
             g_resize_requested = 0;
             session.terminal_size_dirty = true;
-            bool sizes_changed = false;
-            if (refresh_pane_sizes(&session, &terminal, true,
-                                   &sizes_changed) == 0) {
-                session.terminal_size_dirty = false;
-                if (sizes_changed) {
-                    layout_changed = true;
-                }
+            if (flush_pending_terminal_resize(&session, &terminal,
+                                              &layout_changed) < 0) {
+                result = 2;
+                break;
             }
         }
 
@@ -2960,15 +2987,10 @@ static int desk_run_workspace(const char *workspace_arg,
             if (input_length == 0) {
                 quit_requested = true;
             } else {
-                if (session.terminal_size_dirty) {
-                    bool sizes_changed = false;
-                    if (refresh_pane_sizes(&session, &terminal, true,
-                                           &sizes_changed) == 0) {
-                        session.terminal_size_dirty = false;
-                        if (sizes_changed) {
-                            layout_changed = true;
-                        }
-                    }
+                if (flush_pending_terminal_resize(&session, &terminal,
+                                                  &layout_changed) < 0) {
+                    result = 2;
+                    break;
                 }
                 if (handle_input(&session, &terminal, input,
                                  (size_t)input_length, &layout_changed,
