@@ -249,15 +249,6 @@ def main():
                 "        break\n"
                 "sys.stdout.write('GOT_INPUT\\n' if data else 'NO_INPUT\\n')\n"
                 "sys.stdout.flush()\n"
-                "deadline = time.time() + 2.0\n"
-                "while time.time() < deadline:\n"
-                "    ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
-                "    if ready:\n"
-                "        data = os.read(0, 256)\n"
-                "        if data:\n"
-                "            sys.stdout.write('GOT_INPUT\\n')\n"
-                "            sys.stdout.flush()\n"
-                "            break\n"
                 "time.sleep(5)\n"
             )
             check_call(
@@ -315,14 +306,6 @@ def main():
             os.close(replay_slave_fd)
             try:
                 read_until(replay_master_fd, b"NO_INPUT")
-                os.write(
-                    replay_master_fd,
-                    b"\x1b[I"
-                    b"\x1b[1;1R"
-                    b"\x1b]10;rgb:0000/ffff/0000\x1b\\"
-                    b"\x1b]11;rgb:0000/0000/0000\x1b\\"
-                    b"\x1b[?61;1;2;4c",
-                )
                 time.sleep(0.1)
                 os.write(replay_master_fd, b"\x1cd")
                 replay_connect.wait(timeout=5)
@@ -358,6 +341,105 @@ def main():
                     "kill",
                     "--cleanup",
                     "replay-probe",
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
+            )
+
+            live_query_probe = (
+                "import os,select,sys,termios,tty,time\n"
+                "tty.setraw(0)\n"
+                "sys.stdout.write('READY\\n')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(0.2)\n"
+                "sys.stdout.write('\\x1b[6n')\n"
+                "sys.stdout.flush()\n"
+                "deadline = time.time() + 3.0\n"
+                "data = b''\n"
+                "while time.time() < deadline:\n"
+                "    ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
+                "    if ready:\n"
+                "        data = os.read(0, 64)\n"
+                "        break\n"
+                "sys.stdout.write('GOT_LIVE_REPLY\\n' if data else 'NO_LIVE_REPLY\\n')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(5)\n"
+            )
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    "live-query-probe",
+                    sys.executable,
+                    "-c",
+                    live_query_probe,
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
+            )
+            wait_for_output(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "logs",
+                    "--stdout",
+                    "live-query-probe",
+                ],
+                "READY",
+                env,
+            )
+
+            live_master_fd, live_slave_fd = pty.openpty()
+            set_window_size(live_master_fd, 24, 80)
+            live_connect = subprocess.Popen(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "connect",
+                    "live-query-probe",
+                ],
+                stdin=live_slave_fd,
+                stdout=live_slave_fd,
+                stderr=live_slave_fd,
+                env=env,
+                close_fds=True,
+            )
+            os.close(live_slave_fd)
+            try:
+                read_until(live_master_fd, b"\x1b[6n")
+                os.write(live_master_fd, b"\x1b[1;1R")
+                read_until(live_master_fd, b"GOT_LIVE_REPLY")
+                os.write(live_master_fd, b"\x1cd")
+                live_connect.wait(timeout=5)
+            finally:
+                if live_connect.poll() is None:
+                    live_connect.terminate()
+                    live_connect.wait(timeout=5)
+                os.close(live_master_fd)
+
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "kill",
+                    "--cleanup",
+                    "live-query-probe",
                 ],
                 stdout=subprocess.DEVNULL,
                 env=env,
