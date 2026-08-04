@@ -18,8 +18,6 @@
 #include "cubicle/client.h"
 #include "cubicle/config.h"
 #include "cubicle/process.h"
-#include "cubicle/transport_tcp.h"
-#include "cubicle/transport_unix.h"
 #include "cubicle/types.h"
 #include "cubicle/util.h"
 #include "cubicle/workspace.h"
@@ -1136,34 +1134,9 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
     const char *manager_uri = cubeui_resolve_manager_endpoint(
         NULL, &config, configured_endpoint, sizeof(configured_endpoint));
 
-    cubicle_endpoint_t endpoint;
-    if (cubeui_endpoint_from_uri(&endpoint, manager_uri) < 0) {
-        snprintf(error, error_size, "manager endpoint is invalid");
-        return CUBICLE_ERR_INVALID_ARGUMENT;
-    }
-
-    cubicle_transport_t *transport = NULL;
-    cubicle_error_code_t code;
-    if (strncmp(endpoint.uri, "tcp://", 6) == 0) {
-        code = cubicle_transport_tcp_create(&transport);
-    } else {
-        code = cubicle_transport_unix_create(&transport);
-    }
+    cubicle_error_code_t code = cubicle_client_connect_uri(manager_uri, NULL,
+                                                           client_out);
     if (code != CUBICLE_OK) {
-        snprintf(error, error_size, "failed to create manager transport");
-        return code;
-    }
-
-    cubicle_client_options_t options;
-    memset(&options, 0, sizeof(options));
-    options.endpoint = endpoint;
-    options.transport = transport;
-
-    code = cubicle_client_connect(&options, client_out);
-    if (code != CUBICLE_OK) {
-        if (transport->vtable != NULL && transport->vtable->destroy != NULL) {
-            transport->vtable->destroy(transport);
-        }
         snprintf(error, error_size, "failed to connect to manager");
     }
     return code;
