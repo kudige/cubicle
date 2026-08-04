@@ -6,6 +6,7 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
 pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+pkg_check_modules(LIBVTERM REQUIRED IMPORTED_TARGET vterm)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -42,13 +43,14 @@ add_library(cubicle_common
     src/common/log.c
     src/common/process.c
     src/common/rpc.c
+    src/common/terminal_model.c
     src/common/util.c
     third_party/yyjson/yyjson.c
 )
 
 target_include_directories(cubicle_common PUBLIC include)
 target_include_directories(cubicle_common PRIVATE third_party/yyjson)
-target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO)
+target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO PkgConfig::LIBVTERM)
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -208,6 +210,20 @@ target_compile_options(cubicle-util-test PRIVATE
 )
 
 add_test(NAME cubicle-util-test COMMAND cubicle-util-test)
+
+add_executable(cubicle-terminal-model-test
+    tests/terminal_model_test.c
+)
+
+target_link_libraries(cubicle-terminal-model-test PRIVATE cubicle_common)
+
+target_compile_options(cubicle-terminal-model-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-terminal-model-test COMMAND cubicle-terminal-model-test)
 
 add_executable(cubicle-config-test
     tests/config_test.c
