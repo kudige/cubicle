@@ -272,6 +272,23 @@ target_compile_options(cubicle-attachment-snapshot-client PRIVATE
     -Wpedantic
 )
 
+add_executable(cubicle-attachment-legacy-controller-test
+    tests/attachment_legacy_controller_test.c
+)
+
+target_link_libraries(cubicle-attachment-legacy-controller-test PRIVATE cubicle_client)
+
+target_compile_options(cubicle-attachment-legacy-controller-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME cubicle-attachment-legacy-controller-test
+    COMMAND cubicle-attachment-legacy-controller-test
+)
+
 target_compile_options(cubicle-manager-auth-client PRIVATE
     -Wall
     -Wextra

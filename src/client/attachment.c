@@ -207,6 +207,13 @@ static bool attachment_rpc_can_retry(const char *method)
            strcmp(method, "controller.detach") == 0;
 }
 
+static bool attachment_is_transport_error(cubicle_error_code_t code)
+{
+    return code == CUBICLE_ERR_IO ||
+           code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+           code == CUBICLE_ERR_TIMEOUT;
+}
+
 static cubicle_stream_kind_t attachment_read_stream(
     const cubicle_attachment_t *attachment)
 {
@@ -247,6 +254,21 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
                                            const char *params,
                                            char **response_out)
 {
+    if (attachment->persistent_unsupported) {
+        cubicle_client_t *client = NULL;
+        cubicle_error_code_t code = create_controller_client(
+            &attachment->grant, &client, &attachment->last_error);
+        if (code != CUBICLE_OK) {
+            return code;
+        }
+        code = rpc_object(client, method, params, response_out);
+        if (code != CUBICLE_OK) {
+            attachment->last_error = *cubicle_client_last_error(client);
+        }
+        cubicle_client_disconnect(client);
+        return code;
+    }
+
     cubicle_error_code_t code = ensure_controller_client(attachment);
     if (code != CUBICLE_OK) {
         return code;
@@ -255,9 +277,7 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
     if (code != CUBICLE_OK) {
         attachment->last_error = *cubicle_client_last_error(attachment->controller);
         if (attachment_rpc_can_retry(method) &&
-            (code == CUBICLE_ERR_IO ||
-             code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
-             code == CUBICLE_ERR_TIMEOUT)) {
+            attachment_is_transport_error(code)) {
             close_controller_client(attachment);
             if (ensure_controller_client(attachment) == CUBICLE_OK) {
                 code = rpc_object(attachment->controller, method, params,
@@ -266,6 +286,23 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
                     attachment->last_error =
                         *cubicle_client_last_error(attachment->controller);
                 }
+            }
+        }
+        if (attachment_rpc_can_retry(method) &&
+            attachment_is_transport_error(code)) {
+            close_controller_client(attachment);
+            attachment->persistent_unsupported = 1;
+            cubicle_client_t *client = NULL;
+            cubicle_error_code_t legacy_code = create_controller_client(
+                &attachment->grant, &client, &attachment->last_error);
+            if (legacy_code == CUBICLE_OK) {
+                code = rpc_object(client, method, params, response_out);
+                if (code != CUBICLE_OK) {
+                    attachment->last_error = *cubicle_client_last_error(client);
+                }
+                cubicle_client_disconnect(client);
+            } else {
+                code = legacy_code;
             }
         }
     }

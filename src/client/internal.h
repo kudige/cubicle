@@ -41,6 +41,7 @@ struct cubicle_attachment {
     cubicle_attachment_mode_t mode;
     int idle_timeout_ms;
     int attached_once;
+    int persistent_unsupported;
     uint64_t last_activity_ms;
     uint64_t stdout_offset;
     uint64_t stderr_offset;
