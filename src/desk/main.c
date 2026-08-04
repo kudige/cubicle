@@ -50,6 +50,8 @@
 #define DESK_INACTIVE_T_LEFT "┤"
 #define DESK_MIN_PANE_COLS 4
 #define DESK_MIN_PANE_ROWS 2
+#define DESK_OUTPUT_READ_BURST 16
+#define DESK_INPUT_ARM_QUIET_TICKS 2
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -1983,10 +1985,12 @@ static void grid_set_sgr(desk_grid_t *grid)
     }
 }
 
-static void grid_apply_csi(desk_grid_t *grid)
+static size_t grid_apply_csi(desk_grid_t *grid,
+                             unsigned char *response,
+                             size_t response_size)
 {
     if (grid->csi_length == 0) {
-        return;
+        return 0;
     }
     char command = grid->csi[grid->csi_length - 1];
     grid->csi[grid->csi_length - 1] = '\0';
@@ -2013,7 +2017,7 @@ static void grid_apply_csi(desk_grid_t *grid)
                 }
             }
         }
-        return;
+        return 0;
     }
     if (command == 'K') {
         int mode = parse_csi_number(grid->csi, 0);
@@ -2024,11 +2028,11 @@ static void grid_apply_csi(desk_grid_t *grid)
         } else {
             grid_clear_line_range(grid, grid->cursor_col, grid->cols - 1);
         }
-        return;
+        return 0;
     }
     if (command == 'm') {
         grid_set_sgr(grid);
-        return;
+        return 0;
     }
     if (command == 'H' || command == 'f') {
         int row = 1;
@@ -2040,7 +2044,7 @@ static void grid_apply_csi(desk_grid_t *grid)
         if (col > grid->cols) col = grid->cols;
         grid->cursor_row = row - 1;
         grid->cursor_col = col - 1;
-        return;
+        return 0;
     }
     if (command == 'r') {
         int top = 1;
@@ -2057,7 +2061,7 @@ static void grid_apply_csi(desk_grid_t *grid)
         }
         grid->cursor_row = 0;
         grid->cursor_col = 0;
-        return;
+        return 0;
     }
     if (command == 'L') {
         int amount = parse_csi_number(grid->csi, 1);
@@ -2065,7 +2069,7 @@ static void grid_apply_csi(desk_grid_t *grid)
         if (grid->cursor_row >= grid->scroll_top && grid->cursor_row <= bottom) {
             grid_scroll_down_region(grid, grid->cursor_row, bottom, amount);
         }
-        return;
+        return 0;
     }
     if (command == 'M') {
         int amount = parse_csi_number(grid->csi, 1);
@@ -2073,19 +2077,26 @@ static void grid_apply_csi(desk_grid_t *grid)
         if (grid->cursor_row >= grid->scroll_top && grid->cursor_row <= bottom) {
             grid_scroll_up_region(grid, grid->cursor_row, bottom, amount);
         }
-        return;
+        return 0;
     }
     if (command == 'S') {
         int amount = parse_csi_number(grid->csi, 1);
         grid_scroll_up_region(grid, grid->scroll_top, grid->scroll_bottom,
                               amount);
-        return;
+        return 0;
     }
     if (command == 'T') {
         int amount = parse_csi_number(grid->csi, 1);
         grid_scroll_down_region(grid, grid->scroll_top, grid->scroll_bottom,
                                 amount);
-        return;
+        return 0;
+    }
+    if (command == 'n' && strcmp(grid->csi, "6") == 0 &&
+        response != NULL && response_size > 0) {
+        int length = snprintf((char *)response, response_size, "\x1b[%d;%dR",
+                              grid->cursor_row + 1, grid->cursor_col + 1);
+        return length > 0 && (size_t)length < response_size ? (size_t)length
+                                                            : 0;
     }
     if (command == 'A' && grid->cursor_row > 0) {
         int amount = parse_csi_number(grid->csi, 1);
@@ -2104,10 +2115,12 @@ static void grid_apply_csi(desk_grid_t *grid)
         grid->cursor_col -= amount;
         if (grid->cursor_col < 0) grid->cursor_col = 0;
     }
+    return 0;
 }
 
 static void grid_feed(desk_grid_t *grid, const unsigned char *data,
-                      size_t length)
+                      size_t length,
+                      cubicle_attachment_t *attachment)
 {
     for (size_t i = 0; i < length; ++i) {
         unsigned char ch = data[i];
@@ -2117,7 +2130,13 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
                 grid->csi[grid->csi_length] = '\0';
             }
             if (ch >= 0x40 && ch <= 0x7e) {
-                grid_apply_csi(grid);
+                unsigned char response[64];
+                size_t response_length = grid_apply_csi(
+                    grid, response, sizeof(response));
+                if (response_length > 0 && attachment != NULL) {
+                    (void)cubicle_attachment_write(attachment, response,
+                                                   response_length);
+                }
                 grid->csi_active = false;
                 grid->escape_active = false;
                 grid->csi_length = 0;
@@ -2576,6 +2595,38 @@ static void render_all_panes(const desk_terminal_t *terminal,
     }
 }
 
+static int read_and_render_pane_output(const desk_terminal_t *terminal,
+                                       desk_session_t *session,
+                                       size_t pane_index,
+                                       bool *output_seen)
+{
+    desk_pane_t *pane = &session->panes[pane_index];
+    bool pane_changed = false;
+
+    for (int burst = 0; burst < DESK_OUTPUT_READ_BURST; ++burst) {
+        unsigned char output[4096];
+        ssize_t nread = cubicle_attachment_read(pane->attachment, output,
+                                                sizeof(output));
+        if (nread < 0) {
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        grid_feed(&pane->grid, output, (size_t)nread, pane->attachment);
+        pane_changed = true;
+        if (output_seen != NULL) {
+            *output_seen = true;
+        }
+    }
+
+    if (pane_changed) {
+        desk_render_cube_grid(terminal, &session->layout, (int)pane_index + 1,
+                              &pane->grid, pane->process.friendly_name);
+    }
+    return 0;
+}
+
 static int write_active_pane(desk_session_t *session,
                              const unsigned char *buffer,
                              size_t length)
@@ -2780,9 +2831,12 @@ static int desk_run_workspace(const char *workspace_arg,
 
     render_all_panes(&terminal, &session);
     drain_terminal_input_once();
+    bool input_armed = false;
+    int output_quiet_ticks = 0;
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
+        bool output_seen = false;
 
         if (g_resize_requested) {
             g_resize_requested = 0;
@@ -2795,20 +2849,33 @@ static int desk_run_workspace(const char *workspace_arg,
         }
 
         for (size_t i = 0; i < session.pane_count; ++i) {
-            unsigned char output[4096];
-            ssize_t nread = cubicle_attachment_read(session.panes[i].attachment,
-                                                    output, sizeof(output));
-            if (nread > 0) {
-                grid_feed(&session.panes[i].grid, output, (size_t)nread);
-                desk_render_cube_grid(&terminal, &session.layout, (int)i + 1,
-                                      &session.panes[i].grid,
-                                      session.panes[i].process.friendly_name);
+            if (read_and_render_pane_output(&terminal, &session, i,
+                                            &output_seen) < 0) {
+                result = 2;
+                break;
+            }
+        }
+        if (result != 0) {
+            break;
+        }
+
+        if (output_seen) {
+            output_quiet_ticks = 0;
+            input_armed = false;
+            drain_terminal_input_once();
+        } else if (!input_armed) {
+            drain_terminal_input_once();
+            ++output_quiet_ticks;
+            if (output_quiet_ticks >= DESK_INPUT_ARM_QUIET_TICKS) {
+                input_armed = true;
             }
         }
 
         fd_set read_set;
         FD_ZERO(&read_set);
-        FD_SET(STDIN_FILENO, &read_set);
+        if (input_armed) {
+            FD_SET(STDIN_FILENO, &read_set);
+        }
         struct timeval timeout = {0, 50000};
         int ready = select(STDIN_FILENO + 1, &read_set, NULL, NULL, &timeout);
         if (ready < 0) {
@@ -2818,7 +2885,7 @@ static int desk_run_workspace(const char *workspace_arg,
             result = 2;
             break;
         }
-        if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
+        if (input_armed && ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
             unsigned char input[256];
             ssize_t input_length = read(STDIN_FILENO, input, sizeof(input));
             if (input_length < 0) {

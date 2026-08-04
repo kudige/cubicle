@@ -110,6 +110,67 @@ def run_desk_and_ctrl_c(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_until_command_output(desk, cube, env, process, marker):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 4096))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            logs = subprocess.run(
+                [cube, "logs", "--stdout", process],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if marker in logs.stdout:
+                proc.terminate()
+                proc.wait(timeout=2)
+                if proc.returncode not in (0, -signal.SIGTERM):
+                    raise AssertionError(
+                        f"desk exited with {proc.returncode}; output={captured!r}"
+                    )
+                return
+
+            if proc.poll() is not None:
+                break
+
+        raise AssertionError(
+            f"desk did not produce {marker!r} for {process}; output={captured!r}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def main():
     manager = os.environ["CUBICLE_MANAGER"]
     controller = os.environ["CUBICLE_CONTROLLER"]
@@ -201,6 +262,39 @@ def main():
             events = handle.read()
         if "type=input" in events:
             raise AssertionError(f"desk startup/Ctrl-C forwarded input:\n{events}")
+
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "dsr-probe",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "time.sleep(0.5)\n"
+                    "sys.stdout.write('\\x1b[6n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+3\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if data.endswith(b'R'):\n"
+                    "            break\n"
+                    "sys.stdout.write('GOT_DSR\\n' if data.startswith(b'\\x1b[') and data.endswith(b'R') else 'NO_DSR\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_until_command_output(desk, cube, env, "dsr-probe", "GOT_DSR")
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
     finally:
