@@ -47,6 +47,7 @@ def run_desk_and_ctrl_c(desk, cube, env):
         close_fds=True,
     )
     os.close(slave_fd)
+    os.write(master_fd, b"\x1b[12;34R")
     captured = bytearray()
     sent_ctrl_c = False
     deadline = time.time() + 5

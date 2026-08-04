@@ -2590,6 +2590,32 @@ static int write_active_pane(desk_session_t *session,
                : 0;
 }
 
+static void drain_terminal_input_once(void)
+{
+    if (!isatty(STDIN_FILENO)) {
+        return;
+    }
+
+    for (;;) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(STDIN_FILENO, &read_fds);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 50000;
+        int ready = select(STDIN_FILENO + 1, &read_fds, NULL, NULL, &timeout);
+        if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &read_fds)) {
+            break;
+        }
+
+        unsigned char discard[512];
+        ssize_t nread = read(STDIN_FILENO, discard, sizeof(discard));
+        if (nread <= 0) {
+            break;
+        }
+    }
+}
+
 static bool handle_prefix_command(desk_session_t *session,
                                   desk_terminal_t *terminal,
                                   unsigned char key,
@@ -2753,6 +2779,7 @@ static int desk_run_workspace(const char *workspace_arg,
     session.manager = NULL;
 
     render_all_panes(&terminal, &session);
+    drain_terminal_input_once();
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
@@ -2823,6 +2850,7 @@ static int desk_run_workspace(const char *workspace_arg,
             if (resize_all_panes(&session, &terminal, &sizes_changed) == 0) {
                 (void)desk_save_layout(&session);
                 render_all_panes(&terminal, &session);
+                drain_terminal_input_once();
             }
         }
         if (quit_requested) {
