@@ -185,16 +185,45 @@ cubicle_error_code_t cubicle_process_read_output(cubicle_client_t *client,
     cubicle_json_builder_cleanup(&params); if (code != CUBICLE_OK) return code;
     const char *result = result_object(client, response);
     memset(chunk_out, 0, sizeof(*chunk_out));
-    json_u64_field(result, "start_offset", &chunk_out->start_offset);
-    json_u64_field(result, "next_offset", &chunk_out->next_offset);
-    json_bool_field(result, "end_of_stream", &chunk_out->end_of_stream);
-    char data[4096];
-    if (json_string_field(result, "data", data, sizeof(data)) == 0) {
-        chunk_out->length = strlen(data);
-        chunk_out->data = malloc(chunk_out->length);
-        if (chunk_out->length > 0 && chunk_out->data == NULL) { free(response); return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM, "failed to allocate output"); }
-        memcpy(chunk_out->data, data, chunk_out->length);
+    if (json_u64_field(result, "start_offset", &chunk_out->start_offset) < 0 ||
+        json_u64_field(result, "next_offset", &chunk_out->next_offset) < 0 ||
+        json_bool_field(result, "end_of_stream",
+                        &chunk_out->end_of_stream) < 0) {
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                "invalid output result");
     }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, result) < 0) {
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                "invalid output result");
+    }
+    yyjson_val *data_value = yyjson_obj_get(document.root, "data");
+    const char *data = yyjson_is_str(data_value) ? yyjson_get_str(data_value)
+                                                : NULL;
+    size_t data_length = yyjson_is_str(data_value)
+                             ? yyjson_get_len(data_value)
+                             : 0;
+    if (data == NULL) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                "invalid output data");
+    }
+    chunk_out->length = data_length;
+    chunk_out->data = data_length == 0 ? NULL : malloc(data_length);
+    if (data_length > 0 && chunk_out->data == NULL) {
+        cubicle_json_cleanup(&document);
+        free(response);
+        return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
+                                "failed to allocate output");
+    }
+    if (data_length > 0) {
+        memcpy(chunk_out->data, data, data_length);
+    }
+    cubicle_json_cleanup(&document);
     free(response); return CUBICLE_OK;
 }
 

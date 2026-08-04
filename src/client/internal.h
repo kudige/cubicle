@@ -78,6 +78,7 @@ const char *mode_name(cubicle_process_mode_t mode);
 const char *state_name(cubicle_process_state_t state);
 const char *stream_name(cubicle_stream_kind_t stream);
 const char *attachment_mode_name(cubicle_attachment_mode_t mode);
+int process_state_from_string(const char *text, cubicle_process_state_t *out);
 cubicle_error_code_t error_code_from_name(const char *name);
 int channel_mask_from_string(const char *text, cubicle_channel_mask_t *out);
 int parse_endpoint(const char *json, cubicle_endpoint_t *endpoint);

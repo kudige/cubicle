@@ -162,18 +162,10 @@ static cubicle_error_code_t process_wait_with_retry(cubicle_client_t *client,
 
 static cubicle_client_t *connect_client(const char *socket_path)
 {
-    cubicle_transport_t *transport = NULL;
-    assert(cubicle_transport_unix_create(&transport) == CUBICLE_OK);
-
-    cubicle_client_options_t options;
-    memset(&options, 0, sizeof(options));
-    int length = snprintf(options.endpoint.uri, sizeof(options.endpoint.uri),
-                          "unix://%s", socket_path);
-    assert(length > 0 && (size_t)length < sizeof(options.endpoint.uri));
-    options.transport = transport;
-
     cubicle_client_t *client = NULL;
-    assert(cubicle_client_connect(&options, &client) == CUBICLE_OK);
+    // Endpoint test for cubicle_client_connect_uri
+    assert(cubicle_client_connect_uri(socket_path, NULL, &client) ==
+           CUBICLE_OK);
     return client;
 }
 
@@ -440,6 +432,43 @@ int main(void)
     // Endpoint test for process.signal
     assert(cubicle_process_signal(client, started.id, SIGUSR1) ==
            CUBICLE_OK);
+
+    cubicle_attachment_request_t running_attachment_request;
+    memset(&running_attachment_request, 0, sizeof(running_attachment_request));
+    running_attachment_request.process_id = started.id;
+    running_attachment_request.channels = CUBICLE_CHANNEL_STDOUT;
+    running_attachment_request.mode = CUBICLE_ATTACHMENT_OBSERVER;
+    cubicle_attachment_grant_t running_grant;
+    memset(&running_grant, 0, sizeof(running_grant));
+    // Endpoint test for attachment.request
+    assert(cubicle_attachment_request(client, &running_attachment_request,
+                                      &running_grant) == CUBICLE_OK);
+
+    cubicle_attachment_t *attachment = NULL;
+    cubicle_attachment_options_t attachment_options;
+    memset(&attachment_options, 0, sizeof(attachment_options));
+    // Endpoint test for controller.attach
+    assert(cubicle_attachment_connect(&running_grant, &attachment_options,
+                                      &attachment) == CUBICLE_OK);
+    assert(attachment != NULL);
+
+    cubicle_attachment_status_t attachment_status;
+    memset(&attachment_status, 0, sizeof(attachment_status));
+    // Endpoint test for controller.status
+    assert(cubicle_attachment_status(attachment, &attachment_status) ==
+           CUBICLE_OK);
+    assert(attachment_status.state == CUBICLE_PROCESS_RUNNING);
+
+    char attachment_buffer[32];
+    bool end_of_stream = false;
+    // Endpoint test for controller.read
+    assert(cubicle_attachment_read_stream(
+               attachment, CUBICLE_STREAM_STDOUT, attachment_buffer,
+               sizeof(attachment_buffer), &end_of_stream) >= 0);
+
+    // Endpoint test for controller.detach
+    assert(cubicle_attachment_detach(attachment) == CUBICLE_OK);
+    cubicle_attachment_disconnect(attachment);
 
     // Endpoint test for process.terminate
     assert(cubicle_process_terminate(client, started.id, NULL) ==

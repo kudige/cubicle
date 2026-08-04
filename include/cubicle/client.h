@@ -24,6 +24,11 @@ cubicle_error_code_t cubicle_client_connect(
     const cubicle_client_options_t *options,
     cubicle_client_t **client_out);
 
+cubicle_error_code_t cubicle_client_connect_uri(
+    const char *uri,
+    const cubicle_auth_options_t *auth,
+    cubicle_client_t **client_out);
+
 void cubicle_client_disconnect(cubicle_client_t *client);
 
 const cubicle_error_t *cubicle_client_last_error(

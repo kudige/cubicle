@@ -2,6 +2,7 @@
 #define CUBICLE_ATTACHMENT_H
 
 #include "cubicle/client_error.h"
+#include "cubicle/process.h"
 #include "cubicle/types.h"
 
 #include <sys/types.h>
@@ -64,13 +65,27 @@ typedef struct cubicle_resize_tracker {
     bool has_size;
 } cubicle_resize_tracker_t;
 
+typedef struct cubicle_attachment_status {
+    cubicle_process_state_t state;
+    int64_t local_pid;
+    int64_t local_pgid;
+    int exit_code;
+    bool has_exit_status;
+    uint64_t stdout_offset;
+    uint64_t stderr_offset;
+    uint64_t tty_offset;
+} cubicle_attachment_status_t;
+
 cubicle_error_code_t cubicle_attachment_request(cubicle_client_t *client, const cubicle_attachment_request_t *request, cubicle_attachment_grant_t *grant_out);
 cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t *grant, const cubicle_attachment_options_t *options, cubicle_attachment_t **attachment_out);
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length);
+ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment, cubicle_stream_kind_t stream, void *buffer, size_t length, bool *end_of_stream_out);
 ssize_t cubicle_attachment_write(cubicle_attachment_t *attachment, const void *buffer, size_t length);
 cubicle_error_code_t cubicle_attachment_resize(cubicle_attachment_t *attachment, unsigned int rows, unsigned int cols);
 cubicle_error_code_t cubicle_attachment_resize_tracked(cubicle_attachment_t *attachment, cubicle_resize_tracker_t *tracker, unsigned int rows, unsigned int cols, bool force, bool *sent_out);
 cubicle_error_code_t cubicle_attachment_close_input(cubicle_attachment_t *attachment);
+cubicle_error_code_t cubicle_attachment_status(cubicle_attachment_t *attachment, cubicle_attachment_status_t *status_out);
+cubicle_error_code_t cubicle_attachment_detach(cubicle_attachment_t *attachment);
 const cubicle_error_t *cubicle_attachment_last_error(const cubicle_attachment_t *attachment);
 void cubicle_attachment_disconnect(cubicle_attachment_t *attachment);
 

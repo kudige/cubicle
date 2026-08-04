@@ -3,6 +3,8 @@
 #include "../common/auth_crypto.h"
 #include "../common/auth_protocol.h"
 
+#include "cubicle/transport_tcp.h"
+#include "cubicle/transport_unix.h"
 #include "cubicle/util.h"
 
 #include <errno.h>
@@ -617,6 +619,57 @@ cubicle_error_code_t cubicle_client_connect(const cubicle_client_options_t *opti
     }
     *client_out = client;
     return CUBICLE_OK;
+}
+
+cubicle_error_code_t cubicle_client_connect_uri(
+    const char *uri,
+    const cubicle_auth_options_t *auth,
+    cubicle_client_t **client_out)
+{
+    if (uri == NULL || uri[0] == '\0' || client_out == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+
+    cubicle_endpoint_t endpoint;
+    memset(&endpoint, 0, sizeof(endpoint));
+    if (uri[0] == '/') {
+        int length = snprintf(endpoint.uri, sizeof(endpoint.uri),
+                              "unix://%s", uri);
+        if (length < 0 || (size_t)length >= sizeof(endpoint.uri)) {
+            return CUBICLE_ERR_INVALID_ARGUMENT;
+        }
+    } else {
+        int length = snprintf(endpoint.uri, sizeof(endpoint.uri), "%s", uri);
+        if (length < 0 || (size_t)length >= sizeof(endpoint.uri)) {
+            return CUBICLE_ERR_INVALID_ARGUMENT;
+        }
+    }
+
+    cubicle_transport_t *transport = NULL;
+    cubicle_error_code_t code;
+    if (strncmp(endpoint.uri, "tcp://", 6) == 0) {
+        code = cubicle_transport_tcp_create(&transport);
+    } else {
+        code = cubicle_transport_unix_create(&transport);
+    }
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+
+    cubicle_client_options_t options;
+    memset(&options, 0, sizeof(options));
+    options.endpoint = endpoint;
+    options.transport = transport;
+    if (auth != NULL) {
+        options.auth = *auth;
+    }
+
+    code = cubicle_client_connect(&options, client_out);
+    if (code != CUBICLE_OK && transport->vtable != NULL &&
+        transport->vtable->destroy != NULL) {
+        transport->vtable->destroy(transport);
+    }
+    return code;
 }
 
 void cubicle_client_disconnect(cubicle_client_t *client)
