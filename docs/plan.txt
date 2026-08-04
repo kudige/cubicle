@@ -402,6 +402,7 @@
   - manager process start and framed process.start accept term
   - cube run --term, cube connect, and cube logs handle terminal output with separately retained stderr
   - controller, manager, and cube E2E tests cover term stdout/stderr separation
+  - background TTY controllers answer common startup terminal queries until an interactive attach is active
 - Started configuration deployment support:
   - added libeconf-backed read-only configuration loading
   - packaged defaults define state_dir, runtime_dir, log_dir, listen socket, controller binary, and client manager endpoint

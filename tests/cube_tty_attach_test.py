@@ -281,7 +281,7 @@ def main():
                     "--stdout",
                     "replay-probe",
                 ],
-                "\x1b[6n",
+                "GOT_INPUT",
                 env,
             )
 
@@ -305,7 +305,7 @@ def main():
             )
             os.close(replay_slave_fd)
             try:
-                read_until(replay_master_fd, b"NO_INPUT")
+                read_until(replay_master_fd, b"GOT_INPUT")
                 time.sleep(0.1)
                 os.write(replay_master_fd, b"\x1cd")
                 replay_connect.wait(timeout=5)
@@ -326,11 +326,11 @@ def main():
                     "--stdout",
                     "replay-probe",
                 ],
-                "NO_INPUT",
+                "GOT_INPUT",
                 env,
             )
-            if "GOT_INPUT" in probe_logs:
-                raise AssertionError(f"replayed terminal response was forwarded: {probe_logs!r}")
+            if "NO_INPUT" in probe_logs:
+                raise AssertionError(f"controller did not answer terminal query: {probe_logs!r}")
             check_call(
                 [
                     cube,
@@ -351,7 +351,17 @@ def main():
                 "tty.setraw(0)\n"
                 "sys.stdout.write('READY\\n')\n"
                 "sys.stdout.flush()\n"
-                "time.sleep(0.2)\n"
+                "deadline = time.time() + 3.0\n"
+                "trigger = b''\n"
+                "while time.time() < deadline:\n"
+                "    ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
+                "    if ready:\n"
+                "        trigger = os.read(0, 1)\n"
+                "        break\n"
+                "if not trigger:\n"
+                "    sys.stdout.write('NO_TRIGGER\\n')\n"
+                "    sys.stdout.flush()\n"
+                "    sys.exit(1)\n"
                 "sys.stdout.write('\\x1b[6n')\n"
                 "sys.stdout.flush()\n"
                 "deadline = time.time() + 3.0\n"
@@ -419,6 +429,8 @@ def main():
             )
             os.close(live_slave_fd)
             try:
+                read_until(live_master_fd, b"READY")
+                os.write(live_master_fd, b"T")
                 read_until(live_master_fd, b"\x1b[6n")
                 os.write(live_master_fd, b"\x1b[1;1R")
                 read_until(live_master_fd, b"GOT_LIVE_REPLY")

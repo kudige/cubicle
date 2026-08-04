@@ -150,6 +150,99 @@ static int sync_local_terminal_window_size(int resize_fd,
     return 0;
 }
 
+static int write_terminal_response(controller_state_t *state,
+                                   int child_stdin_fd,
+                                   const char *name,
+                                   const char *response)
+{
+    size_t length = strlen(response);
+    if (write_best_effort(child_stdin_fd, response, length) < 0 &&
+        errno != EAGAIN) {
+        return -1;
+    }
+
+    char event[128];
+    int event_length = snprintf(event, sizeof(event),
+                                "type=terminal_response query=%s length=%zu",
+                                name, length);
+    if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_event(state, event);
+}
+
+static int answer_unattached_terminal_queries(controller_state_t *state,
+                                              int child_stdin_fd,
+                                              const char *buffer,
+                                              size_t length)
+{
+    if (child_stdin_fd < 0 || buffer == NULL) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char *input = (const unsigned char *)buffer;
+        if (input[i] != '\033' || i + 1 >= length) {
+            continue;
+        }
+
+        if (input[i + 1] == '[') {
+            if (i + 4 <= length && memcmp(&buffer[i], "\033[6n", 4) == 0) {
+                char response[32];
+                snprintf(response, sizeof(response), "\033[1;1R");
+                if (write_terminal_response(state, child_stdin_fd, "dsr",
+                                            response) < 0) {
+                    return -1;
+                }
+                i += 3;
+                continue;
+            }
+            if (i + 3 <= length && memcmp(&buffer[i], "\033[c", 3) == 0) {
+                if (write_terminal_response(state, child_stdin_fd,
+                                            "primary-da",
+                                            "\033[?1;2c") < 0) {
+                    return -1;
+                }
+                i += 2;
+                continue;
+            }
+            if (i + 4 <= length && memcmp(&buffer[i], "\033[?u", 4) == 0) {
+                if (write_terminal_response(state, child_stdin_fd,
+                                            "keyboard-protocol",
+                                            "\033[?0u") < 0) {
+                    return -1;
+                }
+                i += 3;
+                continue;
+            }
+        }
+
+        if (input[i + 1] == ']' && i + 5 < length &&
+            input[i + 2] == '1' &&
+            (input[i + 3] == '0' || input[i + 3] == '1') &&
+            input[i + 4] == ';' && input[i + 5] == '?') {
+            size_t cursor = i + 6;
+            if (cursor + 1 < length && input[cursor] == '\033' &&
+                input[cursor + 1] == '\\') {
+                const char *query = input[i + 3] == '0' ? "foreground-color"
+                                                        : "background-color";
+                const char *response = input[i + 3] == '0'
+                                           ? "\033]10;rgb:e3e3/e3e3/eaea\033\\"
+                                           : "\033]11;rgb:0808/0505/2b2b\033\\";
+                if (write_terminal_response(state, child_stdin_fd, query,
+                                            response) < 0) {
+                    return -1;
+                }
+                i = cursor + 1;
+                continue;
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int create_pipe(int pipe_fds[2], const char *name)
 {
     if (pipe(pipe_fds) == 0) {
@@ -507,6 +600,17 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                                             (size_t)read_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed updating terminal snapshot");
+                return -1;
+            }
+
+            if (terminal_model != NULL && local_input_fd < 0 &&
+                !state->terminal_attachment_active &&
+                pipes[i].offset == &state->stdout_offset &&
+                answer_unattached_terminal_queries(state, child_stdin_fd,
+                                                   buffer,
+                                                   (size_t)read_result) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed answering terminal query");
                 return -1;
             }
 

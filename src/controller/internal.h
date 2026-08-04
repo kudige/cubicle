@@ -55,6 +55,7 @@ typedef struct controller_state {
     long long stdout_offset;
     long long stderr_offset;
     int debug_input;
+    int terminal_attachment_active;
 } controller_state_t;
 
 typedef struct terminal_size_state {

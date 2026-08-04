@@ -564,6 +564,13 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-controller-tty-terminal-response-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_tty_terminal_response_test.sh
+)
+
+add_test(
     NAME cubicle-controller-term-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
