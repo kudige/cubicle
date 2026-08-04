@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import fcntl
+import struct
+import termios
 
 
 def wait_for_socket(path):
@@ -263,6 +266,69 @@ def run_desk_with_terminal_noise(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_until_emacs_render(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 30, 100, 0, 0))
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_quit = False
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if (b"line one visible" in captured and
+                    b"\x1b[28;1H" in captured and
+                    b"sample.txt" in captured and
+                    not sent_quit):
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_quit:
+            raise AssertionError(
+                "desk did not render Emacs snapshot at pane height; "
+                f"output={captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def main():
     manager = os.environ["CUBICLE_MANAGER"]
     controller = os.environ["CUBICLE_CONTROLLER"]
@@ -443,6 +509,33 @@ def main():
             raise AssertionError(
                 f"desk forwarded terminal response bytes:\n{noise_logs.stdout}"
             )
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        emacs = shutil.which("emacs")
+        if emacs is not None:
+            sample_path = os.path.join(tmpdir, "sample.txt")
+            with open(sample_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "line one visible\n"
+                    "line two visible\n"
+                    "line three visible\n"
+                )
+            run_checked(
+                [
+                    cube,
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    "emacs-file",
+                    emacs,
+                    "-nw",
+                    "-Q",
+                    sample_path,
+                ],
+                env,
+            )
+            run_desk_until_emacs_render(desk, env)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
     finally:

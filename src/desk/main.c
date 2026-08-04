@@ -1807,6 +1807,19 @@ static void grid_apply_snapshot(desk_grid_t *grid,
     }
 }
 
+static int refresh_pane_snapshot(desk_pane_t *pane)
+{
+    cubicle_terminal_snapshot_t snapshot;
+    cubicle_error_code_t code = cubicle_attachment_snapshot(pane->attachment,
+                                                            &snapshot);
+    if (code != CUBICLE_OK) {
+        return -1;
+    }
+    grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    return 0;
+}
+
 static void grid_clear_row(desk_grid_t *grid, int row)
 {
     if (row < 0 || row >= grid->rows) {
@@ -2734,6 +2747,10 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         if (output_seen != NULL) {
             *output_seen = true;
         }
+    }
+
+    if (pane_changed && refresh_pane_snapshot(pane) < 0) {
+        return -1;
     }
 
     if (pane_changed) {
