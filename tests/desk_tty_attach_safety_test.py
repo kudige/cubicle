@@ -50,6 +50,8 @@ def run_desk_and_ctrl_c(desk, cube, env):
     os.write(master_fd, b"\x1b[12;34R")
     captured = bytearray()
     sent_ctrl_c = False
+    saw_ctrl_c = False
+    sent_quit = False
     deadline = time.time() + 5
     try:
         while time.time() < deadline:
@@ -90,13 +92,33 @@ def run_desk_and_ctrl_c(desk, cube, env):
                 os.write(master_fd, b"\x03")
                 sent_ctrl_c = True
 
+            if sent_ctrl_c and not saw_ctrl_c:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_CTRL_C" in logs.stdout:
+                    saw_ctrl_c = True
+
+            if saw_ctrl_c and not sent_quit:
+                if proc.poll() is not None:
+                    raise AssertionError("desk exited after forwarding Ctrl-C")
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
             if proc.poll() is not None:
                 break
 
         if not sent_ctrl_c:
             raise AssertionError(f"desk did not render attached pane: {captured!r}")
+        if not saw_ctrl_c:
+            raise AssertionError(f"desk did not forward Ctrl-C: {captured!r}")
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
         if proc.poll() is None:
-            proc.terminate()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
@@ -238,9 +260,22 @@ def main():
                 "--tty",
                 "--name",
                 "desk-safe",
-                "sh",
+                sys.executable,
                 "-c",
-                "echo READY; while true; do sleep 1; done",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+10\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r and b'\\x03' in os.read(0,64):\n"
+                    "        sys.stdout.write('GOT_CTRL_C\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        break\n"
+                    "time.sleep(10)\n"
+                ),
             ],
             env,
         )
@@ -260,8 +295,8 @@ def main():
             raise AssertionError(f"expected one controller event log, got {event_logs}")
         with open(event_logs[0], "r", encoding="utf-8") as handle:
             events = handle.read()
-        if "type=input" in events:
-            raise AssertionError(f"desk startup/Ctrl-C forwarded input:\n{events}")
+        if "type=input length=1" not in events:
+            raise AssertionError(f"desk did not record forwarded Ctrl-C:\n{events}")
 
         run_checked(
             [

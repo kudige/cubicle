@@ -2757,32 +2757,6 @@ static int write_active_pane(desk_session_t *session,
                : 0;
 }
 
-static void drain_terminal_input_once(void)
-{
-    if (!isatty(STDIN_FILENO)) {
-        return;
-    }
-
-    for (;;) {
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(STDIN_FILENO, &read_fds);
-        struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 50000;
-        int ready = select(STDIN_FILENO + 1, &read_fds, NULL, NULL, &timeout);
-        if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &read_fds)) {
-            break;
-        }
-
-        unsigned char discard[512];
-        ssize_t nread = read(STDIN_FILENO, discard, sizeof(discard));
-        if (nread <= 0) {
-            break;
-        }
-    }
-}
-
 static bool handle_prefix_command(desk_session_t *session,
                                   desk_terminal_t *terminal,
                                   unsigned char key,
@@ -2826,6 +2800,36 @@ static bool handle_prefix_command(desk_session_t *session,
     }
 }
 
+static bool is_terminal_cursor_position_response(const unsigned char *input,
+                                                 size_t length,
+                                                 size_t offset,
+                                                 size_t *consumed)
+{
+    size_t cursor = offset;
+    if (cursor + 3 >= length || input[cursor] != 0x1b ||
+        input[cursor + 1] != '[') {
+        return false;
+    }
+    cursor += 2;
+    size_t row_start = cursor;
+    while (cursor < length && input[cursor] >= '0' && input[cursor] <= '9') {
+        ++cursor;
+    }
+    if (cursor == row_start || cursor >= length || input[cursor] != ';') {
+        return false;
+    }
+    ++cursor;
+    size_t col_start = cursor;
+    while (cursor < length && input[cursor] >= '0' && input[cursor] <= '9') {
+        ++cursor;
+    }
+    if (cursor == col_start || cursor >= length || input[cursor] != 'R') {
+        return false;
+    }
+    *consumed = cursor - offset + 1;
+    return true;
+}
+
 static int handle_input(desk_session_t *session,
                         desk_terminal_t *terminal,
                         const unsigned char *input,
@@ -2834,6 +2838,12 @@ static int handle_input(desk_session_t *session,
                         bool *quit_requested)
 {
     for (size_t i = 0; i < length; ++i) {
+        size_t consumed = 0;
+        if (is_terminal_cursor_position_response(input, length, i,
+                                                 &consumed)) {
+            i += consumed - 1;
+            continue;
+        }
         if (session->prefix_pending) {
             session->prefix_pending = false;
             (void)handle_prefix_command(session, terminal, input[i],
@@ -2844,14 +2854,8 @@ static int handle_input(desk_session_t *session,
             session->prefix_pending = true;
             continue;
         }
-        if (input[i] == 3) {
-            *quit_requested = true;
-            continue;
-        }
-
         desk_resize_side_t side;
         int delta = 0;
-        size_t consumed = 0;
         if (session->layout.resize_mode &&
             parse_resize_arrow(input, length, i, &side, &delta, &consumed)) {
             if (pane_layout_resize_side(&session->layout, terminal, side,
@@ -2946,7 +2950,6 @@ static int desk_run_workspace(const char *workspace_arg,
     session.manager = NULL;
 
     render_all_panes(&terminal, &session);
-    drain_terminal_input_once();
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
