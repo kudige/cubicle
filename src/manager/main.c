@@ -5466,13 +5466,17 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
         size_t count = 0;
         uint64_t global_sequence = 0;
+        int has_more = 0;
         if (file != NULL) {
             char line[PATH_MAX + 1400];
             while (fgets(line, sizeof(line), file) != NULL) {
                 ++global_sequence;
-                if (global_sequence <= after_sequence ||
-                    (limit > 0 && count >= limit)) {
+                if (global_sequence <= after_sequence) {
                     continue;
+                }
+                if (limit > 0 && count >= limit) {
+                    has_more = 1;
+                    break;
                 }
 
                 char copy[PATH_MAX + 1400];
@@ -5500,10 +5504,14 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                    "%s%s", count == 0 ? "" : ",", item);
                 if (written < 0 ||
                     (size_t)written >= sizeof(result) - used) {
-                    fclose(file);
-                    MANAGER_RETURN(manager_api_error(
-                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
-                        "events response too large", false, 0));
+                    if (count == 0) {
+                        fclose(file);
+                        MANAGER_RETURN(manager_api_error(
+                            client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                            "events response too large", false, 0));
+                    }
+                    has_more = 1;
+                    break;
                 }
                 used += (size_t)written;
                 ++count;
@@ -5512,7 +5520,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         written = snprintf(result + used, sizeof(result) - used,
-                           "],\"count\":%zu,\"has_more\":false}", count);
+                           "],\"count\":%zu,\"has_more\":%s}", count,
+                           has_more ? "true" : "false");
         if (written < 0 || (size_t)written >= sizeof(result) - used) {
             MANAGER_RETURN(manager_api_error(
                 client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,

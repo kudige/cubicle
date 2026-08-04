@@ -17,6 +17,9 @@ trap cleanup EXIT
 state_dir="$tmpdir/manager"
 socket_path="$tmpdir/manager.sock"
 xdg_state_home="$tmpdir/xdg-state"
+xdg_config_home="$tmpdir/xdg-config"
+mkdir -p "$xdg_config_home"
+export XDG_CONFIG_HOME="$xdg_config_home"
 
 workspace_output=$("$CUBICLE_MANAGER" --state-dir "$state_dir" workspace create "Project A")
 workspace_id=${workspace_output#workspace id=}

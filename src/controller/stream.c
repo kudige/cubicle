@@ -172,10 +172,41 @@ static int write_terminal_response(controller_state_t *state,
     return append_event(state, event);
 }
 
-static int answer_unattached_terminal_queries(controller_state_t *state,
-                                              int child_stdin_fd,
-                                              const char *buffer,
-                                              size_t length)
+static int log_terminal_query_passthrough(controller_state_t *state,
+                                          const char *name)
+{
+    if (!state->debug_input) {
+        return 0;
+    }
+
+    char event[128];
+    int event_length = snprintf(event, sizeof(event),
+                                "type=terminal_query query=%s action=passthrough",
+                                name);
+    if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_event(state, event);
+}
+
+static int handle_terminal_query(controller_state_t *state,
+                                 int child_stdin_fd,
+                                 const char *name,
+                                 const char *response,
+                                 int answer)
+{
+    if (answer) {
+        return write_terminal_response(state, child_stdin_fd, name, response);
+    }
+    return log_terminal_query_passthrough(state, name);
+}
+
+static int handle_terminal_queries(controller_state_t *state,
+                                   int child_stdin_fd,
+                                   const char *buffer,
+                                   size_t length,
+                                   int answer)
 {
     if (child_stdin_fd < 0 || buffer == NULL) {
         return 0;
@@ -191,26 +222,26 @@ static int answer_unattached_terminal_queries(controller_state_t *state,
             if (i + 4 <= length && memcmp(&buffer[i], "\033[6n", 4) == 0) {
                 char response[32];
                 snprintf(response, sizeof(response), "\033[1;1R");
-                if (write_terminal_response(state, child_stdin_fd, "dsr",
-                                            response) < 0) {
+                if (handle_terminal_query(state, child_stdin_fd, "dsr",
+                                          response, answer) < 0) {
                     return -1;
                 }
                 i += 3;
                 continue;
             }
             if (i + 3 <= length && memcmp(&buffer[i], "\033[c", 3) == 0) {
-                if (write_terminal_response(state, child_stdin_fd,
-                                            "primary-da",
-                                            "\033[?1;2c") < 0) {
+                if (handle_terminal_query(state, child_stdin_fd,
+                                          "primary-da", "\033[?1;2c",
+                                          answer) < 0) {
                     return -1;
                 }
                 i += 2;
                 continue;
             }
             if (i + 4 <= length && memcmp(&buffer[i], "\033[?u", 4) == 0) {
-                if (write_terminal_response(state, child_stdin_fd,
-                                            "keyboard-protocol",
-                                            "\033[?0u") < 0) {
+                if (handle_terminal_query(state, child_stdin_fd,
+                                          "keyboard-protocol",
+                                          "\033[?0u", answer) < 0) {
                     return -1;
                 }
                 i += 3;
@@ -230,8 +261,8 @@ static int answer_unattached_terminal_queries(controller_state_t *state,
                 const char *response = input[i + 3] == '0'
                                            ? "\033]10;rgb:e3e3/e3e3/eaea\033\\"
                                            : "\033]11;rgb:0808/0505/2b2b\033\\";
-                if (write_terminal_response(state, child_stdin_fd, query,
-                                            response) < 0) {
+                if (handle_terminal_query(state, child_stdin_fd, query,
+                                          response, answer) < 0) {
                     return -1;
                 }
                 i = cursor + 1;
@@ -467,6 +498,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                         return -1;
                     }
                 } else if (read_result == 0) {
+                    append_event(state, "type=local_input_closed reason=eof");
                     local_input_fd = -1;
                 } else if (write_best_effort(child_stdin_fd, buffer,
                                              (size_t)read_result) < 0 &&
@@ -489,6 +521,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if ((revents & (POLLHUP | POLLERR)) != 0) {
+                append_event(state, "type=local_input_closed reason=hup");
                 local_input_fd = -1;
             }
         }
@@ -604,11 +637,10 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if (terminal_model != NULL && local_input_fd < 0 &&
-                !state->terminal_attachment_active &&
                 pipes[i].offset == &state->stdout_offset &&
-                answer_unattached_terminal_queries(state, child_stdin_fd,
-                                                   buffer,
-                                                   (size_t)read_result) < 0) {
+                handle_terminal_queries(
+                    state, child_stdin_fd, buffer, (size_t)read_result,
+                    !state->terminal_attachment_active) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed answering terminal query");
                 return -1;

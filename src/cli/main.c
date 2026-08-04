@@ -2274,7 +2274,8 @@ static int process_logs(const char *manager_socket,
 static int print_events_response(const char *result_json,
                                  int json,
                                  uint64_t *after_sequence,
-                                 size_t *event_count)
+                                 size_t *event_count,
+                                 int *has_more)
 {
     cubicle_json_doc_t document;
     if (cubicle_json_parse(&document, result_json) < 0) {
@@ -2290,6 +2291,11 @@ static int print_events_response(const char *result_json,
     }
 
     *event_count = yyjson_arr_size(events);
+    int more = 0;
+    (void)json_bool_field(document.root, "has_more", &more);
+    if (has_more != NULL) {
+        *has_more = more;
+    }
     if (json) {
         if (*event_count > 0) {
             printf("%s\n", result_json);
@@ -2409,15 +2415,16 @@ static int process_events(const char *manager_socket,
         }
 
         size_t event_count = 0;
+        int has_more = 0;
         int result = print_events_response(response.result_json,
                                           options->json, &after_sequence,
-                                          &event_count);
+                                          &event_count, &has_more);
         cleanup_rpc_response(&response);
         if (result != 0) {
             return result;
         }
 
-        if (!follow) {
+        if (!follow && !has_more) {
             return 0;
         }
         ++completed_iterations;

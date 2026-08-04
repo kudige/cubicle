@@ -961,6 +961,7 @@ static int dispatch_api_request(control_client_t *client,
             ((channels & CUBICLE_CHANNEL_TTY) != 0 ||
              (channels & CUBICLE_CHANNEL_STDOUT) != 0)) {
             state->terminal_attachment_active = 1;
+            append_event(state, "type=attachment_active active=true");
         }
         char result[512];
         int length = snprintf(
@@ -976,6 +977,7 @@ static int dispatch_api_request(control_client_t *client,
 
     if (strcmp(envelope.method, "controller.detach") == 0) {
         state->terminal_attachment_active = 0;
+        append_event(state, "type=attachment_active active=false reason=detach");
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
 
