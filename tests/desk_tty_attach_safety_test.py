@@ -36,7 +36,7 @@ def run_checked(command, env, **kwargs):
     return result.stdout
 
 
-def run_desk_and_ctrl_c(desk, env):
+def run_desk_and_ctrl_c(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
         [desk],
@@ -67,6 +67,25 @@ def run_desk_and_ctrl_c(desk, env):
                     os.read(proc.stderr.fileno(), 4096)
 
             if not sent_ctrl_c and b"desk-safe" in captured:
+                ps_result = subprocess.run(
+                    [cube, "ps"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=2,
+                )
+                if ps_result.returncode != 0:
+                    raise AssertionError(
+                        f"cube ps failed while desk was open:\n"
+                        f"stdout:\n{ps_result.stdout}\n"
+                        f"stderr:\n{ps_result.stderr}"
+                    )
+                if "desk-safe\ttty\trunning" not in ps_result.stdout:
+                    raise AssertionError(
+                        f"cube ps did not see running cube while desk was open:\n"
+                        f"{ps_result.stdout}"
+                    )
                 os.write(master_fd, b"\x03")
                 sent_ctrl_c = True
 
@@ -164,7 +183,7 @@ def main():
             env,
         )
 
-        run_desk_and_ctrl_c(desk, env)
+        run_desk_and_ctrl_c(desk, cube, env)
 
         ps_output = run_checked([cube, "ps"], env)
         if "desk-safe\ttty\trunning" not in ps_output:

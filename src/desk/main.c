@@ -2749,6 +2749,8 @@ static int desk_run_workspace(const char *workspace_arg,
         desk_session_cleanup(&session);
         return result;
     }
+    cubicle_client_disconnect(session.manager);
+    session.manager = NULL;
 
     render_all_panes(&terminal, &session);
     while (!g_stop_requested) {
