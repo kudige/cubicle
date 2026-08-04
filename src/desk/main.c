@@ -2592,12 +2592,16 @@ static int load_or_create_layout(desk_session_t *session,
         return 2;
     }
 
-    if (pane_layout_load_file(&session->layout, session->layout_path) == 0 &&
-        pane_layout_leaf_count(&session->layout) == session->pane_count) {
-        session->layout.zoom = DESK_ZOOM_NONE;
-        session->layout.resize_mode = false;
-        desk_apply_pane_labels(session);
-        return 0;
+    int load_result = pane_layout_load_file(&session->layout,
+                                            session->layout_path);
+    if (load_result == 0) {
+        if (pane_layout_leaf_count(&session->layout) == session->pane_count) {
+            session->layout.zoom = DESK_ZOOM_NONE;
+            session->layout.resize_mode = false;
+            desk_apply_pane_labels(session);
+            return 0;
+        }
+        errno = EINVAL;
     }
     if (errno != ENOENT && errno != EINVAL) {
         snprintf(error, error_size, "failed to load desk layout: %s",
