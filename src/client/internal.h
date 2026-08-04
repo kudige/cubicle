@@ -34,7 +34,13 @@ struct cubicle_signer {
 };
 
 struct cubicle_attachment {
+    cubicle_attachment_grant_t grant;
     cubicle_error_t last_error;
+    cubicle_channel_mask_t channels;
+    cubicle_attachment_mode_t mode;
+    uint64_t stdout_offset;
+    uint64_t stderr_offset;
+    uint64_t tty_offset;
 };
 
 struct cubicle_event_subscription {
