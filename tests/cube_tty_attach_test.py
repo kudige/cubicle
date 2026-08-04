@@ -56,6 +56,25 @@ def read_available(fd):
     return output
 
 
+def read_until(fd, needle, timeout=5):
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output.extend(chunk)
+        if needle in output:
+            return bytes(output)
+    raise AssertionError(f"did not read {needle!r}; captured {bytes(output)!r}")
+
+
 def set_window_size(fd, rows, columns):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
@@ -66,6 +85,24 @@ def check_call(command, **kwargs):
 
 def check_output(command, **kwargs):
     return subprocess.check_output(command, text=True, **kwargs)
+
+
+def wait_for_output(command, needle, env):
+    deadline = time.monotonic() + 5
+    last = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        last = result.stdout + result.stderr
+        if needle in last:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"missing {needle!r}; last output {last!r}")
 
 
 def main():
@@ -196,6 +233,118 @@ def main():
                     workspace_id,
                 ],
                 stdout=subprocess.DEVNULL,
+            )
+
+            replay_probe = (
+                "import os,select,sys,termios,tty,time\n"
+                "tty.setraw(0)\n"
+                "sys.stdout.write('\\x1b[6n')\n"
+                "sys.stdout.flush()\n"
+                "deadline = time.time() + 2.0\n"
+                "data = b''\n"
+                "while time.time() < deadline:\n"
+                "    ready, _, _ = select.select([sys.stdin], [], [], 0.05)\n"
+                "    if ready:\n"
+                "        data = os.read(0, 64)\n"
+                "        break\n"
+                "sys.stdout.write('GOT_INPUT\\n' if data else 'NO_INPUT\\n')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(5)\n"
+            )
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    "replay-probe",
+                    sys.executable,
+                    "-c",
+                    replay_probe,
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
+            )
+            wait_for_output(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "logs",
+                    "--stdout",
+                    "replay-probe",
+                ],
+                "\x1b[6n",
+                env,
+            )
+
+            replay_master_fd, replay_slave_fd = pty.openpty()
+            set_window_size(replay_master_fd, 24, 80)
+            replay_connect = subprocess.Popen(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "connect",
+                    "replay-probe",
+                ],
+                stdin=replay_slave_fd,
+                stdout=replay_slave_fd,
+                stderr=replay_slave_fd,
+                env=env,
+                close_fds=True,
+            )
+            os.close(replay_slave_fd)
+            try:
+                read_until(replay_master_fd, b"\x1b[6n")
+                os.write(replay_master_fd, b"\x1b[12;34R")
+                time.sleep(0.1)
+                os.write(replay_master_fd, b"\x1cd")
+                replay_connect.wait(timeout=5)
+            finally:
+                if replay_connect.poll() is None:
+                    replay_connect.terminate()
+                    replay_connect.wait(timeout=5)
+                os.close(replay_master_fd)
+
+            probe_logs = wait_for_output(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "logs",
+                    "--stdout",
+                    "replay-probe",
+                ],
+                "NO_INPUT",
+                env,
+            )
+            if "GOT_INPUT" in probe_logs:
+                raise AssertionError(f"replayed terminal response was forwarded: {probe_logs!r}")
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "kill",
+                    "--cleanup",
+                    "replay-probe",
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
             )
         finally:
             if cube_process is not None and cube_process.poll() is None:

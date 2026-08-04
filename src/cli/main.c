@@ -2542,6 +2542,32 @@ static int attachment_resize_tty(cubicle_attachment_t *attachment)
     return 0;
 }
 
+static void drain_terminal_input_once(void)
+{
+    if (!isatty(STDIN_FILENO)) {
+        return;
+    }
+
+    for (;;) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(STDIN_FILENO, &read_fds);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 20000;
+        int ready = select(STDIN_FILENO + 1, &read_fds, NULL, NULL, &timeout);
+        if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &read_fds)) {
+            break;
+        }
+
+        char discard[512];
+        ssize_t nread = read(STDIN_FILENO, discard, sizeof(discard));
+        if (nread <= 0) {
+            break;
+        }
+    }
+}
+
 static int attachment_is_completed(cubicle_attachment_t *attachment,
                                    int *completed)
 {
@@ -2567,11 +2593,68 @@ static int attachment_is_completed(cubicle_attachment_t *attachment,
     return 0;
 }
 
+static int replay_terminal_output(cubicle_attachment_t *attachment,
+                                  uint64_t replay_bytes)
+{
+    if (replay_bytes == 0) {
+        return 0;
+    }
+
+    cubicle_attachment_status_t status;
+    memset(&status, 0, sizeof(status));
+    cubicle_error_code_t code = cubicle_attachment_status(attachment, &status);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_attachment_last_error(attachment);
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment status failed");
+        return 2;
+    }
+
+    uint64_t replay_start = status.tty_offset > replay_bytes
+                                ? status.tty_offset - replay_bytes
+                                : 0;
+    uint64_t remaining = status.tty_offset - replay_start;
+    cubicle_attachment_replay(attachment, replay_bytes);
+
+    while (remaining > 0) {
+        char buffer[8192];
+        size_t chunk = remaining > sizeof(buffer) ? sizeof(buffer)
+                                                  : (size_t)remaining;
+        bool end_of_stream = false;
+        ssize_t nread = cubicle_attachment_read_stream(
+            attachment, CUBICLE_STREAM_TTY, buffer, chunk, &end_of_stream);
+        if (nread < 0) {
+            const cubicle_error_t *error = cubicle_attachment_last_error(attachment);
+            fprintf(stderr, "cube: %s\n",
+                    error != NULL && error->message[0] != '\0'
+                        ? error->message
+                        : "attachment replay failed");
+            return 2;
+        }
+        if (nread == 0) {
+            break;
+        }
+        fwrite(buffer, 1, (size_t)nread, stdout);
+        fflush(stdout);
+        remaining -= (uint64_t)nread;
+        drain_terminal_input_once();
+        if (end_of_stream) {
+            break;
+        }
+    }
+
+    drain_terminal_input_once();
+    return 0;
+}
+
 static int attachment_loop(cubicle_attachment_t *attachment,
                            unsigned int channels,
                            const char *process_name,
                            const char *mode,
-                           int read_only)
+                           int read_only,
+                           uint64_t replay_bytes)
 {
     int stdin_open = !read_only && (channels & CUBE_CHANNEL_STDIN) != 0;
     int stdin_is_tty = isatty(STDIN_FILENO);
@@ -2627,7 +2710,14 @@ static int attachment_loop(cubicle_attachment_t *attachment,
     fprintf(stderr, "Connected to [%s]. Detach with Ctrl-\\ d\n",
             process_name);
     int result = 0;
-    result = attachment_resize_tty(attachment);
+    if (terminal_mode) {
+        result = replay_terminal_output(attachment, replay_bytes);
+    } else {
+        cubicle_attachment_replay(attachment, replay_bytes);
+    }
+    if (result == 0) {
+        result = attachment_resize_tty(attachment);
+    }
 
     while (result == 0 && !detach_requested) {
         int completed = 0;
@@ -2811,9 +2901,8 @@ static int attach_to_process_id(const char *manager_socket,
         return 2;
     }
 
-    cubicle_attachment_replay(attachment, replay_bytes);
     int result = attachment_loop(attachment, accepted_channels, process_name,
-                                 mode, read_only);
+                                 mode, read_only, replay_bytes);
     (void)cubicle_attachment_detach(attachment);
     cubicle_attachment_disconnect(attachment);
     return result;
