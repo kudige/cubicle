@@ -30,11 +30,17 @@ Each managed root process has one deliberately small controller. The controller 
 - PTY master and/or pipe endpoints
 - process input
 - output and error persistence
+- terminal screen-state snapshots for PTY-backed processes
 - direct client attachments
 - resize and signal requests
 - exit detection and a small durable primitive-event journal
 
 A controller does not understand workspace names, Desk layouts, dependencies, health checks, or agent policy.
+
+For TTY-backed modes, the controller also maintains the canonical virtual
+terminal state as PTY bytes are captured. Rendering clients can attach by
+requesting the current screen snapshot and then consuming only bytes after the
+snapshot offset, instead of replaying all historical terminal output.
 
 If a controller fails, only its managed process tree is affected. If the manager fails, no managed process should be affected.
 

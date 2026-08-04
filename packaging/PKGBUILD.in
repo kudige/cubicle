@@ -5,7 +5,7 @@ pkgdesc='@CPACK_PACKAGE_DESCRIPTION_SUMMARY@'
 arch=('@CUBICLE_PACMAN_ARCH@')
 url='@CPACK_PACKAGE_HOMEPAGE_URL@'
 license=('custom')
-depends=('glibc' 'libeconf')
+depends=('glibc' 'libeconf' 'libvterm')
 makedepends=('cmake')
 
 package() {

@@ -438,6 +438,13 @@
   - added typed libcubicle attachment helpers for request, connect, read, write, resize, status, detach, channels, and replay
   - switched cube connect and foreground TTY run attachment paths to libcubicle attachment APIs
   - removed cube's private direct controller socket/RPC/auth implementation
+- Added terminal snapshot support:
+  - introduced a libvterm-backed internal terminal model
+  - controller now maintains virtual terminal state for TTY and term stdout
+  - added controller.snapshot for current screen cells, cursor, and offset
+  - added libcubicle terminal snapshot types and attachment helper
+  - desk initializes attached panes from controller snapshots and reads live output from the snapshot offset
+  - package/build dependencies now include libvterm
 
 ## Next
 
@@ -470,4 +477,4 @@
    - Large output tests.
    - Interleaved stdout/stderr event tests.
    - Restart/recovery tests.
-   - PTY behavior tests when PTY support lands.
+   - Broader PTY behavior tests for alternate screen, wide characters, OSC, mouse modes, and snapshot/live handoff.

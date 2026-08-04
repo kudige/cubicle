@@ -33,6 +33,12 @@ The CLI names are exploratory. The architecture and protocol are the first imple
 
 ## Build
 
+On Ubuntu, install the development dependencies first:
+
+```console
+sudo apt install cmake pkg-config libeconf-dev libssl-dev libvterm-dev
+```
+
 ```console
 cmake -S . -B build
 cmake --build build
@@ -65,7 +71,7 @@ The package installs:
 
 After installing a new package, restart any running `cubicle-manager` daemon so
 the installed `cube` and manager support the same API surface.
-The runtime package depends on `libeconf`.
+The runtime package depends on `libeconf` and `libvterm`.
 
 By default, normal users run their own manager using XDG paths:
 
@@ -109,8 +115,8 @@ sudo pacman -U ./build/cubicle-0.1.0-1-*.pkg.tar.*
 ```
 
 The package installs the same runtime binaries as the Debian package.
-Install `libeconf` before installing the pacman package if your pacman frontend
-does not resolve local package dependencies automatically.
+Install `libeconf` and `libvterm` before installing the pacman package if your
+pacman frontend does not resolve local package dependencies automatically.
 
 ## Coverage
 

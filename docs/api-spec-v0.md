@@ -851,6 +851,14 @@ Establishes an observer or interactive attachment and returns accepted channels 
 
 Reads framed output from granted stdout, stderr, or tty channels.
 
+#### `controller.snapshot`
+
+Returns the current virtual terminal screen for PTY-backed processes. The
+result contains `rows`, `columns`, cursor position/visibility, the raw `offset`
+used to produce the screen, and row-major cells with text and render attributes.
+Clients that render their own terminal view should draw this snapshot first and
+then read live output from `offset`.
+
 #### `controller.write`
 
 Writes bytes to stdin or PTY input when granted.
