@@ -193,6 +193,75 @@ def run_desk_until_command_output(desk, cube, env, process, marker):
         os.close(master_fd)
 
 
+def run_desk_with_terminal_noise(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_noise = False
+    sent_quit = False
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 4096))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_noise and b"terminal-noise" in captured:
+                os.write(
+                    master_fd,
+                    b"\x1b[10;1R"
+                    b"\x1b]10;rgb:e3e3/e3e3/eaea\x1b\\"
+                    b"\x1b]11;rgb:0808/0505/2b2b\x1b\\"
+                    b"\x1b[?1;2;4c",
+                )
+                sent_noise = True
+
+            if sent_noise and not sent_quit:
+                time.sleep(0.2)
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_noise:
+            raise AssertionError(
+                f"desk did not render terminal-noise pane: {captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def main():
     manager = os.environ["CUBICLE_MANAGER"]
     controller = os.environ["CUBICLE_CONTROLLER"]
@@ -330,6 +399,49 @@ def main():
             env,
         )
         run_desk_until_command_output(desk, cube, env, "dsr-probe", "GOT_DSR")
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "terminal-noise",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY terminal-noise\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+3\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data=os.read(0,256)\n"
+                    "        if data:\n"
+                    "            sys.stdout.write('GOT_INPUT\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            break\n"
+                    "time.sleep(3)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_with_terminal_noise(desk, cube, env)
+        noise_logs = subprocess.run(
+            [cube, "logs", "--stdout", "terminal-noise"],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if "GOT_INPUT" in noise_logs.stdout:
+            raise AssertionError(
+                f"desk forwarded terminal response bytes:\n{noise_logs.stdout}"
+            )
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
     finally:

@@ -389,6 +389,9 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                     cubicle_log(CUBICLE_LOG_ERROR, "controller",
                                 strerror(errno));
                     return -1;
+                } else {
+                    append_input_event(state, "local", buffer,
+                                       (size_t)read_result);
                 }
             }
 
@@ -709,7 +712,8 @@ int run_stream(char **command, const char *state_dir,
                const char *control_socket,
                const char *cwd,
                stdin_policy_t stdin_policy,
-               int completed_retention_ms)
+               int completed_retention_ms,
+               int debug_input)
 {
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
@@ -795,6 +799,7 @@ int run_stream(char **command, const char *state_dir,
         close_controller_state(&state);
         return 1;
     }
+    state.debug_input = debug_input;
 
     cubicle_log(CUBICLE_LOG_INFO, "controller", "state directory initialized");
 
@@ -888,7 +893,8 @@ static int run_pty_mode(char **command, const char *state_dir,
                         const char *cwd,
                         stdin_policy_t stdin_policy,
                         int completed_retention_ms,
-                        cubicle_process_mode_t process_mode)
+                        cubicle_process_mode_t process_mode,
+                        int debug_input)
 {
     int master_fd = -1;
     int slave_fd = -1;
@@ -984,6 +990,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         close_controller_state(&state);
         return 1;
     }
+    state.debug_input = debug_input;
 
     cubicle_log(CUBICLE_LOG_INFO, "controller", "state directory initialized");
 
@@ -1099,11 +1106,12 @@ int run_tty(char **command, const char *state_dir,
             const char *control_socket,
             const char *cwd,
             stdin_policy_t stdin_policy,
-            int completed_retention_ms)
+            int completed_retention_ms,
+            int debug_input)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
                         stdin_policy, completed_retention_ms,
-                        CUBICLE_PROCESS_TTY);
+                        CUBICLE_PROCESS_TTY, debug_input);
 }
 
 int run_term(char **command, const char *state_dir,
@@ -1111,9 +1119,10 @@ int run_term(char **command, const char *state_dir,
              const char *control_socket,
              const char *cwd,
              stdin_policy_t stdin_policy,
-             int completed_retention_ms)
+             int completed_retention_ms,
+             int debug_input)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
                         stdin_policy, completed_retention_ms,
-                        CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
+                        CUBICLE_PROCESS_TTY_CAPTURED_STDERR, debug_input);
 }

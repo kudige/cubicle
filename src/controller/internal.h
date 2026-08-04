@@ -54,6 +54,7 @@ typedef struct controller_state {
     long long next_sequence;
     long long stdout_offset;
     long long stderr_offset;
+    int debug_input;
 } controller_state_t;
 
 typedef struct terminal_size_state {
@@ -87,6 +88,10 @@ int make_log_file_path(char path[PATH_MAX], const controller_state_t *state,
 void initialize_empty_controller_state(controller_state_t *state);
 void close_controller_state(controller_state_t *state);
 int append_event(controller_state_t *state, const char *event);
+int append_input_event(controller_state_t *state,
+                       const char *source,
+                       const char *buffer,
+                       size_t length);
 int initialize_controller_state(controller_state_t *state,
                                 const char *requested_dir,
                                 const char *requested_log_dir,
@@ -131,18 +136,21 @@ int run_stream(char **command, const char *state_dir,
                const char *control_socket,
                const char *cwd,
                stdin_policy_t stdin_policy,
-               int completed_retention_ms);
+               int completed_retention_ms,
+               int debug_input);
 int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
             const char *cwd,
             stdin_policy_t stdin_policy,
-            int completed_retention_ms);
+            int completed_retention_ms,
+            int debug_input);
 int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
              const char *cwd,
              stdin_policy_t stdin_policy,
-             int completed_retention_ms);
+             int completed_retention_ms,
+             int debug_input);
 
 #endif

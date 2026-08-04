@@ -339,6 +339,8 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
         printf("manager.socket_group=%s\n", config->manager_socket_group);
         printf("manager.controller_binary=%s\n", config->controller_binary);
+        printf("controller.debug=%s\n",
+               config->controller_debug_input ? "input" : "none");
         return 0;
     }
 
@@ -353,6 +355,8 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.log_dir=%s\n", config->manager_log_dir);
         printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
         printf("manager.socket_group=%s\n", config->manager_socket_group);
+        printf("controller.debug=%s\n",
+               config->controller_debug_input ? "input" : "none");
         printf("client.manager=%s\n", config->client_manager_uri);
         printf("defaults.launch=%s\n",
                cubicle_launch_default_name(config->default_launch));
@@ -2649,6 +2653,47 @@ static int replay_terminal_output(cubicle_attachment_t *attachment,
     return 0;
 }
 
+static int render_terminal_snapshot(cubicle_attachment_t *attachment)
+{
+    cubicle_terminal_snapshot_t snapshot;
+    cubicle_error_code_t code = cubicle_attachment_snapshot(attachment,
+                                                            &snapshot);
+    if (code != CUBICLE_OK) {
+        return 1;
+    }
+
+    fputs("\x1b[H\x1b[2J", stdout);
+    char active_sgr[96] = "";
+    for (unsigned int row = 0; row < snapshot.rows; ++row) {
+        fprintf(stdout, "\x1b[%u;1H", row + 1);
+        for (unsigned int col = 0; col < snapshot.cols; ++col) {
+            const cubicle_terminal_cell_t *cell =
+                &snapshot.cells[(size_t)row * snapshot.cols + col];
+            const char *sgr = cell->sgr;
+            if (strcmp(active_sgr, sgr) != 0) {
+                fputs(sgr[0] == '\0' ? "\x1b[0m" : sgr, stdout);
+                snprintf(active_sgr, sizeof(active_sgr), "%s", sgr);
+            }
+            fputs(cell->text[0] == '\0' ? " " : cell->text, stdout);
+        }
+        if (active_sgr[0] != '\0') {
+            fputs("\x1b[0m", stdout);
+            active_sgr[0] = '\0';
+        }
+    }
+    fprintf(stdout, "\x1b[0m\x1b[%u;%uH",
+            snapshot.cursor_row + 1,
+            snapshot.cursor_col + 1);
+    if (snapshot.cursor_visible) {
+        fputs("\x1b[?25h", stdout);
+    } else {
+        fputs("\x1b[?25l", stdout);
+    }
+    fflush(stdout);
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    return 0;
+}
+
 static int attachment_loop(cubicle_attachment_t *attachment,
                            unsigned int channels,
                            const char *process_name,
@@ -2711,7 +2756,14 @@ static int attachment_loop(cubicle_attachment_t *attachment,
             process_name);
     int result = 0;
     if (terminal_mode) {
-        result = replay_terminal_output(attachment, replay_bytes);
+        if (strcmp(mode, "term") == 0 &&
+            (channels & CUBE_CHANNEL_STDERR) != 0) {
+            cubicle_attachment_replay(attachment, replay_bytes);
+        }
+        result = render_terminal_snapshot(attachment);
+        if (result != 0) {
+            result = replay_terminal_output(attachment, replay_bytes);
+        }
     } else {
         cubicle_attachment_replay(attachment, replay_bytes);
     }

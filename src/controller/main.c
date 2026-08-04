@@ -15,7 +15,7 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--completed-retention-ms N] [--stdin-policy open|eof] [--cwd dir] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--debug input] [--stdin-policy open|eof] [--cwd dir] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
             program);
 }
 
@@ -126,6 +126,7 @@ int main(int argc, char **argv)
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
     int completed_retention_ms = 0;
+    int debug_input = 0;
     int command_index = -1;
 
     for (int i = 1; i < argc; ++i) {
@@ -180,6 +181,20 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(argv[i], "--debug") == 0 && i + 1 < argc) {
+            const char *debug = argv[++i];
+            if (strcmp(debug, "input") == 0) {
+                debug_input = 1;
+            } else if (strcmp(debug, "none") == 0 ||
+                       strcmp(debug, "off") == 0) {
+                debug_input = 0;
+            } else {
+                fprintf(stderr, "Unknown debug option: %s\n", debug);
+                return 2;
+            }
+            continue;
+        }
+
         if (strcmp(argv[i], "--") == 0 && i + 1 < argc) {
             command_index = i + 1;
             break;
@@ -204,14 +219,14 @@ int main(int argc, char **argv)
 
     if (process_mode == CUBICLE_PROCESS_TTY) {
         return run_tty(&argv[command_index], state_dir, log_dir, control_socket,
-                       cwd, stdin_policy, completed_retention_ms);
+                       cwd, stdin_policy, completed_retention_ms, debug_input);
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
         return run_term(&argv[command_index], state_dir, log_dir, control_socket,
-                        cwd, stdin_policy, completed_retention_ms);
+                        cwd, stdin_policy, completed_retention_ms, debug_input);
     }
 
     return run_stream(&argv[command_index], state_dir, log_dir, control_socket,
-                      cwd, stdin_policy, completed_retention_ms);
+                      cwd, stdin_policy, completed_retention_ms, debug_input);
 }

@@ -858,6 +858,9 @@ result contains `rows`, `columns`, cursor position/visibility, the raw `offset`
 used to produce the screen, and row-major cells with text and render attributes.
 Clients that render their own terminal view should draw this snapshot first and
 then read live output from `offset`.
+Terminal clients that write directly to a real terminal should also prefer this
+snapshot over historical replay, because replay can re-emit terminal queries and
+produce local terminal response bytes unrelated to user input.
 
 #### `controller.write`
 

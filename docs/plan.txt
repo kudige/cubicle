@@ -444,6 +444,9 @@
   - added controller.snapshot for current screen cells, cursor, and offset
   - added libcubicle terminal snapshot types and attachment helper
   - desk initializes attached panes from controller snapshots and reads live output from the snapshot offset
+  - cube connect initializes terminal attachments from snapshots before live output, falling back to bounded replay only when snapshots are unavailable
+  - desk filters local terminal response sequences before forwarding input to cubes
+  - added controller.debug=input to log escaped and hex input bytes for debugging
   - package/build dependencies now include libvterm
 
 ## Next

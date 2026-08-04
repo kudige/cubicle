@@ -855,12 +855,7 @@ static int dispatch_api_request(control_client_t *client,
                 client, request_id, CUBICLE_ERR_IO, "write failed", true,
                 errno));
         }
-        char event[128];
-        int event_length = snprintf(event, sizeof(event),
-                                    "type=input length=%zu", strlen(data));
-        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
-            append_event(state, event);
-        }
+        append_input_event(state, "api", data, strlen(data));
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
 
@@ -1618,11 +1613,6 @@ int forward_attached_stdin(control_client_t *client,
             return 0;
         }
 
-        char event[128];
-        int event_length = snprintf(event, sizeof(event),
-                                    "type=input length=%zd", read_result);
-        if (event_length >= 0 && (size_t)event_length < sizeof(event)) {
-            append_event(state, event);
-        }
+        append_input_event(state, "socket", buffer, (size_t)read_result);
     }
 }

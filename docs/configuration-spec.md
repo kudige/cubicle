@@ -230,7 +230,20 @@ listeners. Until authenticated remote transport is implemented, TCP listeners
 are unauthenticated and must require an explicit `--allow-insecure` daemon
 option.
 
-### 5.3 `[client]`
+### 5.3 `[controller]`
+
+```ini
+[controller]
+debug=none
+```
+
+Keys:
+
+- `debug`: `none`, `off`, or `false` records normal input events with lengths
+  only. `input` adds input source, hex bytes, and escaped text to controller
+  input events for terminal-response and keystroke debugging.
+
+### 5.4 `[client]`
 
 ```ini
 [client]
@@ -247,7 +260,7 @@ Keys:
 
 For local Unix endpoints, `server_identity` may be empty only when trust is established through an approved local trust policy.
 
-### 5.4 `[defaults]`
+### 5.5 `[defaults]`
 
 ```ini
 [defaults]

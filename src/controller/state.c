@@ -182,6 +182,91 @@ int append_event(controller_state_t *state, const char *event)
     }
 }
 
+static char printable_escape(unsigned char byte)
+{
+    switch (byte) {
+    case '\n':
+        return 'n';
+    case '\r':
+        return 'r';
+    case '\t':
+        return 't';
+    case '\b':
+        return 'b';
+    case '\033':
+        return 'e';
+    default:
+        return '\0';
+    }
+}
+
+int append_input_event(controller_state_t *state,
+                       const char *source,
+                       const char *buffer,
+                       size_t length)
+{
+    if (state == NULL || buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!state->debug_input) {
+        char event[128];
+        int event_length = snprintf(event, sizeof(event),
+                                    "type=input length=%zu", length);
+        return event_length >= 0 && (size_t)event_length < sizeof(event)
+                   ? append_event(state, event)
+                   : -1;
+    }
+
+    char hex[257];
+    char escaped[513];
+    size_t hex_used = 0;
+    size_t escaped_used = 0;
+    size_t limit = length > 64 ? 64 : length;
+    static const char digits[] = "0123456789abcdef";
+
+    for (size_t i = 0; i < limit; ++i) {
+        unsigned char byte = (unsigned char)buffer[i];
+        if (hex_used + 2 < sizeof(hex)) {
+            hex[hex_used++] = digits[byte >> 4];
+            hex[hex_used++] = digits[byte & 0x0f];
+        }
+
+        char short_escape = printable_escape(byte);
+        if (short_escape != '\0') {
+            if (escaped_used + 2 < sizeof(escaped)) {
+                escaped[escaped_used++] = '\\';
+                escaped[escaped_used++] = short_escape;
+            }
+        } else if (byte >= 0x20 && byte <= 0x7e && byte != '\\') {
+            if (escaped_used + 1 < sizeof(escaped)) {
+                escaped[escaped_used++] = (char)byte;
+            }
+        } else {
+            if (escaped_used + 4 < sizeof(escaped)) {
+                escaped[escaped_used++] = '\\';
+                escaped[escaped_used++] = 'x';
+                escaped[escaped_used++] = digits[byte >> 4];
+                escaped[escaped_used++] = digits[byte & 0x0f];
+            }
+        }
+    }
+    hex[hex_used] = '\0';
+    escaped[escaped_used] = '\0';
+
+    char event[1024];
+    int event_length = snprintf(
+        event, sizeof(event),
+        "type=input length=%zu source=%s data_hex=%s data_escaped=%s%s",
+        length, source == NULL ? "unknown" : source, hex, escaped,
+        length > limit ? " truncated=true" : "");
+    if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_event(state, event);
+}
+
 int initialize_controller_state(controller_state_t *state,
                                        const char *requested_dir,
                                        const char *requested_log_dir,

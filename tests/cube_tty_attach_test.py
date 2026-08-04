@@ -305,8 +305,7 @@ def main():
             )
             os.close(replay_slave_fd)
             try:
-                read_until(replay_master_fd, b"\x1b[6n")
-                os.write(replay_master_fd, b"\x1b[12;34R")
+                read_until(replay_master_fd, b"NO_INPUT")
                 time.sleep(0.1)
                 os.write(replay_master_fd, b"\x1cd")
                 replay_connect.wait(timeout=5)

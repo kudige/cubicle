@@ -243,6 +243,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->manager_socket_group[0] = '\0';
     snprintf(config->controller_binary, sizeof(config->controller_binary),
              "/usr/libexec/cubicle/cubicle-controller");
+    config->controller_debug_input = 0;
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
@@ -338,6 +339,26 @@ static int apply_econf_file(cubicle_config_t *config,
                             sizeof(config->client_server_identity),
                             error, error_size) < 0) {
         return -1;
+    }
+
+    char controller_debug[64];
+    controller_debug[0] = '\0';
+    if (get_optional_string(file, "controller", "debug", controller_debug,
+                            sizeof(controller_debug), error, error_size) < 0) {
+        return -1;
+    }
+    if (controller_debug[0] != '\0') {
+        if (strcmp(controller_debug, "input") == 0) {
+            config->controller_debug_input = 1;
+        } else if (strcmp(controller_debug, "none") == 0 ||
+                   strcmp(controller_debug, "off") == 0 ||
+                   strcmp(controller_debug, "false") == 0) {
+            config->controller_debug_input = 0;
+        } else {
+            snprintf(error, error_size,
+                     "controller.debug must be input, none, off, or false");
+            return -1;
+        }
     }
 
     char value[64];

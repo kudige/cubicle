@@ -2800,10 +2800,10 @@ static bool handle_prefix_command(desk_session_t *session,
     }
 }
 
-static bool is_terminal_cursor_position_response(const unsigned char *input,
-                                                 size_t length,
-                                                 size_t offset,
-                                                 size_t *consumed)
+static bool is_terminal_csi_response(const unsigned char *input,
+                                     size_t length,
+                                     size_t offset,
+                                     size_t *consumed)
 {
     size_t cursor = offset;
     if (cursor + 3 >= length || input[cursor] != 0x1b ||
@@ -2811,23 +2811,55 @@ static bool is_terminal_cursor_position_response(const unsigned char *input,
         return false;
     }
     cursor += 2;
-    size_t row_start = cursor;
-    while (cursor < length && input[cursor] >= '0' && input[cursor] <= '9') {
+    while (cursor < length &&
+           ((input[cursor] >= '0' && input[cursor] <= '9') ||
+            input[cursor] == ';' || input[cursor] == '?' ||
+            input[cursor] == '>')) {
         ++cursor;
     }
-    if (cursor == row_start || cursor >= length || input[cursor] != ';') {
+    if (cursor >= length) {
         return false;
     }
-    ++cursor;
-    size_t col_start = cursor;
-    while (cursor < length && input[cursor] >= '0' && input[cursor] <= '9') {
-        ++cursor;
-    }
-    if (cursor == col_start || cursor >= length || input[cursor] != 'R') {
+    if (input[cursor] != 'R' && input[cursor] != 'c') {
         return false;
     }
     *consumed = cursor - offset + 1;
     return true;
+}
+
+static bool is_terminal_osc_response(const unsigned char *input,
+                                     size_t length,
+                                     size_t offset,
+                                     size_t *consumed)
+{
+    size_t cursor = offset;
+    if (cursor + 2 >= length || input[cursor] != 0x1b ||
+        input[cursor + 1] != ']') {
+        return false;
+    }
+    cursor += 2;
+    while (cursor < length) {
+        if (input[cursor] == '\a') {
+            *consumed = cursor - offset + 1;
+            return true;
+        }
+        if (input[cursor] == 0x1b && cursor + 1 < length &&
+            input[cursor + 1] == '\\') {
+            *consumed = cursor - offset + 2;
+            return true;
+        }
+        ++cursor;
+    }
+    return false;
+}
+
+static bool is_terminal_response_sequence(const unsigned char *input,
+                                          size_t length,
+                                          size_t offset,
+                                          size_t *consumed)
+{
+    return is_terminal_csi_response(input, length, offset, consumed) ||
+           is_terminal_osc_response(input, length, offset, consumed);
 }
 
 static int handle_input(desk_session_t *session,
@@ -2839,8 +2871,7 @@ static int handle_input(desk_session_t *session,
 {
     for (size_t i = 0; i < length; ++i) {
         size_t consumed = 0;
-        if (is_terminal_cursor_position_response(input, length, i,
-                                                 &consumed)) {
+        if (is_terminal_response_sequence(input, length, i, &consumed)) {
             i += consumed - 1;
             continue;
         }

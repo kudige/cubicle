@@ -55,6 +55,7 @@ static void test_defaults(void)
                   "/usr/libexec/cubicle/cubicle-controller") == 0);
     assert(config.manager_socket_mode == 0660);
     assert(strcmp(config.manager_socket_group, "") == 0);
+    assert(config.controller_debug_input == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY);
     assert(config.default_kill_cleanup == 0);
@@ -74,6 +75,9 @@ static void test_override_file(void)
                "socket_group=cubicle\n"
                "controller_binary=/tmp/cubicle-controller\n"
                "\n"
+               "[controller]\n"
+               "debug=input\n"
+               "\n"
                "[client]\n"
                "manager=unix:///tmp/cubicle-run/manager.sock\n"
                "\n"
@@ -92,6 +96,7 @@ static void test_override_file(void)
     assert(config.manager_socket_mode == 0664);
     assert(strcmp(config.manager_socket_group, "cubicle") == 0);
     assert(strcmp(config.controller_binary, "/tmp/cubicle-controller") == 0);
+    assert(config.controller_debug_input == 1);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
     assert(config.default_kill_cleanup == 1);

@@ -279,6 +279,7 @@ seq=N type=process_started controller_id=ID pid=PID pgid=PGID mode=stream
 seq=N type=output stream=stdout start=OFFSET length=N
 seq=N type=output stream=stderr start=OFFSET length=N
 seq=N type=input length=N
+seq=N type=input length=N source=api|socket|local data_hex=HEX data_escaped=TEXT
 seq=N type=terminal_resized rows=ROWS columns=COLUMNS
 seq=N type=client_attached stream=stdin|stdout|stderr
 seq=N type=client_detached stream=stdin|stdout|stderr
@@ -286,6 +287,10 @@ seq=N type=signal_delivered signal=N
 seq=N type=process_exited status=exited exit_code=N
 seq=N type=process_exited status=signaled signal=N
 ```
+
+The expanded input form is emitted only when controller input debugging is
+enabled. `data_hex` and `data_escaped` are capped to the first 64 bytes of the
+input event and include `truncated=true` when the original input was longer.
 
 ## Metadata
 

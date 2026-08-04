@@ -438,6 +438,9 @@ socket_mode=0660
 socket_group=
 controller_binary=/usr/libexec/cubicle/cubicle-controller
 
+[controller]
+debug=none
+
 [client]
 manager=unix:///run/cubicle/manager.sock
 server_identity=
@@ -474,7 +477,9 @@ the command supports it.
 - `cube config` is read-only today; it validates and displays effective
   configuration but does not edit files.
 - `cube connect` supports controller attachment through the manager-issued
-  Unix controller endpoint. TCP manager connections are supported only when the
+  Unix controller endpoint. For terminal processes it restores the current
+  controller snapshot first and falls back to bounded replay only when snapshot
+  data is unavailable. TCP manager connections are supported only when the
   manager is explicitly configured/listening for TCP.
 - JSON output is broad but not uniform across every command; lifecycle success
   commands often print `{}`.
