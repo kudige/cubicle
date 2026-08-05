@@ -101,6 +101,22 @@ json_id() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
 }
 
+workspace_b_id=$(api workspace-create "Project B" | json_id)
+project_b_process_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-proc /bin/true | json_id)
+api process-wait "$project_b_process_id" --timeout-ms 2000 | grep -q '"success":true'
+all_ps_output=$(cube ps -a)
+printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project A$'
+printf "%s\n" "$all_ps_output" | grep -q '^build	stream	lost$'
+printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project B$'
+printf "%s\n" "$all_ps_output" | grep -q '^project-b-proc	stream	'
+json_all_ps_output=$(cube --json ps -a)
+printf "%s" "$json_all_ps_output" | grep -q '"workspaces"'
+printf "%s" "$json_all_ps_output" | grep -q '"name":"Project A"'
+printf "%s" "$json_all_ps_output" | grep -q '"friendly_name":"build"'
+printf "%s" "$json_all_ps_output" | grep -q '"name":"Project B"'
+printf "%s" "$json_all_ps_output" | grep -q '"friendly_name":"project-b-proc"'
+
 connect_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name connect-io -- sh -c \
     'printf "connect-ready\n"; IFS= read line; printf "connect:%s\n" "$line"; sleep 0.2' |

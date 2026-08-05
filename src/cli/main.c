@@ -126,7 +126,7 @@ static void print_usage(FILE *stream)
             "  cube workspace [NAME]\n"
             "  cube workspace list|create|select|stop|delete ...\n"
             "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n"
-            "  cube ps\n"
+            "  cube ps [-a|--all-workspaces]\n"
             "  cube inspect NAME\n"
             "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
@@ -165,7 +165,7 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "ps") == 0) {
-        fprintf(stream, "Usage:\n  cube ps\n");
+        fprintf(stream, "Usage:\n  cube ps [-a|--all-workspaces]\n");
         return 0;
     }
     if (strcmp(command, "inspect") == 0) {
@@ -1853,42 +1853,37 @@ static int command_access(const char *manager_socket,
     return 2;
 }
 
-static int process_list(const char *manager_socket,
-                        const cube_options_t *options)
+typedef struct process_list_options {
+    int all_workspaces;
+} process_list_options_t;
+
+static int parse_process_list_options(int argc,
+                                      char **argv,
+                                      int command_index,
+                                      process_list_options_t *list_options)
 {
-    char workspace[CUBICLE_NAME_MAX];
-    int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
-                                    &from_selected_workspace) < 0) {
-        fprintf(stderr, "cube: no workspace selected\n");
-        return 1;
+    memset(list_options, 0, sizeof(*list_options));
+    for (int i = command_index + 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-a") == 0 ||
+            strcmp(argv[i], "--all-workspaces") == 0) {
+            list_options->all_workspaces = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_command_usage("ps", stdout);
+            return 1;
+        }
+        fprintf(stderr, "cube: unknown ps option '%s'\n", argv[i]);
+        return -1;
     }
+    return 0;
+}
 
-    char escaped_workspace[CUBICLE_NAME_MAX * 2];
-    if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
-                            workspace) < 0) {
-        fprintf(stderr, "cube: workspace name is too long\n");
-        return 2;
-    }
-
-    char params[1024];
-    snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
-             escaped_workspace);
-    cube_rpc_response_t response;
-    if (call_manager(manager_socket, "process.list", params, &response) < 0) {
-        return print_workspace_rpc_error(&response, workspace,
-                                         from_selected_workspace);
-    }
-
-    if (options->json) {
-        printf("%s\n", response.result_json);
-        cleanup_rpc_response(&response);
-        return 0;
-    }
-
+static int print_process_list_result(const char *workspace,
+                                     const cube_rpc_response_t *response)
+{
     cubicle_json_doc_t document;
-    if (cubicle_json_parse(&document, response.result_json) < 0) {
-        cleanup_rpc_response(&response);
+    if (cubicle_json_parse(&document, response->result_json) < 0) {
         fprintf(stderr, "cube: invalid process list response\n");
         return 2;
     }
@@ -1896,7 +1891,6 @@ static int process_list(const char *manager_socket,
     yyjson_val *processes = yyjson_obj_get(document.root, "processes");
     if (!yyjson_is_arr(processes)) {
         cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&response);
         fprintf(stderr, "cube: invalid process list response\n");
         return 2;
     }
@@ -1918,8 +1912,220 @@ static int process_list(const char *manager_socket,
     }
 
     cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&response);
     return 0;
+}
+
+static int process_list_for_workspace(const char *manager_socket,
+                                      const char *workspace,
+                                      cube_rpc_response_t *response_out)
+{
+    memset(response_out, 0, sizeof(*response_out));
+    cubicle_json_builder_t params = {0};
+    if (cubicle_json_builder_append(&params, "{\"workspace_id\":") < 0 ||
+        cubicle_json_builder_append_string(&params, workspace) < 0 ||
+        cubicle_json_builder_append(&params, "}") < 0) {
+        cubicle_json_builder_cleanup(&params);
+        response_out->code = CUBICLE_ERR_RESOURCE_LIMIT;
+        snprintf(response_out->error_message, sizeof(response_out->error_message),
+                 "workspace name is too long");
+        return -1;
+    }
+
+    int result = call_manager(manager_socket, "process.list", params.data,
+                              response_out);
+    cubicle_json_builder_cleanup(&params);
+    return result;
+}
+
+static int process_list_selected_workspace(const char *manager_socket,
+                                           const cube_options_t *options)
+{
+    char workspace[CUBICLE_NAME_MAX];
+    int from_selected_workspace = 0;
+    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+                                    &from_selected_workspace) < 0) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+
+    cube_rpc_response_t response;
+    if (process_list_for_workspace(manager_socket, workspace, &response) < 0) {
+        return print_workspace_rpc_error(&response, workspace,
+                                         from_selected_workspace);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    int result = print_process_list_result(workspace, &response);
+    cleanup_rpc_response(&response);
+    return result;
+}
+
+static int append_all_workspace_processes_json(cubicle_json_builder_t *output,
+                                               const char *id,
+                                               const char *name,
+                                               cube_rpc_response_t *response)
+{
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response->result_json) < 0) {
+        fprintf(stderr, "cube: invalid process list response\n");
+        return -1;
+    }
+    yyjson_val *processes = yyjson_obj_get(document.root, "processes");
+    yyjson_val *count = yyjson_obj_get(document.root, "count");
+    if (!yyjson_is_arr(processes) || !yyjson_is_uint(count)) {
+        cubicle_json_cleanup(&document);
+        fprintf(stderr, "cube: invalid process list response\n");
+        return -1;
+    }
+
+    char *processes_json = cubicle_json_copy_value(processes);
+    if (processes_json == NULL) {
+        cubicle_json_cleanup(&document);
+        fprintf(stderr, "cube: failed to format process list response\n");
+        return -1;
+    }
+
+    int result =
+        cubicle_json_builder_append(output, "{\"id\":") < 0 ||
+                cubicle_json_builder_append_string(output, id) < 0 ||
+                cubicle_json_builder_append(output, ",\"name\":") < 0 ||
+                cubicle_json_builder_append_string(output, name) < 0 ||
+                cubicle_json_builder_append(output, ",\"count\":") < 0 ||
+                cubicle_json_builder_appendf(output, "%llu",
+                                             (unsigned long long)
+                                                 yyjson_get_uint(count)) < 0 ||
+                cubicle_json_builder_append(output, ",\"processes\":") < 0 ||
+                cubicle_json_builder_append(output, processes_json) < 0 ||
+                cubicle_json_builder_append(output, "}") < 0
+            ? -1
+            : 0;
+    free(processes_json);
+    cubicle_json_cleanup(&document);
+    if (result < 0) {
+        fprintf(stderr, "cube: failed to format process list response\n");
+    }
+    return result;
+}
+
+static int process_list_all_workspaces(const char *manager_socket,
+                                       const cube_options_t *options)
+{
+    cube_rpc_response_t workspace_response;
+    if (call_manager(manager_socket, "workspace.list", "{}",
+                     &workspace_response) < 0) {
+        return print_rpc_error(&workspace_response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, workspace_response.result_json) < 0) {
+        cleanup_rpc_response(&workspace_response);
+        fprintf(stderr, "cube: invalid workspace list response\n");
+        return 2;
+    }
+
+    yyjson_val *workspaces = yyjson_obj_get(document.root, "workspaces");
+    if (!yyjson_is_arr(workspaces)) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&workspace_response);
+        fprintf(stderr, "cube: invalid workspace list response\n");
+        return 2;
+    }
+
+    cubicle_json_builder_t json_output = {0};
+    if (options->json &&
+        cubicle_json_builder_append(&json_output, "{\"workspaces\":[") < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&workspace_response);
+        fprintf(stderr, "cube: failed to format process list response\n");
+        return 2;
+    }
+
+    int result = 0;
+    int first_text_block = 1;
+    int first_json_item = 1;
+    size_t index;
+    size_t max;
+    yyjson_val *item;
+    yyjson_arr_foreach(workspaces, index, max, item) {
+        char id[CUBICLE_ID_STRING_LENGTH];
+        char name[CUBICLE_NAME_MAX];
+        if (json_string_field(item, "id", id, sizeof(id)) < 0 ||
+            json_string_field(item, "name", name, sizeof(name)) < 0) {
+            fprintf(stderr, "cube: invalid workspace list response\n");
+            result = 2;
+            break;
+        }
+
+        cube_rpc_response_t process_response;
+        if (process_list_for_workspace(manager_socket, id,
+                                       &process_response) < 0) {
+            result = print_rpc_error(&process_response);
+            break;
+        }
+
+        if (options->json) {
+            if ((!first_json_item &&
+                 cubicle_json_builder_append(&json_output, ",") < 0) ||
+                append_all_workspace_processes_json(&json_output, id, name,
+                                                    &process_response) < 0) {
+                cleanup_rpc_response(&process_response);
+                result = 2;
+                break;
+            }
+            first_json_item = 0;
+        } else {
+            if (!first_text_block) {
+                printf("\n");
+            }
+            result = print_process_list_result(name, &process_response);
+            first_text_block = 0;
+        }
+        cleanup_rpc_response(&process_response);
+        if (result != 0) {
+            break;
+        }
+    }
+
+    if (result == 0 && options->json) {
+        if (cubicle_json_builder_append(&json_output, "]}") < 0) {
+            fprintf(stderr, "cube: failed to format process list response\n");
+            result = 2;
+        } else {
+            printf("%s\n", json_output.data);
+        }
+    }
+
+    cubicle_json_builder_cleanup(&json_output);
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&workspace_response);
+    return result;
+}
+
+static int process_list(const char *manager_socket,
+                        const cube_options_t *options,
+                        int argc,
+                        char **argv,
+                        int command_index)
+{
+    process_list_options_t list_options;
+    int parse_result =
+        parse_process_list_options(argc, argv, command_index, &list_options);
+    if (parse_result > 0) {
+        return 0;
+    }
+    if (parse_result < 0) {
+        return 2;
+    }
+
+    if (list_options.all_workspaces) {
+        return process_list_all_workspaces(manager_socket, options);
+    }
+    return process_list_selected_workspace(manager_socket, options);
 }
 
 typedef struct cleanup_counts {
@@ -4154,7 +4360,8 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(command, "ps") == 0) {
-        return process_list(manager_endpoint, &options);
+        return process_list(manager_endpoint, &options, argc, argv,
+                            command_index);
     }
 
     if (strcmp(command, "cleanup") == 0) {

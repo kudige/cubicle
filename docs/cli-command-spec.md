@@ -327,11 +327,16 @@ make            stream   completed   0           15m       exit 0
 Initial useful filters:
 
 ```console
+cube ps -a
+cube ps --all-workspaces
 cube ps --running
 cube ps --all
 cube ps --workspace Shogun
 cube ps --json
 ```
+
+`cube ps -a` lists all workspaces, with each workspace followed by the cubes
+belonging to it. `--all-workspaces` is the equivalent long option.
 
 Later:
 

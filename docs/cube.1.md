@@ -16,7 +16,7 @@ cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
 cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
-cube ps
+cube ps [-a|--all-workspaces]
 cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
@@ -201,6 +201,9 @@ cube --json run --bg --stream /bin/sleep 30
 `cube ps`
 : List process names, modes, and states in the selected workspace.
 
+`cube ps -a`
+: List every workspace, with the cubes in each workspace.
+
 `cube inspect NAME`
 : Show the current manager record for one process.
 
@@ -208,6 +211,7 @@ Examples:
 
 ```sh
 cube ps
+cube ps -a
 cube --workspace ProjectA ps
 cube --json ps
 cube inspect server
