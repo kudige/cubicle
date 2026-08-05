@@ -119,6 +119,25 @@ static const VTermScreenCallbacks screen_callbacks = {
     .sb_clear = ignore_scrollback_clear,
 };
 
+static void log_vterm_no_progress(const unsigned char *cursor,
+                                  size_t remaining)
+{
+    char hex[3 * 10 + 1];
+    size_t sample = remaining < 10 ? remaining : 10;
+    size_t used = 0;
+    for (size_t i = 0; i < sample; ++i) {
+        int length = snprintf(hex + used, sizeof(hex) - used, "%s%02x",
+                              i == 0 ? "" : " ", cursor[i]);
+        if (length < 0 || (size_t)length >= sizeof(hex) - used) {
+            break;
+        }
+        used += (size_t)length;
+    }
+    fprintf(stderr,
+            "[WARN] terminal_model: vterm_input_write made no progress; remaining=%zu first_bytes_hex=%s\n",
+            remaining, sample == 0 ? "" : hex);
+}
+
 static size_t append_utf8(char *buffer, size_t used, size_t capacity,
                           uint32_t codepoint)
 {
@@ -346,8 +365,8 @@ int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
     while (remaining > 0) {
         size_t written = vterm_input_write(model->term, cursor, remaining);
         if (written == 0) {
-            errno = EIO;
-            return -1;
+            log_vterm_no_progress((const unsigned char *)cursor, remaining);
+            break;
         }
         cursor += written;
         remaining -= written;

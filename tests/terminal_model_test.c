@@ -105,10 +105,32 @@ static void test_dirty_rows(void)
     cubicle_terminal_model_destroy(model);
 }
 
+static void test_incomplete_utf8_is_discarded(void)
+{
+    cubicle_terminal_model_t *model = NULL;
+    cubicle_terminal_snapshot_t snapshot;
+    const unsigned char input[] = {0xf0};
+
+    expect_true(cubicle_terminal_model_create(2, 4, &model) == 0,
+                "expected terminal model creation to succeed");
+    if (model == NULL) {
+        return;
+    }
+    expect_true(cubicle_terminal_model_feed(model, input, sizeof(input)) == 0,
+                "expected incomplete UTF-8 feed to be discarded");
+    expect_true(cubicle_terminal_model_snapshot(model, 0, &snapshot) == 0,
+                "expected snapshot after discarded UTF-8 to succeed");
+    expect_true(strcmp(snapshot_cell(&snapshot, 0, 0)->text, " ") == 0,
+                "expected discarded UTF-8 not to alter screen");
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    cubicle_terminal_model_destroy(model);
+}
+
 int main(void)
 {
     test_text_cursor_and_attrs();
     test_resize_and_terminal_response();
     test_dirty_rows();
+    test_incomplete_utf8_is_discarded();
     return failures == 0 ? 0 : 1;
 }
