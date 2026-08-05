@@ -5643,6 +5643,11 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
         close(fd);
 
+        size_t safe_total = cubicle_json_safe_utf8_prefix_length(data, total);
+        if (safe_total > 0 && safe_total < total) {
+            total = safe_total;
+        }
+
         cubicle_json_builder_t result;
         cubicle_json_builder_init(&result);
         if (cubicle_json_builder_appendf(

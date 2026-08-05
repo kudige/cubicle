@@ -339,6 +339,138 @@ int cubicle_json_builder_append_string_n(cubicle_json_builder_t *builder,
     return cubicle_json_builder_append(builder, "\"");
 }
 
+size_t cubicle_json_safe_utf8_prefix_length(const void *value,
+                                            size_t value_length)
+{
+    if (value == NULL || value_length == 0) {
+        return 0;
+    }
+
+    const unsigned char *bytes = value;
+    size_t safe = 0;
+    size_t i = 0;
+    while (i < value_length) {
+        unsigned char ch = bytes[i];
+        if (ch < 0x80) {
+            safe = ++i;
+        } else if (ch >= 0xc2 && ch <= 0xdf) {
+            if (i + 1 >= value_length) break;
+            i += bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf ? 2 : 1;
+            safe = i;
+        } else if (ch == 0xe0) {
+            if (i + 2 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0xa0 && bytes[i + 1] <= 0xbf) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0xa0 && bytes[i + 1] <= 0xbf &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf) {
+                i += 3;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch >= 0xe1 && ch <= 0xec) {
+            if (i + 2 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf) {
+                i += 3;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch == 0xed) {
+            if (i + 2 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0x9f) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0x9f &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf) {
+                i += 3;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch >= 0xee && ch <= 0xef) {
+            if (i + 2 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf) {
+                i += 3;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch == 0xf0) {
+            if (i + 3 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x90 && bytes[i + 1] <= 0xbf &&
+                    (i + 2 >= value_length ||
+                     (bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf))) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x90 && bytes[i + 1] <= 0xbf &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf &&
+                       bytes[i + 3] >= 0x80 && bytes[i + 3] <= 0xbf) {
+                i += 4;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch >= 0xf1 && ch <= 0xf3) {
+            if (i + 3 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf &&
+                    (i + 2 >= value_length ||
+                     (bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf))) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xbf &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf &&
+                       bytes[i + 3] >= 0x80 && bytes[i + 3] <= 0xbf) {
+                i += 4;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else if (ch == 0xf4) {
+            if (i + 3 >= value_length) {
+                if (i + 1 < value_length &&
+                    bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0x8f &&
+                    (i + 2 >= value_length ||
+                     (bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf))) {
+                    break;
+                }
+                i++;
+            } else if (bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0x8f &&
+                       bytes[i + 2] >= 0x80 && bytes[i + 2] <= 0xbf &&
+                       bytes[i + 3] >= 0x80 && bytes[i + 3] <= 0xbf) {
+                i += 4;
+            } else {
+                i++;
+            }
+            safe = i;
+        } else {
+            safe = ++i;
+        }
+    }
+    return safe;
+}
+
 int cubicle_json_escape(char *buffer, size_t buffer_size, const char *value)
 {
     if (buffer == NULL || buffer_size == 0 || value == NULL) {

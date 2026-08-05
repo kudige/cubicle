@@ -667,6 +667,11 @@ static int read_stream_json(const controller_state_t *state,
     }
     close(fd);
 
+    size_t safe_total = cubicle_json_safe_utf8_prefix_length(data, total);
+    if (safe_total > 0 && safe_total < total) {
+        total = safe_total;
+    }
+
     if (cubicle_json_builder_appendf(
             result,
             "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":",

@@ -36,6 +36,8 @@ int cubicle_json_builder_append_string(cubicle_json_builder_t *builder,
 int cubicle_json_builder_append_string_n(cubicle_json_builder_t *builder,
                                          const void *value,
                                          size_t value_length);
+size_t cubicle_json_safe_utf8_prefix_length(const void *value,
+                                            size_t value_length);
 
 int cubicle_rpc_request(char *buffer, size_t buffer_size,
                         const char *request_id,

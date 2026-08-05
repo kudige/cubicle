@@ -121,6 +121,52 @@ if [ "$(json_field "$binary_response" success)" != "True" ]; then
     echo "controller.read failed on binary/control output: $binary_response" >&2
     exit 1
 fi
+python3 - "$socket_path" <<'PY'
+import json
+import socket
+import struct
+import sys
+
+socket_path = sys.argv[1]
+def call(sock, request_id, data):
+    payload = json.dumps({
+        "protocol_major": 0,
+        "protocol_minor": 1,
+        "request_id": request_id,
+        "session_id": "local-session",
+        "method": "controller.write",
+        "params": {"data": data},
+    }, separators=(",", ":")).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(payload)) + payload)
+    header = sock.recv(4)
+    length = struct.unpack("!I", header)[0]
+    response = json.loads(sock.recv(length).decode("utf-8"))
+    if not response.get("success"):
+        raise SystemExit(f"controller.write failed: {response}")
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(socket_path)
+    call(sock, "utf8-write-prefix", "a" * 4094)
+    call(sock, "utf8-write-suffix", "─")
+PY
+for _ in $(seq 1 100); do
+    utf8_partial_response=$(api controller-read stdout --offset 14 --max 4096)
+    if [ "$(json_field "$utf8_partial_response" result.next_offset)" = "4108" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ "$(json_field "$utf8_partial_response" result.length)" != "4094" ] ||
+    [ "$(json_field "$utf8_partial_response" result.next_offset)" != "4108" ]; then
+    echo "controller.read returned partial UTF-8 chunk: $utf8_partial_response" >&2
+    exit 1
+fi
+utf8_full_response=$(api controller-read stdout --offset 4108 --max 3)
+if [ "$(json_field "$utf8_full_response" result.data)" != "─" ] ||
+    [ "$(json_field "$utf8_full_response" result.next_offset)" != "4111" ]; then
+    echo "controller.read failed complete UTF-8 chunk: $utf8_full_response" >&2
+    exit 1
+fi
 
 attach_response=$(api controller-attach local:test:process --channels 2)
 if [ "$(json_field "$attach_response" success)" != "True" ]; then
@@ -146,7 +192,7 @@ if [ "$(json_field "$write_response" success)" != "True" ]; then
 fi
 
 for _ in $(seq 1 100); do
-    read_response=$(api controller-read stdout --offset 14 --max 5)
+    read_response=$(api controller-read stdout --offset 4111 --max 5)
     if [ "$(json_field "$read_response" result.data)" = "hello" ]; then
         break
     fi

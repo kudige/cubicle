@@ -88,6 +88,14 @@ static void test_builder(void)
                   "builder counted utf8 result");
     cubicle_json_builder_cleanup(&builder);
 
+    expect_int((int)cubicle_json_safe_utf8_prefix_length(utf8_value,
+                                                         sizeof(utf8_value)),
+               5, "safe utf8 prefix trims partial sequence");
+    const unsigned char invalid_value[] = {'A', 0xff, 'B'};
+    expect_int((int)cubicle_json_safe_utf8_prefix_length(
+                   invalid_value, sizeof(invalid_value)),
+               3, "safe utf8 prefix preserves invalid bytes");
+
     expect_int(cubicle_json_builder_reserve(&builder, 4096), 0,
                "builder reserve");
     expect_int(builder.capacity >= 4097, 1, "builder reserve capacity");
