@@ -512,7 +512,8 @@ def run_desk_cursor_overlay(desk, env, expect_cursor):
     captured = bytearray()
     sent_quit = False
     deadline = time.time() + 5
-    cursor_draw = b"\x1b[2;15H\x1b[0m\x1b[7m"
+    cursor_draw = b"\x1b[3;15H\x1b[0m\x1b[7m"
+    active_title = b"\x1b[1;7m cursor-"
     try:
         while time.time() < deadline:
             fds = [master_fd]
@@ -547,6 +548,10 @@ def run_desk_cursor_overlay(desk, env, expect_cursor):
         if expect_cursor and cursor_draw not in captured:
             raise AssertionError(
                 f"desk did not draw block cursor at expected cell: {captured!r}"
+            )
+        if active_title not in captured:
+            raise AssertionError(
+                f"desk did not draw highlighted pane title: {captured!r}"
             )
         if not expect_cursor and cursor_draw in captured:
             raise AssertionError(

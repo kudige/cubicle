@@ -54,6 +54,7 @@
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
 #define DESK_CURSOR_BLINK_MS 500
+#define DESK_PANE_TITLE_ROWS 1
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -616,6 +617,24 @@ static bool pane_layout_rect_for_pane(const desk_pane_layout_t *panes,
 {
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
     return pane_layout_rect_for_node(panes, panes->root, pane_id, root, out);
+}
+
+static bool pane_content_rect_for_pane(const desk_pane_layout_t *panes,
+                                       const desk_terminal_t *terminal,
+                                       int pane_id,
+                                       desk_rect_t *out)
+{
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect)) {
+        return false;
+    }
+    if (rect.rows <= DESK_PANE_TITLE_ROWS) {
+        return false;
+    }
+    rect.row += DESK_PANE_TITLE_ROWS;
+    rect.rows -= DESK_PANE_TITLE_ROWS;
+    *out = rect;
+    return true;
 }
 
 static bool pane_layout_rect_for_tree_node(const desk_pane_layout_t *panes,
@@ -2026,8 +2045,8 @@ static bool desk_cursor_target(const desk_terminal_t *terminal,
     desk_pane_t *pane = desk_pane_for_id(session, active);
     desk_rect_t rect;
     if (pane == NULL || !pane->grid.cursor_visible ||
-        !pane_layout_rect_for_pane(&session->layout, terminal, active,
-                                   &rect)) {
+        !pane_content_rect_for_pane(&session->layout, terminal, active,
+                                    &rect)) {
         return false;
     }
     if (pane->grid.cursor_row < 0 || pane->grid.cursor_col < 0 ||
@@ -2052,7 +2071,7 @@ static void desk_render_grid_cell(const desk_terminal_t *terminal,
                                   bool reverse)
 {
     desk_rect_t rect;
-    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
+    if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect) ||
         row < 0 || col < 0 || row >= grid->rows || col >= grid->cols ||
         row >= rect.rows || col >= rect.cols) {
         return;
@@ -2133,6 +2152,58 @@ static void desk_cursor_tick(const desk_terminal_t *terminal,
     desk_cursor_render(terminal, session);
 }
 
+static void desk_render_pane_title(const desk_terminal_t *terminal,
+                                   const desk_pane_layout_t *panes,
+                                   int pane_id,
+                                   const char *title)
+{
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
+        rect.rows <= 0 || rect.cols <= 0) {
+        return;
+    }
+
+    const char *label = title != NULL && title[0] != '\0' ? title : "untitled";
+    bool active = pane_id == panes->active_pane_id;
+    char frame[2048];
+    size_t used = 0;
+    char cursor[32];
+    int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
+                                 rect.row + 1, rect.col + 1);
+    if (cursor_length <= 0 || (size_t)cursor_length >= sizeof(cursor)) {
+        return;
+    }
+
+    append_text(frame, sizeof(frame), &used, cursor);
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    for (int col = 0; col < rect.cols; ++col) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+
+    append_text(frame, sizeof(frame), &used, cursor);
+    append_text(frame, sizeof(frame), &used,
+                active ? "\x1b[1;7m" : "\x1b[2m");
+    if (rect.cols > 2) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+    int remaining = rect.cols > 2 ? rect.cols - 2 : rect.cols;
+    for (const char *cursor_label = label;
+         *cursor_label != '\0' && remaining > 0;
+         ++cursor_label, --remaining) {
+        unsigned char byte = (unsigned char)*cursor_label;
+        char out[2] = {
+            (char)(byte >= 0x20 && byte != 0x7f ? byte : '?'),
+            '\0',
+        };
+        append_text(frame, sizeof(frame), &used, out);
+    }
+    if (rect.cols > 2) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+}
+
 static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const desk_pane_layout_t *panes,
                                        int pane_id,
@@ -2140,12 +2211,11 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const char *title,
                                        bool dirty_only)
 {
-    (void)title;
     char frame[65536];
     size_t used = 0;
     desk_rect_t rect;
 
-    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect)) {
+    if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect)) {
         return;
     }
 
@@ -2190,6 +2260,7 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+    desk_render_pane_title(terminal, panes, pane_id, title);
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
