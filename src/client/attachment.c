@@ -461,6 +461,9 @@ ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment,
 
     uint64_t *offset = attachment_stream_offset(attachment, stream);
     size_t maximum_length = length > 8192 ? 8192 : length;
+    if (maximum_length > 1) {
+        maximum_length /= 2;
+    }
     char params[256];
     int params_length = snprintf(
         params, sizeof(params),

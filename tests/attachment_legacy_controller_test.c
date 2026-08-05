@@ -75,8 +75,9 @@ static void respond(int fd, const char *request)
         result = "{\"accepted_channels\":2,\"stdout_offset\":0,"
                  "\"stderr_offset\":0,\"tty_offset\":0}";
     } else if (strstr(request, "\"method\":\"controller.read\"") != NULL) {
-        result = "{\"stream\":\"stdout\",\"offset\":0,\"next_offset\":5,"
-                 "\"end_of_stream\":false,\"data\":\"hello\"}";
+        assert(strstr(request, "\"maximum_length\":8") != NULL);
+        result = "{\"stream\":\"stdout\",\"offset\":0,\"next_offset\":2,"
+                 "\"end_of_stream\":false,\"data\":\"A\\u00ff\"}";
     } else {
         assert(!"unexpected controller request");
     }
@@ -177,8 +178,8 @@ int main(void)
     bool end_of_stream = true;
     assert(cubicle_attachment_read_stream(
                attachment, CUBICLE_STREAM_STDOUT, buffer, sizeof(buffer),
-               &end_of_stream) == 5);
-    assert(memcmp(buffer, "hello", 5) == 0);
+               &end_of_stream) == 3);
+    assert(memcmp(buffer, "A\xc3\xbf", 3) == 0);
     assert(!end_of_stream);
     cubicle_attachment_disconnect(attachment);
 
