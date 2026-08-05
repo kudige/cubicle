@@ -616,9 +616,12 @@ static int read_stream_json(const controller_state_t *state,
                             const char *stream,
                             uint64_t offset,
                             uint64_t maximum_length,
-                            char *result,
-                            size_t result_size)
+                            cubicle_json_builder_t *result)
 {
+    if (result == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     if (maximum_length > 8192) {
         errno = EMSGSIZE;
         return -1;
@@ -663,23 +666,15 @@ static int read_stream_json(const controller_state_t *state,
         total += (size_t)nread;
     }
     close(fd);
-    data[total] = '\0';
 
-    char escaped_data[65536];
-    if (cubicle_json_escape(escaped_data, sizeof(escaped_data), data) < 0) {
-        return -1;
-    }
-
-    int length = snprintf(result, result_size,
-                          "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":\"%s\",\"length\":%zu}",
-                          (unsigned long long)offset,
-                          (unsigned long long)(offset + total),
-                          offset + total >= (uint64_t)available_offset
-                              ? "true"
-                              : "false",
-                          escaped_data, total);
-    if (length < 0 || (size_t)length >= result_size) {
-        errno = ENOSPC;
+    if (cubicle_json_builder_appendf(
+            result,
+            "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":",
+            (unsigned long long)offset,
+            (unsigned long long)(offset + total),
+            offset + total >= (uint64_t)available_offset ? "true" : "false") < 0 ||
+        cubicle_json_builder_append_string_n(result, data, total) < 0 ||
+        cubicle_json_builder_appendf(result, ",\"length\":%zu}", total) < 0) {
         return -1;
     }
     return 0;
@@ -860,14 +855,18 @@ static int dispatch_api_request(control_client_t *client,
                 client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
                 "invalid read request", false, 0));
         }
-        char result[131072];
-        if (read_stream_json(state, stream, offset, maximum_length, result,
-                             sizeof(result)) < 0) {
+        cubicle_json_builder_t result;
+        cubicle_json_builder_init(&result);
+        if (read_stream_json(state, stream, offset, maximum_length,
+                             &result) < 0) {
+            cubicle_json_builder_cleanup(&result);
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
                 "read failed", false, errno));
         }
-        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, result));
+        int read_result = enqueue_api_success(client, request_id, result.data);
+        cubicle_json_builder_cleanup(&result);
+        CONTROLLER_API_RETURN(read_result);
     }
 
     if (strcmp(envelope.method, "controller.snapshot") == 0) {

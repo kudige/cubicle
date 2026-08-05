@@ -6,7 +6,7 @@ trap 'if [ -n "${controller_pid:-}" ]; then kill "$controller_pid" 2>/dev/null |
 state_dir="$tmpdir/state"
 socket_path="$tmpdir/control.sock"
 
-"$CUBICLE_CONTROLLER" --state-dir "$state_dir" --control-socket "$socket_path" --mode stream -- sh -c 'printf "ready\n"; cat; sleep 30' >/dev/null 2>/dev/null &
+"$CUBICLE_CONTROLLER" --state-dir "$state_dir" --control-socket "$socket_path" --mode stream -- sh -c 'printf "ready\n"; printf "\377\033[31mX\n"; cat; sleep 30' >/dev/null 2>/dev/null &
 controller_pid=$!
 
 for _ in $(seq 1 100); do
@@ -116,6 +116,12 @@ if [ "$(json_field "$read_response" result.data)" != "ready" ]; then
     exit 1
 fi
 
+binary_response=$(api controller-read stdout --offset 6 --max 8)
+if [ "$(json_field "$binary_response" success)" != "True" ]; then
+    echo "controller.read failed on binary/control output: $binary_response" >&2
+    exit 1
+fi
+
 attach_response=$(api controller-attach local:test:process --channels 2)
 if [ "$(json_field "$attach_response" success)" != "True" ]; then
     echo "controller.attach failed: $attach_response" >&2
@@ -140,7 +146,7 @@ if [ "$(json_field "$write_response" success)" != "True" ]; then
 fi
 
 for _ in $(seq 1 100); do
-    read_response=$(api controller-read stdout --offset 6 --max 5)
+    read_response=$(api controller-read stdout --offset 14 --max 5)
     if [ "$(json_field "$read_response" result.data)" = "hello" ]; then
         break
     fi

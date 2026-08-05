@@ -70,6 +70,24 @@ static void test_builder(void)
     expect_string(builder.data, "\"\"", "builder null string result");
     cubicle_json_builder_cleanup(&builder);
 
+    const unsigned char binary_value[] = {'A', 0xff, '\033', '\0', 'Z'};
+    expect_int(cubicle_json_builder_append_string_n(
+                   &builder, binary_value, sizeof(binary_value)),
+               0, "builder counted binary string");
+    expect_string(builder.data, "\"A\\u00ff\\u001b\\u0000Z\"",
+                  "builder counted binary result");
+    cubicle_json_builder_cleanup(&builder);
+
+    const unsigned char utf8_value[] = {
+        'L', 0xe2, 0x94, 0x80, 'R', 0xe2, 0x94
+    };
+    expect_int(cubicle_json_builder_append_string_n(
+                   &builder, utf8_value, sizeof(utf8_value)),
+               0, "builder counted utf8 string");
+    expect_string(builder.data, "\"L─R\\u00e2\\u0094\"",
+                  "builder counted utf8 result");
+    cubicle_json_builder_cleanup(&builder);
+
     expect_int(cubicle_json_builder_reserve(&builder, 4096), 0,
                "builder reserve");
     expect_int(builder.capacity >= 4097, 1, "builder reserve capacity");

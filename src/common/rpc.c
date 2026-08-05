@@ -236,6 +236,91 @@ int cubicle_json_builder_append_string_n(cubicle_json_builder_t *builder,
             if (cursor[i] < 0x20) {
                 snprintf(escaped, sizeof(escaped), "\\u%04x", cursor[i]);
                 chunk = escaped;
+            } else if (cursor[i] >= 0x80) {
+                size_t sequence_length = 0;
+                int valid_sequence = 0;
+                if (cursor[i] >= 0xc2 && cursor[i] <= 0xdf &&
+                    i + 1 < value_length &&
+                    cursor[i + 1] >= 0x80 && cursor[i + 1] <= 0xbf) {
+                    sequence_length = 2;
+                    valid_sequence = 1;
+                } else if (cursor[i] == 0xe0 &&
+                           i + 2 < value_length &&
+                           cursor[i + 1] >= 0xa0 &&
+                           cursor[i + 1] <= 0xbf &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf) {
+                    sequence_length = 3;
+                    valid_sequence = 1;
+                } else if (cursor[i] >= 0xe1 && cursor[i] <= 0xec &&
+                           i + 2 < value_length &&
+                           cursor[i + 1] >= 0x80 &&
+                           cursor[i + 1] <= 0xbf &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf) {
+                    sequence_length = 3;
+                    valid_sequence = 1;
+                } else if (cursor[i] == 0xed &&
+                           i + 2 < value_length &&
+                           cursor[i + 1] >= 0x80 &&
+                           cursor[i + 1] <= 0x9f &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf) {
+                    sequence_length = 3;
+                    valid_sequence = 1;
+                } else if (cursor[i] >= 0xee && cursor[i] <= 0xef &&
+                           i + 2 < value_length &&
+                           cursor[i + 1] >= 0x80 &&
+                           cursor[i + 1] <= 0xbf &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf) {
+                    sequence_length = 3;
+                    valid_sequence = 1;
+                } else if (cursor[i] == 0xf0 &&
+                           i + 3 < value_length &&
+                           cursor[i + 1] >= 0x90 &&
+                           cursor[i + 1] <= 0xbf &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf &&
+                           cursor[i + 3] >= 0x80 &&
+                           cursor[i + 3] <= 0xbf) {
+                    sequence_length = 4;
+                    valid_sequence = 1;
+                } else if (cursor[i] >= 0xf1 && cursor[i] <= 0xf3 &&
+                           i + 3 < value_length &&
+                           cursor[i + 1] >= 0x80 &&
+                           cursor[i + 1] <= 0xbf &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf &&
+                           cursor[i + 3] >= 0x80 &&
+                           cursor[i + 3] <= 0xbf) {
+                    sequence_length = 4;
+                    valid_sequence = 1;
+                } else if (cursor[i] == 0xf4 &&
+                           i + 3 < value_length &&
+                           cursor[i + 1] >= 0x80 &&
+                           cursor[i + 1] <= 0x8f &&
+                           cursor[i + 2] >= 0x80 &&
+                           cursor[i + 2] <= 0xbf &&
+                           cursor[i + 3] >= 0x80 &&
+                           cursor[i + 3] <= 0xbf) {
+                    sequence_length = 4;
+                    valid_sequence = 1;
+                }
+                if (valid_sequence) {
+                    if (cubicle_json_builder_reserve(builder,
+                                                     sequence_length) < 0) {
+                        return -1;
+                    }
+                    memcpy(builder->data + builder->length, cursor + i,
+                           sequence_length);
+                    builder->length += sequence_length;
+                    builder->data[builder->length] = '\0';
+                    i += sequence_length - 1;
+                    continue;
+                }
+                snprintf(escaped, sizeof(escaped), "\\u%04x", cursor[i]);
+                chunk = escaped;
             } else {
                 if (cubicle_json_builder_reserve(builder, 1) < 0) {
                     return -1;

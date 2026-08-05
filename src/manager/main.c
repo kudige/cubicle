@@ -5642,34 +5642,29 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             total += (size_t)nread;
         }
         close(fd);
-        data[total] = '\0';
 
-        char escaped_data[65536];
-        if (cubicle_json_escape(escaped_data, sizeof(escaped_data),
-                                data) < 0) {
-            MANAGER_RETURN(manager_api_error(client_fd, request_id,
-                                             CUBICLE_ERR_RESOURCE_LIMIT,
-                                             "output chunk is too large",
-                                             false, 0));
-        }
-
-        char result[131072];
-        int result_length = snprintf(result, sizeof(result),
-                                     "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":\"%s\",\"length\":%zu}",
-                                     (unsigned long long)offset,
-                                     (unsigned long long)(offset + total),
-                                     offset + total >=
-                                             (uint64_t)status.st_size
-                                         ? "true"
-                                         : "false",
-                                     escaped_data, total);
-        if (result_length < 0 || (size_t)result_length >= sizeof(result)) {
+        cubicle_json_builder_t result;
+        cubicle_json_builder_init(&result);
+        if (cubicle_json_builder_appendf(
+                &result,
+                "{\"start_offset\":%llu,\"next_offset\":%llu,\"end_of_stream\":%s,\"data\":",
+                (unsigned long long)offset,
+                (unsigned long long)(offset + total),
+                offset + total >= (uint64_t)status.st_size ? "true"
+                                                           : "false") < 0 ||
+            cubicle_json_builder_append_string_n(&result, data, total) < 0 ||
+            cubicle_json_builder_appendf(&result, ",\"length\":%zu}",
+                                         total) < 0) {
+            cubicle_json_builder_cleanup(&result);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_RESOURCE_LIMIT,
                                              "read_output response too large",
                                              false, 0));
         }
-        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+        int read_output_result = manager_api_success(client_fd, request_id,
+                                                     result.data);
+        cubicle_json_builder_cleanup(&result);
+        MANAGER_RETURN(read_output_result);
     }
 
     MANAGER_RETURN(manager_api_error(client_fd, request_id,
