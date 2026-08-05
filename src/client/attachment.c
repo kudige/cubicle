@@ -245,6 +245,22 @@ static uint64_t *attachment_stream_offset(cubicle_attachment_t *attachment,
     return &attachment->stdout_offset;
 }
 
+static uint64_t attachment_stream_offset_value(
+    const cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream)
+{
+    if (attachment == NULL) {
+        return 0;
+    }
+    if (stream == CUBICLE_STREAM_TTY) {
+        return attachment->tty_offset;
+    }
+    if (stream == CUBICLE_STREAM_STDERR) {
+        return attachment->stderr_offset;
+    }
+    return attachment->stdout_offset;
+}
+
 static cubicle_channel_mask_t channel_for_stream(cubicle_stream_kind_t stream)
 {
     if (stream == CUBICLE_STREAM_TTY) {
@@ -401,6 +417,13 @@ void cubicle_attachment_replay(cubicle_attachment_t *attachment,
     attachment->tty_offset = attachment->tty_offset > replay_bytes
                                  ? attachment->tty_offset - replay_bytes
                                  : 0;
+}
+
+uint64_t cubicle_attachment_read_offset(
+    const cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream)
+{
+    return attachment_stream_offset_value(attachment, stream);
 }
 
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length)
@@ -753,6 +776,8 @@ cubicle_error_code_t cubicle_attachment_snapshot(
     snapshot_out->offset = offset;
     snapshot_out->cells = parsed_cells;
     attachment->tty_offset = offset;
+    cubicle_library_debug_log("attachment.snapshot", "tty", CUBICLE_OK,
+                              (size_t)offset, 0, NULL);
 
     cubicle_json_cleanup(&document);
     free(response);

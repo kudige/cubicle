@@ -173,12 +173,12 @@ static int sync_local_terminal_window_size(int resize_fd,
     return 0;
 }
 
-static int write_terminal_response(controller_state_t *state,
-                                   int child_stdin_fd,
-                                   const char *name,
-                                   const char *response)
+static int write_terminal_response_n(controller_state_t *state,
+                                     int child_stdin_fd,
+                                     const char *name,
+                                     const char *response,
+                                     size_t length)
 {
-    size_t length = strlen(response);
     if (write_best_effort(child_stdin_fd, response, length) < 0 &&
         errno != EAGAIN) {
         return -1;
@@ -207,38 +207,104 @@ static int write_terminal_response(controller_state_t *state,
     return append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event);
 }
 
-static int log_terminal_query_passthrough(controller_state_t *state,
-                                          const char *name)
-{
-    char event[160];
-    int event_length = snprintf(event, sizeof(event),
-                                "type=debug category=terminal event=query query=%s action=passthrough attachment_active=%s",
-                                name,
-                                state->terminal_attachment_active ? "true" : "false");
-    if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    return append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event);
-}
-
-static int handle_terminal_query(controller_state_t *state,
-                                 int child_stdin_fd,
-                                 const char *name,
-                                 const char *response,
-                                 int answer)
-{
-    if (answer) {
-        return write_terminal_response(state, child_stdin_fd, name, response);
-    }
-    return log_terminal_query_passthrough(state, name);
-}
-
-static int handle_terminal_queries(controller_state_t *state,
+static int write_terminal_response(controller_state_t *state,
                                    int child_stdin_fd,
-                                   const char *buffer,
-                                   size_t length,
-                                   int answer)
+                                   const char *name,
+                                   const char *response)
+{
+    return write_terminal_response_n(state, child_stdin_fd, name, response,
+                                     strlen(response));
+}
+
+static const char *terminal_response_name(const char *response, size_t length)
+{
+    if (length >= 4 && response[0] == '\033' && response[1] == '[' &&
+        response[length - 1] == 'R') {
+        return "dsr";
+    }
+    if (length == 7 && memcmp(response, "\033[?1;2c", 7) == 0) {
+        return "primary-da";
+    }
+    return "libvterm";
+}
+
+static int write_terminal_model_response(controller_state_t *state,
+                                         int child_stdin_fd,
+                                         const char *response,
+                                         size_t length)
+{
+    return write_terminal_response_n(state, child_stdin_fd,
+                                     terminal_response_name(response, length),
+                                     response, length);
+}
+
+static int drain_terminal_model_responses(controller_state_t *state,
+                                          int child_stdin_fd,
+                                          cubicle_terminal_model_t *model)
+{
+    if (child_stdin_fd < 0 || model == NULL) {
+        return 0;
+    }
+
+    for (;;) {
+        char response[512];
+        ssize_t response_length =
+            cubicle_terminal_model_take_response(model, response,
+                                                 sizeof(response));
+        if (response_length < 0) {
+            return -1;
+        }
+        if (response_length == 0) {
+            return 0;
+        }
+
+        size_t offset = 0;
+        while (offset < (size_t)response_length) {
+            size_t end = offset + 1;
+            if (response[offset] == '\033' && offset + 1 < (size_t)response_length &&
+                response[offset + 1] == '[') {
+                end = offset + 2;
+                while (end < (size_t)response_length &&
+                       response[end] >= 0x20 && response[end] <= 0x3f) {
+                    ++end;
+                }
+                if (end < (size_t)response_length) {
+                    ++end;
+                } else {
+                    end = (size_t)response_length;
+                }
+            } else if (response[offset] == '\033' &&
+                       offset + 1 < (size_t)response_length &&
+                       response[offset + 1] == ']') {
+                end = offset + 2;
+                while (end < (size_t)response_length) {
+                    if (response[end] == '\a') {
+                        ++end;
+                        break;
+                    }
+                    if (response[end] == '\033' &&
+                        end + 1 < (size_t)response_length &&
+                        response[end + 1] == '\\') {
+                        end += 2;
+                        break;
+                    }
+                    ++end;
+                }
+            }
+            if (write_terminal_model_response(state, child_stdin_fd,
+                                              response + offset,
+                                              end - offset) < 0) {
+                return -1;
+            }
+            offset = end;
+        }
+    }
+}
+
+static int handle_unsupported_terminal_queries(controller_state_t *state,
+                                               int child_stdin_fd,
+                                               const char *buffer,
+                                               size_t length)
 {
     if (child_stdin_fd < 0 || buffer == NULL) {
         return 0;
@@ -251,29 +317,10 @@ static int handle_terminal_queries(controller_state_t *state,
         }
 
         if (input[i + 1] == '[') {
-            if (i + 4 <= length && memcmp(&buffer[i], "\033[6n", 4) == 0) {
-                char response[32];
-                snprintf(response, sizeof(response), "\033[1;1R");
-                if (handle_terminal_query(state, child_stdin_fd, "dsr",
-                                          response, answer) < 0) {
-                    return -1;
-                }
-                i += 3;
-                continue;
-            }
-            if (i + 3 <= length && memcmp(&buffer[i], "\033[c", 3) == 0) {
-                if (handle_terminal_query(state, child_stdin_fd,
-                                          "primary-da", "\033[?1;2c",
-                                          answer) < 0) {
-                    return -1;
-                }
-                i += 2;
-                continue;
-            }
             if (i + 4 <= length && memcmp(&buffer[i], "\033[?u", 4) == 0) {
-                if (handle_terminal_query(state, child_stdin_fd,
-                                          "keyboard-protocol",
-                                          "\033[?0u", answer) < 0) {
+                if (write_terminal_response(state, child_stdin_fd,
+                                            "keyboard-protocol",
+                                            "\033[?0u") < 0) {
                     return -1;
                 }
                 i += 3;
@@ -293,8 +340,8 @@ static int handle_terminal_queries(controller_state_t *state,
                 const char *response = input[i + 3] == '0'
                                            ? "\033]10;rgb:e3e3/e3e3/eaea\033\\"
                                            : "\033]11;rgb:0808/0505/2b2b\033\\";
-                if (handle_terminal_query(state, child_stdin_fd, query,
-                                          response, answer) < 0) {
+                if (write_terminal_response(state, child_stdin_fd, query,
+                                            response) < 0) {
                     return -1;
                 }
                 i = cursor + 1;
@@ -673,6 +720,16 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if (terminal_model != NULL &&
+                pipes[i].offset == &state->stdout_offset &&
+                local_input_fd < 0 &&
+                drain_terminal_model_responses(state, child_stdin_fd,
+                                               terminal_model) < 0) {
+                cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                            "failed writing terminal model response");
+                return -1;
+            }
+
+            if (terminal_model != NULL &&
                 pipes[i].offset == &state->stdout_offset) {
                 char debug_event[192];
                 int debug_length = snprintf(
@@ -691,9 +748,8 @@ static int stream_event_loop(stream_pipe_t pipes[2],
 
             if (terminal_model != NULL && local_input_fd < 0 &&
                 pipes[i].offset == &state->stdout_offset &&
-                handle_terminal_queries(
-                    state, child_stdin_fd, buffer, (size_t)read_result,
-                    !state->terminal_attachment_active) < 0) {
+                handle_unsupported_terminal_queries(
+                    state, child_stdin_fd, buffer, (size_t)read_result) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed answering terminal query");
                 return -1;

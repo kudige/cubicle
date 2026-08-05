@@ -1082,6 +1082,10 @@ cubicle_error_code_t cubicle_attachment_connect(
     const cubicle_attachment_options_t *options,
     cubicle_attachment_t **attachment_out);
 
+uint64_t cubicle_attachment_read_offset(
+    const cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream);
+
 ssize_t cubicle_attachment_read(
     cubicle_attachment_t *attachment,
     void *buffer,

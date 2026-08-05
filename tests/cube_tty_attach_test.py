@@ -431,9 +431,9 @@ def main():
             try:
                 read_until(live_master_fd, b"READY")
                 os.write(live_master_fd, b"T")
-                read_until(live_master_fd, b"\x1b[6n")
-                os.write(live_master_fd, b"\x1b[1;1R")
-                read_until(live_master_fd, b"GOT_LIVE_REPLY")
+                live_output = read_until(live_master_fd, b"\x1b[6n")
+                if b"GOT_LIVE_REPLY" not in live_output:
+                    read_until(live_master_fd, b"GOT_LIVE_REPLY")
                 os.write(live_master_fd, b"\x1cd")
                 live_connect.wait(timeout=5)
             finally:

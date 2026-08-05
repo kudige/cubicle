@@ -1938,6 +1938,8 @@ static int refresh_pane_from_model(desk_pane_t *pane)
 
 static int reload_pane_snapshot(desk_pane_t *pane)
 {
+    uint64_t before_offset =
+        cubicle_attachment_read_offset(pane->attachment, CUBICLE_STREAM_TTY);
     desk_debug_log("event=snapshot_reload_start process=%s id=%s",
                    pane->process.friendly_name, pane->process.id);
     cubicle_terminal_snapshot_t snapshot;
@@ -1975,15 +1977,20 @@ static int reload_pane_snapshot(desk_pane_t *pane)
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
-    desk_debug_log("event=snapshot_reload_ok process=%s rows=%u cols=%u offset=%llu cursor=%u,%u visible=%s",
+    uint64_t after_offset =
+        cubicle_attachment_read_offset(pane->attachment, CUBICLE_STREAM_TTY);
+    desk_debug_log("event=snapshot_reload_ok process=%s rows=%u cols=%u offset=%llu read_offset_before=%llu read_offset_after=%llu cursor=%u,%u visible=%s",
                    pane->process.friendly_name, snapshot.rows, snapshot.cols,
-                   (unsigned long long)snapshot.offset, snapshot.cursor_row,
+                   (unsigned long long)snapshot.offset,
+                   (unsigned long long)before_offset,
+                   (unsigned long long)after_offset, snapshot.cursor_row,
                    snapshot.cursor_col,
                    snapshot.cursor_visible ? "true" : "false");
     cubicle_terminal_snapshot_cleanup(&snapshot);
     return 0;
 }
 
+#if 0
 static void grid_clear_row(desk_grid_t *grid, int row)
 {
     if (row < 0 || row >= grid->rows) {
@@ -2454,6 +2461,7 @@ static void grid_feed(desk_grid_t *grid, const unsigned char *data,
         grid_put_utf8_byte(grid, ch);
     }
 }
+#endif
 
 static long long desk_monotonic_ms(void)
 {
@@ -3097,10 +3105,12 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         if (nread == 0) {
             break;
         }
-        desk_debug_log("event=read_ok pane=%zu process=%s bytes=%zd burst=%d",
+        uint64_t read_offset =
+            cubicle_attachment_read_offset(pane->attachment,
+                                           CUBICLE_STREAM_TTY);
+        desk_debug_log("event=read_ok pane=%zu process=%s bytes=%zd burst=%d read_offset=%llu",
                        pane_index + 1, pane->process.friendly_name, nread,
-                       burst);
-        grid_feed(&pane->grid, output, (size_t)nread, pane->attachment);
+                       burst, (unsigned long long)read_offset);
         if (pane->terminal_model != NULL &&
             cubicle_terminal_model_feed(pane->terminal_model, output,
                                         (size_t)nread) < 0) {

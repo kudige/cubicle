@@ -196,6 +196,97 @@ def run_desk_until_command_output(desk, cube, env, process, marker):
         os.close(master_fd)
 
 
+def run_desk_until_screen_marker(desk, env, marker):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_quit = False
+    marker_bytes = marker.encode("utf-8")
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if marker_bytes in captured and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_quit:
+            raise AssertionError(
+                f"desk did not render marker {marker!r}: {captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
+def assert_desk_snapshot_skipped_backlog(log_path, process):
+    with open(log_path, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    snapshot_line = None
+    for line in lines:
+        if f"event=snapshot_reload_ok process={process} " in line:
+            snapshot_line = line
+    if snapshot_line is None:
+        raise AssertionError(f"missing snapshot log for {process}")
+
+    fields = {}
+    for part in snapshot_line.split():
+        if "=" in part:
+            key, value = part.split("=", 1)
+            fields[key] = value
+    offset = int(fields.get("offset", "0"))
+    read_offset_after = int(fields.get("read_offset_after", "-1"))
+    if offset < 4096 or read_offset_after != offset:
+        raise AssertionError(
+            f"snapshot did not advance read offset: {snapshot_line}"
+        )
+
+    read_lines = [
+        line for line in lines
+        if f"event=read_ok " in line and f"process={process} " in line
+    ]
+    if read_lines:
+        raise AssertionError(
+            f"desk read historical backlog after snapshot:\n{''.join(read_lines)}"
+        )
+
+
 def run_desk_with_terminal_noise(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -616,6 +707,48 @@ def main():
         if "type=input length=1" not in events:
             raise AssertionError(f"desk did not record forwarded Ctrl-C:\n{events}")
 
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "backlog-snapshot",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time\n"
+                    "for i in range(900):\n"
+                    "    sys.stdout.write('backlog line %04d - snowman \\u2603\\n' % i)\n"
+                    "sys.stdout.write('BACKLOG_READY\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(8)\n"
+                ),
+            ],
+            env,
+        )
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            logs = subprocess.run(
+                [cube, "logs", "--stdout", "backlog-snapshot"],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if "BACKLOG_READY" in logs.stdout:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("backlog process did not finish initial output")
+        run_desk_until_screen_marker(desk, env, "BACKLOG_READY")
+        assert_desk_snapshot_skipped_backlog(
+            desk_terminal_log, "backlog-snapshot"
+        )
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked(
             [
                 cube,
