@@ -34,6 +34,7 @@ cube access set-role KEY_ID observer|operator|owner
 cube access remove KEY_ID
 cube access revoke KEY_ID
 cube config show
+cube config effective
 cube config paths
 cube config validate
 ```
@@ -425,6 +426,10 @@ Workspace creation bootstraps the creating authenticated key as an owner key.
 `cube config show`
 : Print the effective configuration values currently exposed by the CLI.
 
+`cube config effective`
+: Print each effective configuration value together with the source that
+  supplied it.
+
 Configuration keys currently read include:
 
 ```ini
@@ -474,6 +479,7 @@ Examples:
 cube config validate
 cube config paths
 cube config show
+cube config effective
 CUBICLE_CONFIG=/tmp/cubicle.cfg cube config validate
 ```
 

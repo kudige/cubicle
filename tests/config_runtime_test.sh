@@ -74,6 +74,15 @@ grep -q "^manager.runtime_dir=$runtime_dir$" "$tmpdir/config-paths.out"
 grep -q "^manager.log_dir=$log_dir$" "$tmpdir/config-paths.out"
 grep -q '^manager.socket_mode=0664$' "$tmpdir/config-paths.out"
 
+CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config effective \
+    >"$tmpdir/config-effective.out"
+grep -q '^Configuration sources:$' "$tmpdir/config-effective.out"
+grep -q "^  $config_file$" "$tmpdir/config-effective.out"
+grep -q "^  manager.state_dir .* $state_dir$" "$tmpdir/config-effective.out"
+grep -q "^      source: $config_file (override)$" "$tmpdir/config-effective.out"
+grep -q '^  cube.debug .* none$' "$tmpdir/config-effective.out"
+grep -q '^      source: built-in defaults (built-in)$' "$tmpdir/config-effective.out"
+
 CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" workspace "Project A" \
     >"$tmpdir/workspace.out"
 workspace_json=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" call workspace.get '{"workspace":"Project A"}')

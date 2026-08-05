@@ -129,6 +129,23 @@ static void test_override_file(void)
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
     assert(config.default_kill_cleanup == 1);
+    const cubicle_config_origin_t *origin =
+        cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_STATE_DIR);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_OVERRIDE);
+    assert(strcmp(origin->source_path, path) == 0);
+    origin = cubicle_config_origin(&config, CUBICLE_CONFIG_DEFAULTS_MODE);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_OVERRIDE);
+    assert(strcmp(cubicle_config_key_name(CUBICLE_CONFIG_DEFAULTS_MODE),
+                  "defaults.mode") == 0);
+    assert(strcmp(cubicle_config_source_kind_name(origin->kind),
+                  "override") == 0);
+    origin = cubicle_config_origin(&config,
+                                   CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_BUILTIN);
+    assert(strcmp(origin->source_path, "built-in defaults") == 0);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 
@@ -185,6 +202,14 @@ static void test_user_config_file(void)
     assert(config.cube_debug_library == 1);
     assert(config.desk_debug_library == 0);
     assert(config.desk_debug_terminal == 0);
+    const cubicle_config_origin_t *origin =
+        cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_STATE_DIR);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_USER);
+    assert(strcmp(origin->source_path, path) == 0);
+    origin = cubicle_config_origin(&config, CUBICLE_CONFIG_DEFAULTS_MODE);
+    assert(origin != NULL);
+    assert(strcmp(origin->source_path, path) != 0);
     assert(unsetenv("XDG_CONFIG_HOME") == 0);
 }
 

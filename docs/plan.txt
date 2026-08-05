@@ -459,12 +459,17 @@
   - desk regression coverage verifies large settled backlogs are not replayed after snapshot restore
   - attachment reads cap raw controller read requests so decoded JSON string expansion cannot overflow the caller buffer
   - attachment regression coverage verifies expanded JSON string data no longer causes invalid read data
+- Continued configuration implementation:
+  - added per-key effective configuration origin metadata
+  - tracked built-in, system, user, and override source kinds
+  - added public config origin/key/source-name helpers
+  - added cube config effective to print each value and its source
+  - added config unit/runtime/help coverage for origin reporting
 
 ## Next
 
 1. Continue configuration implementation from docs/configuration-spec.md.
-   - Add drop-in source tracking and effective value origins.
-   - Add XDG user config loading.
+   - Add drop-in source tracking.
    - Add atomic cube defaults show/set/reset.
    - Harden ownership and permission policy for configured directories.
 

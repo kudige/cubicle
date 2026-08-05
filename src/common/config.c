@@ -44,6 +44,30 @@ static int copy_string(char *destination,
     return 0;
 }
 
+static void set_origin(cubicle_config_t *config,
+                       cubicle_config_key_t key,
+                       cubicle_config_source_kind_t kind,
+                       const char *source)
+{
+    if (config == NULL || key < 0 || key >= CUBICLE_CONFIG_KEY_COUNT) {
+        return;
+    }
+    config->origins[key].kind = kind;
+    config->origins[key].line_number = 0;
+    snprintf(config->origins[key].source_path,
+             sizeof(config->origins[key].source_path), "%s",
+             source != NULL && source[0] != '\0' ? source : "unknown");
+}
+
+static void set_all_origins(cubicle_config_t *config,
+                            cubicle_config_source_kind_t kind,
+                            const char *source)
+{
+    for (int i = 0; i < CUBICLE_CONFIG_KEY_COUNT; ++i) {
+        set_origin(config, (cubicle_config_key_t)i, kind, source);
+    }
+}
+
 static int is_absolute_path(const char *path)
 {
     return path != NULL && path[0] == '/';
@@ -408,6 +432,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->default_mode = CUBICLE_PROCESS_TTY;
     config->default_kill_cleanup = 0;
     snprintf(config->source, sizeof(config->source), "built-in defaults");
+    set_all_origins(config, CUBICLE_CONFIG_SOURCE_BUILTIN,
+                    "built-in defaults");
 }
 
 static int get_optional_string(econf_file *file,
@@ -415,9 +441,13 @@ static int get_optional_string(econf_file *file,
                                const char *key,
                                char *destination,
                                size_t destination_size,
+                               int *present_out,
                                char *error,
                                size_t error_size)
 {
+    if (present_out != NULL) {
+        *present_out = 0;
+    }
     char *value = NULL;
     econf_err result = econf_getStringValue(file, group, key, &value);
     if (result == ECONF_NOKEY || result == ECONF_NOGROUP) {
@@ -433,60 +463,105 @@ static int get_optional_string(econf_file *file,
 
     int copy_result = copy_string(destination, destination_size, value, key,
                                   error, error_size);
+    if (copy_result == 0 && present_out != NULL) {
+        *present_out = 1;
+    }
     free(value);
     return copy_result;
 }
 
 static int apply_econf_file(cubicle_config_t *config,
                             econf_file *file,
+                            cubicle_config_source_kind_t source_kind,
+                            const char *source,
                             char *error,
                             size_t error_size)
 {
+    int present = 0;
     if (get_optional_string(file, "installation", "bindir",
                             config->bindir, sizeof(config->bindir),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "installation", "libexecdir",
-                            config->libexecdir, sizeof(config->libexecdir),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "state_dir",
-                            config->manager_state_dir,
-                            sizeof(config->manager_state_dir),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "runtime_dir",
-                            config->manager_runtime_dir,
-                            sizeof(config->manager_runtime_dir),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "log_dir",
-                            config->manager_log_dir,
-                            sizeof(config->manager_log_dir),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "listen",
-                            config->manager_listen_uri,
-                            sizeof(config->manager_listen_uri),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "socket_group",
-                            config->manager_socket_group,
-                            sizeof(config->manager_socket_group),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "manager", "controller_binary",
-                            config->controller_binary,
-                            sizeof(config->controller_binary),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "client", "manager",
-                            config->client_manager_uri,
-                            sizeof(config->client_manager_uri),
-                            error, error_size) < 0 ||
-        get_optional_string(file, "client", "server_identity",
-                            config->client_server_identity,
-                            sizeof(config->client_server_identity),
-                            error, error_size) < 0) {
+                            &present, error, error_size) < 0) {
         return -1;
     }
+    if (present) set_origin(config, CUBICLE_CONFIG_INSTALLATION_BINDIR,
+                            source_kind, source);
+    if (get_optional_string(file, "installation", "libexecdir",
+                            config->libexecdir, sizeof(config->libexecdir),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "state_dir",
+                            config->manager_state_dir,
+                            sizeof(config->manager_state_dir),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_STATE_DIR,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "runtime_dir",
+                            config->manager_runtime_dir,
+                            sizeof(config->manager_runtime_dir),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_RUNTIME_DIR,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "log_dir",
+                            config->manager_log_dir,
+                            sizeof(config->manager_log_dir),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_LOG_DIR,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "listen",
+                            config->manager_listen_uri,
+                            sizeof(config->manager_listen_uri),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_LISTEN,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "socket_group",
+                            config->manager_socket_group,
+                            sizeof(config->manager_socket_group),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_SOCKET_GROUP,
+                            source_kind, source);
+    if (get_optional_string(file, "manager", "controller_binary",
+                            config->controller_binary,
+                            sizeof(config->controller_binary),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY,
+                            source_kind, source);
+    if (get_optional_string(file, "client", "manager",
+                            config->client_manager_uri,
+                            sizeof(config->client_manager_uri),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_CLIENT_MANAGER,
+                            source_kind, source);
+    if (get_optional_string(file, "client", "server_identity",
+                            config->client_server_identity,
+                            sizeof(config->client_server_identity),
+                            &present, error, error_size) < 0) {
+        return -1;
+    }
+    if (present) set_origin(config, CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY,
+                            source_kind, source);
 
     char controller_debug[64];
     controller_debug[0] = '\0';
     if (get_optional_string(file, "controller", "debug", controller_debug,
-                            sizeof(controller_debug), error, error_size) < 0) {
+                            sizeof(controller_debug), &present, error,
+                            error_size) < 0) {
         return -1;
     }
     if (controller_debug[0] != '\0') {
@@ -494,62 +569,87 @@ static int apply_econf_file(cubicle_config_t *config,
                                    error_size) < 0) {
             return -1;
         }
+        set_origin(config, CUBICLE_CONFIG_CONTROLLER_DEBUG, source_kind,
+                   source);
     }
 
     char cube_debug[64];
     cube_debug[0] = '\0';
     if (get_optional_string(file, "cube", "debug", cube_debug,
-                            sizeof(cube_debug), error, error_size) < 0 ||
+                            sizeof(cube_debug), &present, error,
+                            error_size) < 0 ||
         (cube_debug[0] != '\0' &&
          parse_library_debug(cube_debug, &config->cube_debug_library,
                              "cube.debug", error, error_size) < 0)) {
         return -1;
     }
+    if (cube_debug[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_CUBE_DEBUG, source_kind, source);
+    }
 
     char desk_debug[64];
     desk_debug[0] = '\0';
     if (get_optional_string(file, "desk", "debug", desk_debug,
-                            sizeof(desk_debug), error, error_size) < 0) {
+                            sizeof(desk_debug), &present, error,
+                            error_size) < 0) {
         return -1;
     }
     if (desk_debug[0] != '\0' &&
         parse_desk_debug(desk_debug, config, error, error_size) < 0) {
         return -1;
     }
+    if (desk_debug[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DESK_DEBUG, source_kind, source);
+    }
 
     char value[64];
     value[0] = '\0';
     if (get_optional_string(file, "defaults", "launch", value, sizeof(value),
-                            error, error_size) < 0 ||
+                            &present, error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_launch(value, &config->default_launch, error, error_size) < 0)) {
         return -1;
     }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DEFAULTS_LAUNCH, source_kind,
+                   source);
+    }
 
     value[0] = '\0';
     if (get_optional_string(file, "manager", "socket_mode", value,
-                            sizeof(value), error, error_size) < 0 ||
+                            sizeof(value), &present, error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_socket_mode(value, &config->manager_socket_mode,
                            error, error_size) < 0)) {
         return -1;
     }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_SOCKET_MODE, source_kind,
+                   source);
+    }
 
     value[0] = '\0';
     if (get_optional_string(file, "defaults", "mode", value, sizeof(value),
-                            error, error_size) < 0 ||
+                            &present, error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_mode(value, &config->default_mode, error, error_size) < 0)) {
         return -1;
     }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DEFAULTS_MODE, source_kind, source);
+    }
 
     value[0] = '\0';
     if (get_optional_string(file, "defaults", "kill_cleanup", value,
-                            sizeof(value), error, error_size) < 0 ||
+                            sizeof(value), &present, error, error_size) < 0 ||
         (value[0] != '\0' &&
          parse_bool(value, &config->default_kill_cleanup,
                     "defaults.kill_cleanup", error, error_size) < 0)) {
         return -1;
+    }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP,
+                   source_kind, source);
     }
 
     return 0;
@@ -679,7 +779,8 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
             return -1;
         }
         snprintf(config->source, sizeof(config->source), "%s", override_path);
-        if (apply_econf_file(config, file, error, error_size) < 0) {
+        if (apply_econf_file(config, file, CUBICLE_CONFIG_SOURCE_OVERRIDE,
+                             override_path, error, error_size) < 0) {
             econf_free(file);
             return -1;
         }
@@ -700,7 +801,9 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     if (result == ECONF_SUCCESS) {
         snprintf(config->source, sizeof(config->source),
                  "system configuration");
-        if (apply_econf_file(config, system_file, error, error_size) < 0) {
+        if (apply_econf_file(config, system_file, CUBICLE_CONFIG_SOURCE_SYSTEM,
+                             "system configuration", error,
+                             error_size) < 0) {
             econf_free(system_file);
             return -1;
         }
@@ -719,7 +822,8 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
             return -1;
         }
         if (result == ECONF_SUCCESS) {
-            if (apply_econf_file(config, user_file, error, error_size) < 0) {
+            if (apply_econf_file(config, user_file, CUBICLE_CONFIG_SOURCE_USER,
+                                 path, error, error_size) < 0) {
                 econf_free(user_file);
                 return -1;
             }
@@ -741,4 +845,72 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
 const char *cubicle_launch_default_name(cubicle_launch_default_t launch)
 {
     return launch == CUBICLE_LAUNCH_BACKGROUND ? "background" : "foreground";
+}
+
+const char *cubicle_config_source_kind_name(cubicle_config_source_kind_t kind)
+{
+    switch (kind) {
+    case CUBICLE_CONFIG_SOURCE_SYSTEM:
+        return "system";
+    case CUBICLE_CONFIG_SOURCE_USER:
+        return "user";
+    case CUBICLE_CONFIG_SOURCE_OVERRIDE:
+        return "override";
+    case CUBICLE_CONFIG_SOURCE_BUILTIN:
+    default:
+        return "built-in";
+    }
+}
+
+const char *cubicle_config_key_name(cubicle_config_key_t key)
+{
+    switch (key) {
+    case CUBICLE_CONFIG_INSTALLATION_BINDIR:
+        return "installation.bindir";
+    case CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR:
+        return "installation.libexecdir";
+    case CUBICLE_CONFIG_MANAGER_STATE_DIR:
+        return "manager.state_dir";
+    case CUBICLE_CONFIG_MANAGER_RUNTIME_DIR:
+        return "manager.runtime_dir";
+    case CUBICLE_CONFIG_MANAGER_LOG_DIR:
+        return "manager.log_dir";
+    case CUBICLE_CONFIG_MANAGER_LISTEN:
+        return "manager.listen";
+    case CUBICLE_CONFIG_MANAGER_SOCKET_MODE:
+        return "manager.socket_mode";
+    case CUBICLE_CONFIG_MANAGER_SOCKET_GROUP:
+        return "manager.socket_group";
+    case CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY:
+        return "manager.controller_binary";
+    case CUBICLE_CONFIG_CONTROLLER_DEBUG:
+        return "controller.debug";
+    case CUBICLE_CONFIG_CUBE_DEBUG:
+        return "cube.debug";
+    case CUBICLE_CONFIG_DESK_DEBUG:
+        return "desk.debug";
+    case CUBICLE_CONFIG_CLIENT_MANAGER:
+        return "client.manager";
+    case CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY:
+        return "client.server_identity";
+    case CUBICLE_CONFIG_DEFAULTS_LAUNCH:
+        return "defaults.launch";
+    case CUBICLE_CONFIG_DEFAULTS_MODE:
+        return "defaults.mode";
+    case CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP:
+        return "defaults.kill_cleanup";
+    case CUBICLE_CONFIG_KEY_COUNT:
+    default:
+        return "unknown";
+    }
+}
+
+const cubicle_config_origin_t *cubicle_config_origin(
+    const cubicle_config_t *config,
+    cubicle_config_key_t key)
+{
+    if (config == NULL || key < 0 || key >= CUBICLE_CONFIG_KEY_COUNT) {
+        return NULL;
+    }
+    return &config->origins[key];
 }

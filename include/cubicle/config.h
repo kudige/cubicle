@@ -13,6 +13,40 @@ typedef enum cubicle_launch_default {
     CUBICLE_LAUNCH_BACKGROUND = 2
 } cubicle_launch_default_t;
 
+typedef enum cubicle_config_source_kind {
+    CUBICLE_CONFIG_SOURCE_BUILTIN = 1,
+    CUBICLE_CONFIG_SOURCE_SYSTEM = 2,
+    CUBICLE_CONFIG_SOURCE_USER = 3,
+    CUBICLE_CONFIG_SOURCE_OVERRIDE = 4
+} cubicle_config_source_kind_t;
+
+typedef enum cubicle_config_key {
+    CUBICLE_CONFIG_INSTALLATION_BINDIR = 0,
+    CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR,
+    CUBICLE_CONFIG_MANAGER_STATE_DIR,
+    CUBICLE_CONFIG_MANAGER_RUNTIME_DIR,
+    CUBICLE_CONFIG_MANAGER_LOG_DIR,
+    CUBICLE_CONFIG_MANAGER_LISTEN,
+    CUBICLE_CONFIG_MANAGER_SOCKET_MODE,
+    CUBICLE_CONFIG_MANAGER_SOCKET_GROUP,
+    CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY,
+    CUBICLE_CONFIG_CONTROLLER_DEBUG,
+    CUBICLE_CONFIG_CUBE_DEBUG,
+    CUBICLE_CONFIG_DESK_DEBUG,
+    CUBICLE_CONFIG_CLIENT_MANAGER,
+    CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY,
+    CUBICLE_CONFIG_DEFAULTS_LAUNCH,
+    CUBICLE_CONFIG_DEFAULTS_MODE,
+    CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP,
+    CUBICLE_CONFIG_KEY_COUNT
+} cubicle_config_key_t;
+
+typedef struct cubicle_config_origin {
+    cubicle_config_source_kind_t kind;
+    char source_path[CUBICLE_PATH_MAX];
+    unsigned int line_number;
+} cubicle_config_origin_t;
+
 typedef struct cubicle_config {
     char bindir[CUBICLE_PATH_MAX];
     char libexecdir[CUBICLE_PATH_MAX];
@@ -35,6 +69,7 @@ typedef struct cubicle_config {
     cubicle_process_mode_t default_mode;
     int default_kill_cleanup;
     char source[CUBICLE_PATH_MAX];
+    cubicle_config_origin_t origins[CUBICLE_CONFIG_KEY_COUNT];
 } cubicle_config_t;
 
 void cubicle_config_defaults(cubicle_config_t *config);
@@ -46,6 +81,11 @@ int cubicle_config_unix_uri_path(const char *uri,
                                  char *path,
                                  size_t path_size);
 const char *cubicle_launch_default_name(cubicle_launch_default_t launch);
+const char *cubicle_config_key_name(cubicle_config_key_t key);
+const cubicle_config_origin_t *cubicle_config_origin(
+    const cubicle_config_t *config,
+    cubicle_config_key_t key);
+const char *cubicle_config_source_kind_name(cubicle_config_source_kind_t kind);
 
 #ifdef __cplusplus
 }

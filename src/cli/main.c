@@ -132,7 +132,7 @@ static void print_usage(FILE *stream)
             "  cube remove NAME\n"
             "  cube cleanup\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
-            "  cube config show|paths|validate\n"
+            "  cube config show|effective|paths|validate\n"
             "\n"
             "Run and reconnect to persistent processes inside Cubicle workspaces.\n");
 }
@@ -226,7 +226,8 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "config") == 0) {
-        fprintf(stream, "Usage:\n  cube config show|paths|validate\n");
+        fprintf(stream,
+                "Usage:\n  cube config show|effective|paths|validate\n");
         return 0;
     }
     return -1;
@@ -312,7 +313,8 @@ static int command_config(const cubicle_config_t *config,
                           int command_index)
 {
     if (command_index + 1 >= argc) {
-        fprintf(stderr, "cube: config requires show, paths, or validate\n");
+        fprintf(stderr,
+                "cube: config requires show, effective, paths, or validate\n");
         return 2;
     }
 
@@ -407,6 +409,111 @@ static int command_config(const cubicle_config_t *config,
         printf("defaults.mode=%s\n", cube_mode_name(config->default_mode));
         printf("defaults.kill_cleanup=%s\n",
                config->default_kill_cleanup ? "true" : "false");
+        return 0;
+    }
+
+    if (strcmp(subcommand, "effective") == 0) {
+        printf("Configuration sources:\n");
+        printf("  %s\n", config->source);
+        printf("\n");
+        printf("Effective values:\n");
+        for (int i = 0; i < CUBICLE_CONFIG_KEY_COUNT; ++i) {
+            cubicle_config_key_t key = (cubicle_config_key_t)i;
+            const cubicle_config_origin_t *origin =
+                cubicle_config_origin(config, key);
+            const char *value = "";
+            char formatted[128];
+            switch (key) {
+            case CUBICLE_CONFIG_INSTALLATION_BINDIR:
+                value = config->bindir;
+                break;
+            case CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR:
+                value = config->libexecdir;
+                break;
+            case CUBICLE_CONFIG_MANAGER_STATE_DIR:
+                value = config->manager_state_dir;
+                break;
+            case CUBICLE_CONFIG_MANAGER_RUNTIME_DIR:
+                value = config->manager_runtime_dir;
+                break;
+            case CUBICLE_CONFIG_MANAGER_LOG_DIR:
+                value = config->manager_log_dir;
+                break;
+            case CUBICLE_CONFIG_MANAGER_LISTEN:
+                value = config->manager_listen_uri;
+                break;
+            case CUBICLE_CONFIG_MANAGER_SOCKET_MODE:
+                snprintf(formatted, sizeof(formatted), "%04o",
+                         config->manager_socket_mode);
+                value = formatted;
+                break;
+            case CUBICLE_CONFIG_MANAGER_SOCKET_GROUP:
+                value = config->manager_socket_group;
+                break;
+            case CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY:
+                value = config->controller_binary;
+                break;
+            case CUBICLE_CONFIG_CONTROLLER_DEBUG:
+                snprintf(formatted, sizeof(formatted), "%s%s%s%s",
+                         config->controller_debug_input ? "input" : "",
+                         config->controller_debug_input &&
+                                 (config->controller_debug_library ||
+                                  config->controller_debug_terminal)
+                             ? ","
+                             : "",
+                         config->controller_debug_library ? "library" : "",
+                         config->controller_debug_terminal
+                             ? (config->controller_debug_library ? ",terminal"
+                                                                 : "terminal")
+                             : (config->controller_debug_input ||
+                                        config->controller_debug_library
+                                    ? ""
+                                    : "none"));
+                value = formatted;
+                break;
+            case CUBICLE_CONFIG_CUBE_DEBUG:
+                value = config->cube_debug_library ? "library" : "none";
+                break;
+            case CUBICLE_CONFIG_DESK_DEBUG:
+                snprintf(formatted, sizeof(formatted), "%s%s%s",
+                         config->desk_debug_library ? "library" : "",
+                         config->desk_debug_library &&
+                                 config->desk_debug_terminal
+                             ? ","
+                             : "",
+                         config->desk_debug_terminal
+                             ? "terminal"
+                             : (config->desk_debug_library ? "" : "none"));
+                value = formatted;
+                break;
+            case CUBICLE_CONFIG_CLIENT_MANAGER:
+                value = config->client_manager_uri;
+                break;
+            case CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY:
+                value = config->client_server_identity;
+                break;
+            case CUBICLE_CONFIG_DEFAULTS_LAUNCH:
+                value = cubicle_launch_default_name(config->default_launch);
+                break;
+            case CUBICLE_CONFIG_DEFAULTS_MODE:
+                value = cube_mode_name(config->default_mode);
+                break;
+            case CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP:
+                value = config->default_kill_cleanup ? "true" : "false";
+                break;
+            case CUBICLE_CONFIG_KEY_COUNT:
+            default:
+                continue;
+            }
+            printf("  %-35s %s\n", cubicle_config_key_name(key), value);
+            printf("      source: %s",
+                   origin != NULL ? origin->source_path : "unknown");
+            if (origin != NULL) {
+                printf(" (%s)",
+                       cubicle_config_source_kind_name(origin->kind));
+            }
+            printf("\n");
+        }
         return 0;
     }
 
