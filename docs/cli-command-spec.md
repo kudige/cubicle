@@ -328,15 +328,14 @@ Initial useful filters:
 
 ```console
 cube ps -a
-cube ps --all-workspaces
-cube ps --running
 cube ps --all
+cube ps --running
 cube ps --workspace Shogun
 cube ps --json
 ```
 
 `cube ps -a` lists all workspaces, with each workspace followed by the cubes
-belonging to it. `--all-workspaces` is the equivalent long option.
+belonging to it. `--all` is the equivalent long option.
 
 Later:
 
@@ -344,7 +343,7 @@ Later:
 cube ps --watch
 ```
 
-The default should show live processes and a bounded number of recently completed processes. `--all` includes retained history.
+The default should show live processes and a bounded number of recently completed processes.
 
 ### 5.2 Inspect one process
 

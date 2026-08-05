@@ -52,7 +52,7 @@ grep -q 'Usage:' "$PWD/cube-help.out"
 grep -q 'cube \[--config PATH\]' "$PWD/cube-help.out"
 grep -q 'cube workspace \[NAME\]' "$PWD/cube-help.out"
 grep -q 'cube run \[--fg|--bg\] \[--stream|--tty|--term\]' "$PWD/cube-help.out"
-grep -q 'cube ps \[-a|--all-workspaces\]' "$PWD/cube-help.out"
+grep -q 'cube ps \[-a|--all\]' "$PWD/cube-help.out"
 grep -q 'cube inspect NAME' "$PWD/cube-help.out"
 grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] NAME' "$PWD/cube-help.out"
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
@@ -72,7 +72,7 @@ if [ -s "$PWD/cube-ps-help.err" ]; then
     echo "cube ps help should write to stdout only" >&2
     exit 1
 fi
-grep -q 'cube ps \[-a|--all-workspaces\]' "$PWD/cube-ps-help.out"
+grep -q 'cube ps \[-a|--all\]' "$PWD/cube-ps-help.out"
 
 cube kill --help >"$PWD/cube-kill-help.out" 2>"$PWD/cube-kill-help.err"
 if [ -s "$PWD/cube-kill-help.err" ]; then

@@ -16,7 +16,7 @@ cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
 cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
-cube ps [-a|--all-workspaces]
+cube ps [-a|--all]
 cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]

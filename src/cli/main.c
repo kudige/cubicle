@@ -126,7 +126,7 @@ static void print_usage(FILE *stream)
             "  cube workspace [NAME]\n"
             "  cube workspace list|create|select|stop|delete ...\n"
             "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n"
-            "  cube ps [-a|--all-workspaces]\n"
+            "  cube ps [-a|--all]\n"
             "  cube inspect NAME\n"
             "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
@@ -165,7 +165,7 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "ps") == 0) {
-        fprintf(stream, "Usage:\n  cube ps [-a|--all-workspaces]\n");
+        fprintf(stream, "Usage:\n  cube ps [-a|--all]\n");
         return 0;
     }
     if (strcmp(command, "inspect") == 0) {
@@ -1864,8 +1864,7 @@ static int parse_process_list_options(int argc,
 {
     memset(list_options, 0, sizeof(*list_options));
     for (int i = command_index + 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-a") == 0 ||
-            strcmp(argv[i], "--all-workspaces") == 0) {
+        if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--all") == 0) {
             list_options->all_workspaces = 1;
             continue;
         }

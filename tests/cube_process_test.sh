@@ -110,6 +110,11 @@ printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project A$'
 printf "%s\n" "$all_ps_output" | grep -q '^build	stream	lost$'
 printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project B$'
 printf "%s\n" "$all_ps_output" | grep -q '^project-b-proc	stream	'
+long_all_ps_output=$(cube ps --all)
+if [ "$long_all_ps_output" != "$all_ps_output" ]; then
+    echo "cube ps --all should match cube ps -a" >&2
+    exit 1
+fi
 json_all_ps_output=$(cube --json ps -a)
 printf "%s" "$json_all_ps_output" | grep -q '"workspaces"'
 printf "%s" "$json_all_ps_output" | grep -q '"name":"Project A"'
