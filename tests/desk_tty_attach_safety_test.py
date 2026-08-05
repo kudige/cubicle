@@ -186,6 +186,8 @@ def run_desk_click_inactive_title(desk, cube, env):
     sent_ctrl_select = False
     saw_mouse_release = False
     mouse_release_start = 0
+    sent_mouse_toggle = False
+    saw_mouse_toggle_off = False
     sent_quit = False
     deadline = time.time() + 7
     try:
@@ -206,7 +208,7 @@ def run_desk_click_inactive_title(desk, cube, env):
             if (
                 not clicked_title
                 and b"title-left" in captured
-                and b"title-right" in captured
+                and b"[title-right]" in captured
                 and b"\x1b[?1000h\x1b[?1006h" in captured
             ):
                 marker = captured.rfind(b"title-right")
@@ -253,7 +255,20 @@ def run_desk_click_inactive_title(desk, cube, env):
                 if release in captured[mouse_release_start:]:
                     saw_mouse_release = True
 
-            if saw_mouse_release and not sent_quit:
+            if saw_mouse_release and not sent_mouse_toggle:
+                captured.clear()
+                os.write(master_fd, b"\x18m")
+                sent_mouse_toggle = True
+
+            if sent_mouse_toggle and not saw_mouse_toggle_off:
+                if b"\x1b[1;1H\x1b[2m title-left " in captured:
+                    if b"[title-left]" in captured:
+                        raise AssertionError(
+                            f"desk left inactive title bracketed after mouse toggle: {captured!r}"
+                        )
+                    saw_mouse_toggle_off = True
+
+            if saw_mouse_toggle_off and not sent_quit:
                 os.write(master_fd, b"\x18q")
                 sent_quit = True
 
@@ -268,6 +283,8 @@ def run_desk_click_inactive_title(desk, cube, env):
             raise AssertionError(f"clicked title pane did not receive input: {captured!r}")
         if not saw_mouse_release:
             raise AssertionError(f"desk did not release mouse for Ctrl-selection: {captured!r}")
+        if not saw_mouse_toggle_off:
+            raise AssertionError(f"desk did not toggle mouse title mode off: {captured!r}")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:

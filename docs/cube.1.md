@@ -494,7 +494,10 @@ exit diagnostics to `manager.log_dir/desk-terminal.log`.
 Desk enables mouse selection of inactive pane titles by default. On this
 experimental branch, a non-title mouse press temporarily releases mouse
 reporting so the outer terminal may handle a text-selection drag. Use
-`desk --no-mouse` to disable title mouse selection entirely.
+`desk --no-mouse` to start with title mouse selection disabled. Press
+`Prefix-m` inside Desk to toggle mouse title selection. Inactive pane titles are
+shown as `[name]` while mouse title selection is enabled and as `name` while it
+is disabled.
 
 Examples:
 

@@ -230,7 +230,8 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_pane_layout_t *panes,
                                   int pane_id,
                                   desk_grid_t *grid,
-                                  const char *title);
+                                  const char *title,
+                                  bool mouse_titles);
 static long long desk_monotonic_ms(void);
 
 static void handle_signal(int signo)
@@ -2198,7 +2199,8 @@ static void desk_cursor_tick(const desk_terminal_t *terminal,
 static void desk_render_pane_title(const desk_terminal_t *terminal,
                                    const desk_pane_layout_t *panes,
                                    int pane_id,
-                                   const char *title)
+                                   const char *title,
+                                   bool mouse_titles)
 {
     desk_rect_t rect;
     if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
@@ -2230,6 +2232,10 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
         append_text(frame, sizeof(frame), &used, " ");
     }
     int remaining = rect.cols > 2 ? rect.cols - 2 : rect.cols;
+    if (!active && mouse_titles && remaining > 0) {
+        append_text(frame, sizeof(frame), &used, "[");
+        --remaining;
+    }
     for (const char *cursor_label = label;
          *cursor_label != '\0' && remaining > 0;
          ++cursor_label, --remaining) {
@@ -2239,6 +2245,10 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
             '\0',
         };
         append_text(frame, sizeof(frame), &used, out);
+    }
+    if (!active && mouse_titles && remaining > 0) {
+        append_text(frame, sizeof(frame), &used, "]");
+        --remaining;
     }
     if (rect.cols > 2) {
         append_text(frame, sizeof(frame), &used, " ");
@@ -2252,6 +2262,7 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        int pane_id,
                                        desk_grid_t *grid,
                                        const char *title,
+                                       bool mouse_titles,
                                        bool dirty_only)
 {
     char frame[65536];
@@ -2303,25 +2314,29 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
-    desk_render_pane_title(terminal, panes, pane_id, title);
+    desk_render_pane_title(terminal, panes, pane_id, title, mouse_titles);
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_pane_layout_t *panes,
                                   int pane_id,
                                   desk_grid_t *grid,
-                                  const char *title)
+                                  const char *title,
+                                  bool mouse_titles)
 {
-    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title, false);
+    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title,
+                               mouse_titles, false);
 }
 
 static void desk_render_dirty_cube_grid(const desk_terminal_t *terminal,
                                         const desk_pane_layout_t *panes,
                                         int pane_id,
                                         desk_grid_t *grid,
-                                        const char *title)
+                                        const char *title,
+                                        bool mouse_titles)
 {
-    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title, true);
+    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title,
+                               mouse_titles, true);
 }
 
 static int pane_content_size(const desk_terminal_t *terminal,
@@ -3031,6 +3046,9 @@ static bool desk_title_hit_test(const desk_terminal_t *terminal,
              ++cursor) {
             ++label_cols;
         }
+        if (session->mouse_titles && label_cols + 2 <= title_cols) {
+            label_cols += 2;
+        }
         int hit_start = title_start;
         int hit_end = title_start + label_cols - 1;
         if (rect.cols > 2) {
@@ -3108,7 +3126,8 @@ static void render_all_panes(const desk_terminal_t *terminal,
     for (size_t i = 0; i < session->pane_count; ++i) {
         desk_render_cube_grid(terminal, &session->layout, (int)i + 1,
                               &session->panes[i].grid,
-                              session->panes[i].process.friendly_name);
+                              session->panes[i].process.friendly_name,
+                              session->mouse_titles);
     }
     desk_cursor_reset_blink(session);
     desk_cursor_render(terminal, session);
@@ -3349,7 +3368,8 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         desk_cursor_erase(terminal, session);
         desk_render_dirty_cube_grid(terminal, &session->layout,
                                     (int)pane_index + 1, &pane->grid,
-                                    pane->process.friendly_name);
+                                    pane->process.friendly_name,
+                                    session->mouse_titles);
         desk_cursor_reset_blink(session);
         desk_cursor_render(terminal, session);
     }
@@ -3705,6 +3725,18 @@ static bool handle_prefix_command(desk_session_t *session,
         return true;
     case 's':
         session->layout.resize_mode = !session->layout.resize_mode;
+        *layout_changed = true;
+        return true;
+    case 'm':
+        session->mouse_titles = !session->mouse_titles;
+        session->mouse_suspended_until_ms = 0;
+        if (session->mouse_titles) {
+            desk_menu_enable_mouse();
+        } else {
+            desk_menu_disable_mouse();
+        }
+        desk_debug_log("event=mouse_mode enabled=%d",
+                       session->mouse_titles ? 1 : 0);
         *layout_changed = true;
         return true;
     case 'o':
@@ -4124,6 +4156,8 @@ static void print_usage(FILE *stream, const char *program)
             "  --mouse       Enable mouse pane title selection.\n");
     fprintf(stream,
             "  --no-mouse    Disable mouse pane title selection.\n");
+    fprintf(stream,
+            "  Prefix-m      Toggle mouse pane title selection while running.\n");
 }
 
 static int parse_prefix_key(const char *text, unsigned char *key)
