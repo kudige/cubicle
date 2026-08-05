@@ -2930,56 +2930,128 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         return;
     }
 
+    desk_rect_t pane_rect;
+    if (!pane_layout_rect_for_pane(&session->layout, terminal,
+                                   session->layout.active_pane_id,
+                                   &pane_rect)) {
+        return;
+    }
+
+    int box_cols = pane_rect.cols > 74 ? 74 : pane_rect.cols;
+    if (box_cols < 32) {
+        box_cols = pane_rect.cols;
+    }
+    int wanted_rows = 7 + (int)menu->item_count;
+    if (menu->status[0] != '\0') {
+        wanted_rows += 2;
+    }
+    int box_rows = wanted_rows;
+    if (box_rows > pane_rect.rows) {
+        box_rows = pane_rect.rows;
+    }
+    if (box_rows < 6) {
+        box_rows = pane_rect.rows < 6 ? pane_rect.rows : 6;
+    }
+    if (box_rows <= 0 || box_cols <= 0) {
+        return;
+    }
+    int box_row = pane_rect.row + (pane_rect.rows - box_rows) / 2;
+    int box_col = pane_rect.col + (pane_rect.cols - box_cols) / 2;
+    int inner_cols = box_cols > 2 ? box_cols - 2 : box_cols;
+    int visible_items = box_rows > 6 ? box_rows - 6 : 0;
+
     char frame[262144];
     size_t used = 0;
-    append_text(frame, sizeof(frame), &used, "\x1b[H\x1b[2J\x1b[0m");
 
     char line[512];
     const char *heading = menu->level == DESK_MENU_ROOT
                               ? "Open cube"
                               : "Open cube from workspace";
-    int length = snprintf(line, sizeof(line), "\x1b[1;1H\x1b[1m%s\x1b[0m",
-                          heading);
+
+    for (int row = 0; row < box_rows; ++row) {
+        int terminal_row = box_row + row + 1;
+        int terminal_col = box_col + 1;
+        int length = snprintf(line, sizeof(line), "\x1b[%d;%dH",
+                              terminal_row, terminal_col);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+        append_text(frame, sizeof(frame), &used, "\x1b[48;5;236m");
+        for (int col = 0; col < box_cols; ++col) {
+            append_text(frame, sizeof(frame), &used, " ");
+        }
+    }
+
+    int length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236m\x1b[1m%.*s\x1b[0m",
+                          box_row + 2, box_col + 3, inner_cols, heading);
     if (length > 0 && (size_t)length < sizeof(line)) {
         append_text(frame, sizeof(frame), &used, line);
     }
-    length = snprintf(line, sizeof(line), "\x1b[2;1HWorkspace: %s",
+    int workspace_name_cols = inner_cols > 11 ? inner_cols - 11 : 0;
+    length = snprintf(line, sizeof(line),
+                      "\x1b[%d;%dH\x1b[48;5;236mWorkspace: %.*s\x1b[0m",
+                      box_row + 3, box_col + 3, workspace_name_cols,
                       menu->workspace.name);
     if (length > 0 && (size_t)length < sizeof(line)) {
         append_text(frame, sizeof(frame), &used, line);
     }
-    append_text(frame, sizeof(frame), &used,
-                "\x1b[3;1HEnter selects. q closes. Esc goes back.");
+    length = snprintf(line, sizeof(line),
+                      "\x1b[%d;%dH\x1b[48;5;236m\x1b[2m%.*s\x1b[0m",
+                      box_row + 4, box_col + 3, inner_cols,
+                      "Enter selects. q closes. Esc goes back.");
+    if (length > 0 && (size_t)length < sizeof(line)) {
+        append_text(frame, sizeof(frame), &used, line);
+    }
 
-    int row = 5;
+    int row = box_row + 6;
     if (menu->item_count == 0) {
-        length = snprintf(line, sizeof(line), "\x1b[%d;1H%s", row,
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236m%.*s\x1b[0m",
+                          row, box_col + 3, inner_cols,
                           menu->status[0] != '\0' ? menu->status
                                                    : "No entries");
         if (length > 0 && (size_t)length < sizeof(line)) {
             append_text(frame, sizeof(frame), &used, line);
         }
     }
-    for (size_t i = 0; i < menu->item_count && row <= terminal->rows; ++i) {
+    for (size_t i = 0; i < menu->item_count && (int)i < visible_items; ++i) {
         const desk_menu_item_t *item = &menu->items[i];
         const char *marker = i == menu->selected ? ">" : " ";
         const char *style = i == menu->selected
-                                ? "\x1b[1;7m"
-                                : (item->disabled ? "\x1b[2m" : "\x1b[0m");
-        const char *suffix = item->disabled ? " (open)" : "";
+                                ? "\x1b[1;7;48;5;236m"
+                                : (item->disabled ? "\x1b[2;48;5;236m"
+                                                  : "\x1b[48;5;236m");
         if (item->kind == DESK_MENU_ITEM_PROCESS) {
             const char *name = item->process.friendly_name[0] != '\0'
                                    ? item->process.friendly_name
                                    : item->process.id;
+            int name_cols = inner_cols > 2 ? inner_cols - 2 : 0;
             length = snprintf(line, sizeof(line),
-                              "\x1b[%d;1H%s%s %s  [%s]%s\x1b[0m",
-                              row, style, marker, name,
-                              cubicle_process_mode_name(item->process.mode),
-                              suffix);
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols,
+                              marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 5, style, name_cols, name);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
         } else {
+            int name_cols = inner_cols > 13 ? inner_cols - 13 : 0;
             length = snprintf(line, sizeof(line),
-                              "\x1b[%d;1H%s%s workspace: %s  >\x1b[0m",
-                              row, style, marker, item->workspace.name);
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols, marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%sworkspace: %.*s  >\x1b[0m",
+                              row, box_col + 5, style, name_cols,
+                              item->workspace.name);
         }
         if (length > 0 && (size_t)length < sizeof(line)) {
             append_text(frame, sizeof(frame), &used, line);
@@ -2987,9 +3059,10 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         ++row;
     }
 
-    if (menu->status[0] != '\0' && row + 1 <= terminal->rows) {
-        length = snprintf(line, sizeof(line), "\x1b[%d;1H\x1b[2m%s\x1b[0m",
-                          row + 1, menu->status);
+    if (menu->status[0] != '\0' && row + 1 < box_row + box_rows) {
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[2;48;5;236m%.*s\x1b[0m",
+                          row + 1, box_col + 3, inner_cols, menu->status);
         if (length > 0 && (size_t)length < sizeof(line)) {
             append_text(frame, sizeof(frame), &used, line);
         }
