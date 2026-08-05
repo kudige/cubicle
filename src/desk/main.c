@@ -2974,6 +2974,16 @@ static void desk_resume_mouse_if_ready(desk_session_t *session)
     desk_debug_log("event=mouse_selection_resume");
 }
 
+static bool sgr_mouse_is_left_button(int button)
+{
+    return (button & 3) == 0;
+}
+
+static bool sgr_mouse_has_modifier(int button)
+{
+    return (button & (4 | 8 | 16)) != 0;
+}
+
 static bool desk_title_hit_test(const desk_terminal_t *terminal,
                                 const desk_session_t *session,
                                 int row,
@@ -3796,9 +3806,10 @@ static int handle_input(desk_session_t *session,
             }
             desk_debug_log("event=mouse_normal button=%d row=%d col=%d press=%d",
                            button, mouse_row, mouse_col, (int)mouse_press);
-            if (mouse_press && button == 0) {
+            if (mouse_press && sgr_mouse_is_left_button(button)) {
                 int pane_id = 0;
-                if (desk_title_hit_test(terminal, session, mouse_row,
+                if (!sgr_mouse_has_modifier(button) &&
+                    desk_title_hit_test(terminal, session, mouse_row,
                                         mouse_col, &pane_id)) {
                     desk_debug_log("event=mouse_title_select pane=%d", pane_id);
                     session->layout.active_pane_id = pane_id;

@@ -183,6 +183,9 @@ def run_desk_click_inactive_title(desk, cube, env):
     title_col = 0
     sent_payload = False
     saw_payload = False
+    sent_ctrl_select = False
+    saw_mouse_release = False
+    mouse_release_start = 0
     sent_quit = False
     deadline = time.time() + 7
     try:
@@ -240,7 +243,17 @@ def run_desk_click_inactive_title(desk, cube, env):
                 if "GOT_TITLE" in logs.stdout:
                     saw_payload = True
 
-            if saw_payload and not sent_quit:
+            if saw_payload and not sent_ctrl_select:
+                mouse_release_start = len(captured)
+                os.write(master_fd, b"\x1b[<16;45;4M")
+                sent_ctrl_select = True
+
+            if sent_ctrl_select and not saw_mouse_release:
+                release = b"\x1b[?1006l\x1b[?1000l"
+                if release in captured[mouse_release_start:]:
+                    saw_mouse_release = True
+
+            if saw_mouse_release and not sent_quit:
                 os.write(master_fd, b"\x18q")
                 sent_quit = True
 
@@ -253,6 +266,8 @@ def run_desk_click_inactive_title(desk, cube, env):
             raise AssertionError(f"desk did not select clicked title: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"clicked title pane did not receive input: {captured!r}")
+        if not saw_mouse_release:
+            raise AssertionError(f"desk did not release mouse for Ctrl-selection: {captured!r}")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
