@@ -1202,15 +1202,17 @@ static int process_list(const char *manager_socket,
     return 0;
 }
 
-static int process_cleanup(const char *manager_socket,
-                           const cube_options_t *options)
-{
-    char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
-        fprintf(stderr, "cube: no workspace selected\n");
-        return 1;
-    }
+typedef struct cleanup_counts {
+    uint64_t removed_count;
+    uint64_t skipped_live_count;
+    uint64_t skipped_saved_count;
+} cleanup_counts_t;
 
+static int manager_cleanup_workspace(const char *manager_socket,
+                                     const char *workspace,
+                                     int json_output,
+                                     cleanup_counts_t *counts)
+{
     char escaped_workspace[CUBICLE_NAME_MAX * 2];
     if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
                             workspace) < 0) {
@@ -1227,7 +1229,7 @@ static int process_cleanup(const char *manager_socket,
         return print_rpc_error(&response);
     }
 
-    if (options->json) {
+    if (json_output) {
         printf("%s\n", response.result_json);
         cleanup_rpc_response(&response);
         return 0;
@@ -1255,14 +1257,39 @@ static int process_cleanup(const char *manager_socket,
         return 2;
     }
 
-    printf("Removed %llu processes\n", (unsigned long long)removed_count);
-    printf("Skipped %llu live processes\n",
-           (unsigned long long)skipped_live_count);
-    printf("Skipped %llu saved processes\n",
-           (unsigned long long)skipped_saved_count);
+    if (counts) {
+        counts->removed_count = removed_count;
+        counts->skipped_live_count = skipped_live_count;
+        counts->skipped_saved_count = skipped_saved_count;
+    }
 
     cubicle_json_cleanup(&document);
     cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int process_cleanup(const char *manager_socket,
+                           const cube_options_t *options)
+{
+    char workspace[CUBICLE_NAME_MAX];
+    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+
+    cleanup_counts_t counts = {0};
+    int result = manager_cleanup_workspace(manager_socket, workspace,
+                                           options->json, &counts);
+    if (result != 0 || options->json) {
+        return result;
+    }
+
+    printf("Removed %llu processes\n",
+           (unsigned long long)counts.removed_count);
+    printf("Skipped %llu live processes\n",
+           (unsigned long long)counts.skipped_live_count);
+    printf("Skipped %llu saved processes\n",
+           (unsigned long long)counts.skipped_saved_count);
     return 0;
 }
 
@@ -1780,6 +1807,7 @@ static int process_kill_all(const char *manager_socket,
     size_t killed_count = 0;
     size_t removed_count = 0;
     size_t skipped_saved_count = 0;
+    cleanup_counts_t cleanup_counts = {0};
     for (size_t i = 0; i < target_count; ++i) {
         int result = process_action_by_id(manager_socket, targets[i].id,
                                           "process.kill", 0);
@@ -1796,22 +1824,14 @@ static int process_kill_all(const char *manager_socket,
             if (result != 0) {
                 return result;
             }
-            int saved = 0;
-            result = process_saved_by_id(manager_socket, targets[i].id,
-                                         &saved);
-            if (result != 0) {
-                return result;
-            }
-            if (saved) {
-                ++skipped_saved_count;
-                continue;
-            }
-            result = remove_process_by_id(manager_socket, targets[i].id);
-            if (result != 0) {
-                return result;
-            }
-            ++removed_count;
         }
+        int result = manager_cleanup_workspace(manager_socket, workspace, 0,
+                                               &cleanup_counts);
+        if (result != 0) {
+            return result;
+        }
+        removed_count = (size_t)cleanup_counts.removed_count;
+        skipped_saved_count = (size_t)cleanup_counts.skipped_saved_count;
     }
 
     if (options->json) {

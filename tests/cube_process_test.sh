@@ -392,19 +392,27 @@ kill_all_one_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-all-one sleep 30 | json_id)
 kill_all_two_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-all-two sleep 30 | json_id)
+kill_all_done_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name kill-all-done /bin/true | json_id)
+api process-wait "$kill_all_done_process_id" --timeout-ms 2000 | grep -q '"success":true'
 cube save kill-all-two >/dev/null
 kill_all_output=$(cube kill --all --cleanup)
 printf "%s\n" "$kill_all_output" | grep -q '^Killed 2 processes$'
-printf "%s\n" "$kill_all_output" | grep -q '^Removed 1 processes$'
+printf "%s\n" "$kill_all_output" | grep -q '^Removed [1-9][0-9]* processes$'
 printf "%s\n" "$kill_all_output" | grep -q '^Skipped 1 saved processes$'
 set +e
 api process-get "$kill_all_one_process_id" >"$tmpdir/kill-all-one-get.out" 2>&1
 first_status=$?
 api process-get "$kill_all_two_process_id" >"$tmpdir/kill-all-two-get.out" 2>&1
 second_status=$?
+api process-get "$kill_all_done_process_id" >"$tmpdir/kill-all-done-get.out" 2>&1
+done_status=$?
+api process-get process-1 >"$tmpdir/kill-all-lost-get.out" 2>&1
+lost_status=$?
 set -e
-if [ "$first_status" -eq 0 ] || [ "$second_status" -ne 0 ]; then
-    echo "kill --all --cleanup should remove unsaved processes and keep saved processes" >&2
+if [ "$first_status" -eq 0 ] || [ "$done_status" -eq 0 ] ||
+    [ "$lost_status" -eq 0 ] || [ "$second_status" -ne 0 ]; then
+    echo "kill --all --cleanup should remove unsaved inactive processes and keep saved processes" >&2
     exit 1
 fi
 cube unsave kill-all-two >/dev/null

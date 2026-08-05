@@ -499,6 +499,9 @@ Recommended semantics:
 - `kill --cleanup`: after a successful kill, wait briefly for the killed
   process to exit and remove that process record unless it is saved.
   `defaults.kill_cleanup` may make this behavior the default.
+- `kill --all --cleanup`: after killing all running processes, run workspace
+  cleanup so all unsaved non-live records are removed, including records that
+  were already completed or lost.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--close`.
 - `save`: mark a process record so cleanup commands skip it.

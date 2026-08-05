@@ -322,8 +322,9 @@ cube connect --ro build
   workspace.
 
 `cube kill --all --cleanup`
-: Kill all running processes in the selected workspace, then remove the killed
-  process records after they exit unless they are saved.
+: Kill all running processes in the selected workspace, then run workspace
+  cleanup. This removes all unsaved non-live process records, including records
+  that were already completed or lost before the kill command ran.
 
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,
