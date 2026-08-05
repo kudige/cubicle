@@ -53,7 +53,7 @@ int cubeui_terminal_enter_alt_raw(cubeui_terminal_t *terminal)
     raw.c_iflag &= (tcflag_t) ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
     raw.c_oflag &= (tcflag_t) ~(OPOST);
     raw.c_cflag |= CS8;
-    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
