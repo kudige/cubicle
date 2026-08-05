@@ -2698,6 +2698,17 @@ static int write_active_pane(desk_session_t *session,
                : 0;
 }
 
+static int flush_active_input(desk_session_t *session,
+                              const unsigned char *input,
+                              size_t start,
+                              size_t end)
+{
+    if (end <= start) {
+        return 0;
+    }
+    return write_active_pane(session, input + start, end - start);
+}
+
 static bool handle_prefix_command(desk_session_t *session,
                                   desk_terminal_t *terminal,
                                   unsigned char key,
@@ -2811,26 +2822,42 @@ static int handle_input(desk_session_t *session,
                         bool *layout_changed,
                         bool *quit_requested)
 {
+    size_t start = 0;
     for (size_t i = 0; i < length; ++i) {
         size_t consumed = 0;
         if (is_terminal_response_sequence(input, length, i, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             i += consumed - 1;
+            start = i + 1;
             continue;
         }
         if (session->prefix_pending) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             session->prefix_pending = false;
             (void)handle_prefix_command(session, terminal, input[i],
                                         layout_changed, quit_requested);
+            start = i + 1;
             continue;
         }
         if (input[i] == session->prefix_key) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             session->prefix_pending = true;
+            start = i + 1;
             continue;
         }
         desk_resize_side_t side;
         int delta = 0;
         if (session->layout.resize_mode &&
             parse_resize_arrow(input, length, i, &side, &delta, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             if (pane_layout_resize_side(&session->layout, terminal, side,
                                         delta) == 0) {
                 bool sizes_changed = false;
@@ -2841,14 +2868,11 @@ static int handle_input(desk_session_t *session,
                 *layout_changed = true;
             }
             i += consumed - 1;
+            start = i + 1;
             continue;
         }
-
-        if (write_active_pane(session, &input[i], 1) < 0) {
-            return -1;
-        }
     }
-    return 0;
+    return flush_active_input(session, input, start, length);
 }
 
 static void desk_session_cleanup(desk_session_t *session)
