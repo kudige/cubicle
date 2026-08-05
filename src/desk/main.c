@@ -3274,6 +3274,11 @@ static int write_active_pane(desk_session_t *session,
                : 0;
 }
 
+static int desk_open_workspace_from_menu(desk_session_t *session,
+                                         const desk_terminal_t *terminal,
+                                         const cubicle_workspace_info_t *workspace,
+                                         bool *menu_closed);
+
 static int desk_open_menu_select(desk_session_t *session,
                                  const desk_terminal_t *terminal,
                                  bool *menu_closed)
@@ -3285,8 +3290,9 @@ static int desk_open_menu_select(desk_session_t *session,
     }
     desk_menu_item_t selected = menu->items[menu->selected];
     if (selected.kind == DESK_MENU_ITEM_WORKSPACE) {
-        (void)desk_load_process_menu(session, &selected.workspace);
-        return 0;
+        return desk_open_workspace_from_menu(session, terminal,
+                                             &selected.workspace,
+                                             menu_closed);
     }
 
     char error[256];

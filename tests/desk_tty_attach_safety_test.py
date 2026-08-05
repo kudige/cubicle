@@ -222,6 +222,85 @@ def run_desk_open_other_workspace_process(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_enter_workspace_switch(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    opened_menu = False
+    selected_workspace = False
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not opened_menu and b"desk-safe" in captured:
+                os.write(master_fd, b"\x18o")
+                opened_menu = True
+
+            if opened_menu and not selected_workspace and b"workspace: DeskEnter" in captured:
+                os.write(master_fd, b"\r")
+                selected_workspace = True
+
+            if selected_workspace and not sent_payload and b"READY desk-enter" in captured:
+                os.write(master_fd, b"ENTER")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskEnter", "logs", "--stdout", "desk-enter"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_ENTER" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not opened_menu:
+            raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if not selected_workspace:
+            raise AssertionError(f"desk open menu did not show enter workspace: {captured!r}")
+        if not saw_payload:
+            raise AssertionError(f"entered workspace pane did not receive input: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        os.close(master_fd)
+
+
 def run_desk_click_workspace_switch(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -846,6 +925,43 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env)
+
+        run_checked([cube, "workspace", "create", "DeskEnter"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskEnter",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "desk-enter",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY desk-enter\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+10\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if b'ENTER' in data:\n"
+                    "            sys.stdout.write('GOT_ENTER\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            break\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_desk_enter_workspace_switch(desk, cube, env)
+        run_checked([cube, "--workspace", "DeskEnter", "kill", "--all", "--cleanup"], env)
 
         run_checked([cube, "workspace", "create", "DeskOther"], env)
         run_checked(
