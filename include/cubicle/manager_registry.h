@@ -8,6 +8,9 @@ extern "C" {
 #endif
 
 #define CUBICLE_MANAGER_ID_LENGTH 32
+#define CUBICLE_PROCESS_ARGV_JSON_MAX 16384
+#define CUBICLE_PROCESS_RECORD_LINE_MAX \
+    (CUBICLE_PATH_MAX + CUBICLE_PROCESS_ARGV_JSON_MAX + 1024)
 
 typedef struct cubicle_workspace_record {
     char id[CUBICLE_MANAGER_ID_LENGTH + 1];
@@ -24,6 +27,7 @@ typedef struct cubicle_process_record {
     char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
     char control_socket[CUBICLE_PATH_MAX];
     char cwd[CUBICLE_PATH_MAX];
+    char argv_json[CUBICLE_PROCESS_ARGV_JSON_MAX];
     int saved;
 } cubicle_process_record_t;
 

@@ -101,6 +101,66 @@ json_id() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
 }
 
+inspect_command_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name inspect-command /bin/echo inspect-command | json_id)
+api process-wait "$inspect_command_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube inspect inspect-command >"$tmpdir/inspect-command.out"
+grep -q '^Command:     /bin/echo inspect-command$' "$tmpdir/inspect-command.out"
+cube remove inspect-command >/dev/null
+
+restart_count="$tmpdir/restart-count"
+restart_script="printf 'run\n' >> '$restart_count'"
+restart_old_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name restart-me -- /bin/sh -c "$restart_script" | json_id)
+api process-wait "$restart_old_process_id" --timeout-ms 2000 | grep -q '"success":true'
+restart_output=$(cube restart restart-me)
+if [ "$restart_output" != "Process restart-me restarted" ]; then
+    echo "unexpected restart output: $restart_output" >&2
+    exit 1
+fi
+for _ in $(seq 1 100); do
+    if [ -f "$restart_count" ] && [ "$(wc -l <"$restart_count")" -eq 2 ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ ! -f "$restart_count" ] || [ "$(wc -l <"$restart_count")" -ne 2 ]; then
+    echo "restart did not rerun original command" >&2
+    exit 1
+fi
+set +e
+api process-get "$restart_old_process_id" >"$tmpdir/restart-old-get.out" 2>&1
+restart_old_status=$?
+set -e
+if [ "$restart_old_status" -eq 0 ]; then
+    echo "restart should remove the old process record" >&2
+    exit 1
+fi
+cube inspect restart-me >"$tmpdir/restart-inspect.out"
+grep -q '^Command:     /bin/sh -c ' "$tmpdir/restart-inspect.out"
+cube remove restart-me >/dev/null
+
+workspace_b_id=$(api workspace-create "Project B" | json_id)
+project_b_process_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-proc /bin/true | json_id)
+api process-wait "$project_b_process_id" --timeout-ms 2000 | grep -q '"success":true'
+all_ps_output=$(cube ps -a)
+printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project A$'
+printf "%s\n" "$all_ps_output" | grep -q '^build	stream	lost$'
+printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project B$'
+printf "%s\n" "$all_ps_output" | grep -q '^project-b-proc	stream	'
+long_all_ps_output=$(cube ps --all)
+if [ "$long_all_ps_output" != "$all_ps_output" ]; then
+    echo "cube ps --all should match cube ps -a" >&2
+    exit 1
+fi
+json_all_ps_output=$(cube --json ps -a)
+printf "%s" "$json_all_ps_output" | grep -q '"workspaces"'
+printf "%s" "$json_all_ps_output" | grep -q '"name":"Project A"'
+printf "%s" "$json_all_ps_output" | grep -q '"friendly_name":"build"'
+printf "%s" "$json_all_ps_output" | grep -q '"name":"Project B"'
+printf "%s" "$json_all_ps_output" | grep -q '"friendly_name":"project-b-proc"'
+
 connect_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name connect-io -- sh -c \
     'printf "connect-ready\n"; IFS= read line; printf "connect:%s\n" "$line"; sleep 0.2' |

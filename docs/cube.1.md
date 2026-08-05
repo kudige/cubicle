@@ -16,11 +16,12 @@ cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
 cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
-cube ps
+cube ps [-a|--all]
 cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
+cube restart NAME
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
 cube signal NAME SIGNAL
@@ -201,13 +202,18 @@ cube --json run --bg --stream /bin/sleep 30
 `cube ps`
 : List process names, modes, and states in the selected workspace.
 
+`cube ps -a`
+: List every workspace, with the cubes in each workspace.
+
 `cube inspect NAME`
-: Show the current manager record for one process.
+: Show the current manager record for one process, including the stored command
+  line when restart metadata is available.
 
 Examples:
 
 ```sh
 cube ps
+cube ps -a
 cube --workspace ProjectA ps
 cube --json ps
 cube inspect server
@@ -333,6 +339,11 @@ cube connect --ro build
 : Kill all running processes in the selected workspace, then run workspace
   cleanup. This removes all unsaved non-live process records, including records
   that were already completed or lost before the kill command ran.
+
+`cube restart NAME`
+: Kill the process if it is running, remove the old unsaved process record, and
+  start a new background process with the same name, mode, directory, and stored
+  command argv.
 
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,

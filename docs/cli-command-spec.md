@@ -327,11 +327,15 @@ make            stream   completed   0           15m       exit 0
 Initial useful filters:
 
 ```console
-cube ps --running
+cube ps -a
 cube ps --all
+cube ps --running
 cube ps --workspace Shogun
 cube ps --json
 ```
+
+`cube ps -a` lists all workspaces, with each workspace followed by the cubes
+belonging to it. `--all` is the equivalent long option.
 
 Later:
 
@@ -339,7 +343,7 @@ Later:
 cube ps --watch
 ```
 
-The default should show live processes and a bounded number of recently completed processes. `--all` includes retained history.
+The default should show live processes and a bounded number of recently completed processes.
 
 ### 5.2 Inspect one process
 
@@ -491,6 +495,7 @@ Core lifecycle commands:
 cube signal NAME SIGNAL
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
+cube restart NAME
 cube push [--close] NAME
 cube save NAME
 cube unsave NAME
@@ -511,6 +516,11 @@ Recommended semantics:
 - `kill --all --cleanup`: after killing all running processes, run workspace
   cleanup so all unsaved non-live records are removed, including records that
   were already completed or lost.
+- `restart`: if the process is running, kill it and wait briefly for it to
+  exit; then remove the old unsaved process record and start a new background
+  process with the same cube name, mode, directory, and stored argv. Processes
+  without stored argv metadata cannot be restarted. Saved process records must
+  be unsaved first.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--close`.
 - `save`: mark a process record so cleanup commands skip it.

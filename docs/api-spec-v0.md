@@ -598,6 +598,10 @@ friendly_name
 
 Friendly-name lookup must return `AMBIGUOUS_NAME` if not unique.
 
+Response: `process_info`, including the original `argv[]` used for
+`process.start` when that metadata is available. Older retained process records
+may return an empty `argv[]`.
+
 #### `process.list`
 
 Filters may include:

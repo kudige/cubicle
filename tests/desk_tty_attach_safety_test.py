@@ -40,7 +40,18 @@ def run_checked(command, env, **kwargs):
     return result.stdout
 
 
-def run_desk_and_ctrl_c(desk, cube, env):
+def read_controller_events(log_dir):
+    events = []
+    controller_log_root = os.path.join(log_dir, "controllers")
+    for root, _, files in os.walk(controller_log_root):
+        if "events.log" in files:
+            path = os.path.join(root, "events.log")
+            with open(path, "r", encoding="utf-8") as handle:
+                events.append(handle.read())
+    return "\n".join(events)
+
+
+def run_desk_and_ctrl_c(desk, cube, env, log_dir):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
         [desk],
@@ -53,6 +64,8 @@ def run_desk_and_ctrl_c(desk, cube, env):
     os.close(slave_fd)
     os.write(master_fd, b"\x1b[12;34R")
     captured = bytearray()
+    sent_arrow = False
+    saw_arrow = False
     sent_ctrl_c = False
     saw_ctrl_c = False
     sent_quit = False
@@ -73,7 +86,7 @@ def run_desk_and_ctrl_c(desk, cube, env):
                 elif proc.stderr is not None:
                     os.read(proc.stderr.fileno(), 4096)
 
-            if not sent_ctrl_c and b"desk-safe" in captured:
+            if not sent_arrow and b"desk-safe" in captured:
                 ps_result = subprocess.run(
                     [cube, "ps"],
                     env=env,
@@ -93,6 +106,15 @@ def run_desk_and_ctrl_c(desk, cube, env):
                         f"cube ps did not see running cube while desk was open:\n"
                         f"{ps_result.stdout}"
                     )
+                os.write(master_fd, b"\x1b[A")
+                sent_arrow = True
+
+            if sent_arrow and not saw_arrow:
+                events = read_controller_events(log_dir)
+                if "type=input length=3" in events and "data_hex=1b5b41" in events:
+                    saw_arrow = True
+
+            if saw_arrow and not sent_ctrl_c:
                 os.write(master_fd, b"\x03")
                 sent_ctrl_c = True
 
@@ -116,8 +138,15 @@ def run_desk_and_ctrl_c(desk, cube, env):
             if proc.poll() is not None:
                 break
 
-        if not sent_ctrl_c:
+        if not sent_arrow:
             raise AssertionError(f"desk did not render attached pane: {captured!r}")
+        if not saw_arrow:
+            events = read_controller_events(log_dir)
+            raise AssertionError(
+                f"desk did not forward Up arrow as one CSI input event:\n{events}"
+            )
+        if not sent_ctrl_c:
+            raise AssertionError("desk did not send Ctrl-C after Up arrow")
         if not saw_ctrl_c:
             raise AssertionError(f"desk did not forward Ctrl-C: {captured!r}")
         if not sent_quit:
@@ -958,6 +987,9 @@ def main():
                 "[manager]\n"
                 f"log_dir={log_dir}\n"
                 "\n"
+                "[controller]\n"
+                "debug=input\n"
+                "\n"
                 "[desk]\n"
                 "debug=library,terminal\n"
             )
@@ -1027,7 +1059,7 @@ def main():
             env,
         )
 
-        run_desk_and_ctrl_c(desk, cube, env)
+        run_desk_and_ctrl_c(desk, cube, env, log_dir)
 
         run_checked([cube, "workspace", "create", "DeskEnter"], env)
         run_checked(
@@ -1128,15 +1160,7 @@ def main():
         if "desk-safe\ttty\trunning" not in ps_output:
             raise AssertionError(f"TTY process did not stay running:\n{ps_output}")
 
-        event_logs = []
-        controller_log_root = os.path.join(log_dir, "controllers")
-        for root, _, files in os.walk(controller_log_root):
-            if "events.log" in files:
-                event_logs.append(os.path.join(root, "events.log"))
-        if len(event_logs) != 1:
-            raise AssertionError(f"expected one controller event log, got {event_logs}")
-        with open(event_logs[0], "r", encoding="utf-8") as handle:
-            events = handle.read()
+        events = read_controller_events(log_dir)
         if "type=input length=1" not in events:
             raise AssertionError(f"desk did not record forwarded Ctrl-C:\n{events}")
 

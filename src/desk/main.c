@@ -3327,6 +3327,17 @@ static int write_active_pane(desk_session_t *session,
                : 0;
 }
 
+static int flush_active_input(desk_session_t *session,
+                              const unsigned char *input,
+                              size_t start,
+                              size_t end)
+{
+    if (end <= start) {
+        return 0;
+    }
+    return write_active_pane(session, input + start, end - start);
+}
+
 static int desk_open_workspace_from_menu(desk_session_t *session,
                                          const desk_terminal_t *terminal,
                                          const cubicle_workspace_info_t *workspace,
@@ -3743,6 +3754,7 @@ static int handle_input(desk_session_t *session,
                         bool *layout_changed,
                         bool *quit_requested)
 {
+    size_t start = 0;
     for (size_t i = 0; i < length; ++i) {
         if (is_incomplete_sgr_mouse(input, length, i)) {
             desk_save_pending_input(session, input, length, i);
@@ -3756,6 +3768,9 @@ static int handle_input(desk_session_t *session,
         if (session->mouse_titles &&
             parse_sgr_mouse(input, length, i, &button, &mouse_row,
                             &mouse_col, &mouse_press, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             desk_debug_log("event=mouse_normal button=%d row=%d col=%d press=%d",
                            button, mouse_row, mouse_col, (int)mouse_press);
             if (mouse_press && button == 0) {
@@ -3769,26 +3784,42 @@ static int handle_input(desk_session_t *session,
                 }
             }
             i += consumed - 1;
+            start = i + 1;
             continue;
         }
         if (is_terminal_response_sequence(input, length, i, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             i += consumed - 1;
+            start = i + 1;
             continue;
         }
         if (session->prefix_pending) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             session->prefix_pending = false;
             (void)handle_prefix_command(session, terminal, input[i],
                                         layout_changed, quit_requested);
+            start = i + 1;
             continue;
         }
         if (input[i] == session->prefix_key) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             session->prefix_pending = true;
+            start = i + 1;
             continue;
         }
         desk_resize_side_t side;
         int delta = 0;
         if (session->layout.resize_mode &&
             parse_resize_arrow(input, length, i, &side, &delta, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
             if (pane_layout_resize_side(&session->layout, terminal, side,
                                         delta) == 0) {
                 bool sizes_changed = false;
@@ -3799,14 +3830,11 @@ static int handle_input(desk_session_t *session,
                 *layout_changed = true;
             }
             i += consumed - 1;
+            start = i + 1;
             continue;
         }
-
-        if (write_active_pane(session, &input[i], 1) < 0) {
-            return -1;
-        }
     }
-    return 0;
+    return flush_active_input(session, input, start, length);
 }
 
 static void desk_session_cleanup(desk_session_t *session)

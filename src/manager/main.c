@@ -819,7 +819,7 @@ static int count_processes(const manager_state_t *state, size_t *count)
         return 0;
     }
 
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t record;
         if (cubicle_parse_process_record(line, &record) == 0) {
@@ -934,7 +934,7 @@ static int count_processes_for_workspace(const manager_state_t *state,
         return 0;
     }
 
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t record;
         if (cubicle_parse_process_record(line, &record) == 0 &&
@@ -1009,10 +1009,12 @@ static int process_info_json(const char *manager_id_value,
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"saved\":%s,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
+                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"argv\":%s,\"saved\":%s,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
                           manager_id_value, process->workspace_id,
                           process->process_id, escaped_name, process->mode,
                           api_process_state_name(process->state), escaped_cwd,
+                          process->argv_json[0] == '\0' ? "[]" :
+                                                           process->argv_json,
                           process->saved ? "true" : "false");
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
@@ -1097,7 +1099,7 @@ static int find_process_record(const manager_state_t *state,
     }
 
     int found = 0;
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t candidate;
         if (cubicle_parse_process_record(line, &candidate) != 0) {
@@ -1142,7 +1144,7 @@ static int process_conflict_exists(const manager_state_t *state,
         return 0;
     }
 
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t record;
         if (cubicle_parse_process_record(line, &record) != 0) {
@@ -1699,6 +1701,31 @@ static int command_workspace_list(const manager_state_t *state)
     return 0;
 }
 
+static int build_argv_json(char *buffer, size_t buffer_size, char **argv)
+{
+    cubicle_json_builder_t builder = {0};
+    if (cubicle_json_builder_append(&builder, "[") < 0) {
+        cubicle_json_builder_cleanup(&builder);
+        return -1;
+    }
+    for (size_t i = 0; argv != NULL && argv[i] != NULL; ++i) {
+        if ((i > 0 && cubicle_json_builder_append(&builder, ",") < 0) ||
+            cubicle_json_builder_append_string(&builder, argv[i]) < 0) {
+            cubicle_json_builder_cleanup(&builder);
+            return -1;
+        }
+    }
+    if (cubicle_json_builder_append(&builder, "]") < 0 ||
+        builder.length >= buffer_size) {
+        cubicle_json_builder_cleanup(&builder);
+        errno = ENOSPC;
+        return -1;
+    }
+    snprintf(buffer, buffer_size, "%s", builder.data);
+    cubicle_json_builder_cleanup(&builder);
+    return 0;
+}
+
 static int append_process_record(const manager_state_t *state,
                                  const char *process_id,
                                  const char *workspace_id,
@@ -1707,13 +1734,15 @@ static int append_process_record(const manager_state_t *state,
                                  const char *process_state,
                                  const char *controller_id,
                                  const char *control_socket,
-                                 const char *cwd)
+                                 const char *cwd,
+                                 const char *argv_json)
 {
-    char line[PATH_MAX + 512];
-    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\n",
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
+    int length = snprintf(line, sizeof(line), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\n",
                           process_id, workspace_id, friendly_name, mode,
                           process_state, controller_id, control_socket,
-                          cwd == NULL ? "" : cwd);
+                          cwd == NULL ? "" : cwd,
+                          argv_json == NULL ? "" : argv_json);
     if (length < 0 || (size_t)length >= sizeof(line)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -1731,11 +1760,12 @@ typedef struct process_record_update {
 static int write_process_record(FILE *output,
                                 const cubicle_process_record_t *record)
 {
-    return fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+    return fprintf(output, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
                    record->process_id, record->workspace_id,
                    record->friendly_name, record->mode, record->state,
                    record->controller_id, record->control_socket,
-                   record->cwd, record->saved ? 1 : 0) < 0
+                   record->cwd, record->saved ? 1 : 0,
+                   record->argv_json) < 0
                ? -1
                : 0;
 }
@@ -1768,7 +1798,7 @@ static int rewrite_process_records(const manager_state_t *state,
     }
 
     if (input != NULL) {
-        char line[PATH_MAX + 512];
+        char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
         while (fgets(line, sizeof(line), input) != NULL) {
             cubicle_process_record_t record;
             if (cubicle_parse_process_record(line, &record) != 0) {
@@ -2104,7 +2134,8 @@ static int command_process_register(const manager_state_t *state, int argc,
 
     if (append_process_record(state, process_id, workspace_record.id,
                               friendly_name, mode, "running", controller_id,
-                              control_socket, workspace_record.directory) < 0) {
+                              control_socket, workspace_record.directory,
+                              "") < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         unlock_state(lock_fd);
         return 1;
@@ -2221,7 +2252,7 @@ static int reconcile_process_records(const manager_state_t *state)
     int result = 0;
 
     if (file != NULL) {
-        char line[PATH_MAX + 512];
+        char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
         while (fgets(line, sizeof(line), file) != NULL) {
             cubicle_process_record_t process;
             char latest_state[32];
@@ -2582,9 +2613,17 @@ static int command_process_start(const manager_state_t *state, int argc,
         return 1;
     }
 
+    char argv_json[CUBICLE_PROCESS_ARGV_JSON_MAX];
+    if (build_argv_json(argv_json, sizeof(argv_json),
+                        &argv[command_index]) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
+
     if (append_process_record(state, process_id, workspace_record.id,
                               friendly_name, mode, process_state, controller_id,
-                              control_socket, cwd) < 0) {
+                              control_socket, cwd, argv_json) < 0) {
         cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
         unlock_state(lock_fd);
         return 1;
@@ -2620,7 +2659,7 @@ static int command_process_list(const manager_state_t *state, int argc, char **a
         return 0;
     }
 
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t record;
         if (cubicle_parse_process_record(line, &record) != 0) {
@@ -2683,7 +2722,7 @@ static int command_process_resolve(const manager_state_t *state, int argc,
 
     cubicle_process_record_t found;
     int match_count = 0;
-    char line[PATH_MAX + 512];
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(line, sizeof(line), file) != NULL) {
         cubicle_process_record_t record;
         if (cubicle_parse_process_record(line, &record) != 0) {
@@ -2757,7 +2796,7 @@ static int poll_workspace_events(const manager_state_t *state,
         return 0;
     }
 
-    char process_line[PATH_MAX + 512];
+    char process_line[CUBICLE_PROCESS_RECORD_LINE_MAX];
     while (fgets(process_line, sizeof(process_line), processes) != NULL) {
         cubicle_process_record_t process;
         if (cubicle_parse_process_record(process_line, &process) != 0) {
@@ -3431,7 +3470,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "failed to encode auth challenge",
                                              false, errno));
         }
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         int length = snprintf(
             result, sizeof(result),
             "{\"manager_id\":\"%s\",\"manager_public_key\":\"%s\",\"manager_nonce\":\"%s\",\"connection_id\":\"%s\",\"protocol_major\":%u,\"protocol_minor\":%u,\"capabilities\":%llu,\"manager_generation\":%llu,\"peer_uid\":%llu,\"peer_gid\":%llu}",
@@ -3502,7 +3541,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
         connection->has_pending_auth = 0;
 
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (session_info_json(state, &connection->session,
                               connection->resume_secret, result,
                               sizeof(result)) < 0) {
@@ -3879,7 +3918,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
     if (strcmp(method, "workspace.list") == 0) {
         FILE *file = open_state_file_for_read(state, "workspaces.tsv");
-        char result[8192];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         size_t used = 0;
         int written = snprintf(result, sizeof(result),
                                "{\"workspaces\":[");
@@ -4048,7 +4087,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         int live_count = 0;
         int action_failed = 0;
         if (processes != NULL) {
-            char line[PATH_MAX + 512];
+            char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
             while (fgets(line, sizeof(line), processes) != NULL) {
                 cubicle_process_record_t process;
                 if (cubicle_parse_process_record(line, &process) != 0 ||
@@ -4204,7 +4243,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, 0));
         }
 
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -4244,7 +4283,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         FILE *file = open_state_file_for_read(state, "processes.tsv");
-        char result[8192];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         size_t used = 0;
         int written = snprintf(result, sizeof(result), "{\"processes\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
@@ -4254,10 +4293,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
         size_t count = 0;
         if (file != NULL) {
-            char line[PATH_MAX + 512];
+            char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
             while (fgets(line, sizeof(line), file) != NULL) {
                 cubicle_process_record_t process;
-                char item[2048];
+                char item[CUBICLE_PROCESS_RECORD_LINE_MAX];
                 if (cubicle_parse_process_record(line, &process) != 0 ||
                     (workspace_id_ptr != NULL &&
                      strcmp(process.workspace_id, workspace_id_ptr) != 0) ||
@@ -4499,6 +4538,17 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "failed to start controller",
                                              false, saved_errno));
         }
+
+        char argv_json[CUBICLE_PROCESS_ARGV_JSON_MAX];
+        if (build_argv_json(argv_json, sizeof(argv_json), command_argv) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "process argv is too large",
+                                             false, saved_errno));
+        }
         free(command_argv);
 
         char controller_id[CUBICLE_MANAGER_ID_LENGTH + 1];
@@ -4507,7 +4557,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                 sizeof(controller_id)) < 0 ||
             append_process_record(state, process_id, workspace.id,
                                   friendly_name, mode, process_state,
-                                  controller_id, control_socket, cwd) < 0) {
+                                  controller_id, control_socket, cwd,
+                                  argv_json) < 0) {
             int saved_errno = errno;
             unlock_state(lock_fd);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4531,9 +4582,11 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         snprintf(process.control_socket, sizeof(process.control_socket), "%s",
                  control_socket);
         snprintf(process.cwd, sizeof(process.cwd), "%s", cwd);
+        snprintf(process.argv_json, sizeof(process.argv_json), "%s",
+                 argv_json);
         process.saved = 0;
 
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -4670,7 +4723,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 unlock_state(lock_fd);
             }
         }
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -4738,7 +4791,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         process.saved = update.saved;
         unlock_state(lock_fd);
 
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (process_info_json(id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -4905,7 +4958,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         size_t skipped_saved_count = 0;
         FILE *file = open_state_file_for_read(state, "processes.tsv");
         if (file != NULL) {
-            char line[PATH_MAX + 512];
+            char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
             while (fgets(line, sizeof(line), file) != NULL) {
                 cubicle_process_record_t process;
                 if (cubicle_parse_process_record(line, &process) != 0 ||
@@ -5110,7 +5163,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         FILE *file = open_state_file_for_read(state, "workspace-keys.tsv");
-        char result[8192];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         size_t used = 0;
         int written = snprintf(result, sizeof(result), "{\"keys\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
@@ -5367,7 +5420,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         uint64_t expires_at_ms = now_ms + 60000;
-        char result[2048];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         int length = snprintf(
             result, sizeof(result),
             "{\"grant_id\":\"%s\",\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"process_id\":\"%s\",\"client_key_id\":\"%s\",\"endpoint\":{\"uri\":\"%s\",\"server_identity\":\"local-controller\"},\"token\":\"local:%s:%s\",\"issued_at_ms\":%llu,\"expires_at_ms\":%llu,\"connection_limit\":1,\"granted_channels\":\"%s\",\"mode\":\"%s\"}",
@@ -5563,7 +5616,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         FILE *file = open_state_file_for_read(state, "workspace-events.log");
-        char result[8192];
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         size_t used = 0;
         int written = snprintf(result, sizeof(result), "{\"events\":[");
         if (written < 0 || (size_t)written >= sizeof(result)) {
@@ -5601,7 +5654,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                     continue;
                 }
 
-                char item[2048];
+                char item[CUBICLE_PROCESS_RECORD_LINE_MAX];
                 if (event_info_json(global_sequence, event_workspace_id,
                                     event_process_id, payload, item,
                                     sizeof(item)) < 0) {
