@@ -474,41 +474,54 @@ static int get_optional_string(econf_file *file,
 static int apply_econf_file(cubicle_config_t *config,
                             econf_file *file,
                             cubicle_config_source_kind_t source_kind,
+                            int allow_manager_control_keys,
                             const char *source,
                             char *error,
                             size_t error_size)
 {
     int present = 0;
-    if (get_optional_string(file, "installation", "bindir",
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "installation", "bindir",
                             config->bindir, sizeof(config->bindir),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_INSTALLATION_BINDIR,
-                            source_kind, source);
-    if (get_optional_string(file, "installation", "libexecdir",
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_INSTALLATION_BINDIR, source_kind,
+                   source);
+    }
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "installation", "libexecdir",
                             config->libexecdir, sizeof(config->libexecdir),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR,
-                            source_kind, source);
-    if (get_optional_string(file, "manager", "state_dir",
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_INSTALLATION_LIBEXECDIR,
+                   source_kind, source);
+    }
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "manager", "state_dir",
                             config->manager_state_dir,
                             sizeof(config->manager_state_dir),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_STATE_DIR,
-                            source_kind, source);
-    if (get_optional_string(file, "manager", "runtime_dir",
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_STATE_DIR, source_kind,
+                   source);
+    }
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "manager", "runtime_dir",
                             config->manager_runtime_dir,
                             sizeof(config->manager_runtime_dir),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_RUNTIME_DIR,
-                            source_kind, source);
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_RUNTIME_DIR, source_kind,
+                   source);
+    }
     if (get_optional_string(file, "manager", "log_dir",
                             config->manager_log_dir,
                             sizeof(config->manager_log_dir),
@@ -517,30 +530,39 @@ static int apply_econf_file(cubicle_config_t *config,
     }
     if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_LOG_DIR,
                             source_kind, source);
-    if (get_optional_string(file, "manager", "listen",
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "manager", "listen",
                             config->manager_listen_uri,
                             sizeof(config->manager_listen_uri),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_LISTEN,
-                            source_kind, source);
-    if (get_optional_string(file, "manager", "socket_group",
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_LISTEN, source_kind,
+                   source);
+    }
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "manager", "socket_group",
                             config->manager_socket_group,
                             sizeof(config->manager_socket_group),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_SOCKET_GROUP,
-                            source_kind, source);
-    if (get_optional_string(file, "manager", "controller_binary",
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_SOCKET_GROUP, source_kind,
+                   source);
+    }
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "manager", "controller_binary",
                             config->controller_binary,
                             sizeof(config->controller_binary),
                             &present, error, error_size) < 0) {
         return -1;
     }
-    if (present) set_origin(config, CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY,
-                            source_kind, source);
+    if (allow_manager_control_keys && present) {
+        set_origin(config, CUBICLE_CONFIG_MANAGER_CONTROLLER_BINARY,
+                   source_kind, source);
+    }
     if (get_optional_string(file, "client", "manager",
                             config->client_manager_uri,
                             sizeof(config->client_manager_uri),
@@ -560,7 +582,8 @@ static int apply_econf_file(cubicle_config_t *config,
 
     char controller_debug[64];
     controller_debug[0] = '\0';
-    if (get_optional_string(file, "controller", "debug", controller_debug,
+    if (allow_manager_control_keys &&
+        get_optional_string(file, "controller", "debug", controller_debug,
                             sizeof(controller_debug), &present, error,
                             error_size) < 0) {
         return -1;
@@ -617,14 +640,17 @@ static int apply_econf_file(cubicle_config_t *config,
     }
 
     value[0] = '\0';
-    if (get_optional_string(file, "manager", "socket_mode", value,
-                            sizeof(value), &present, error, error_size) < 0 ||
-        (value[0] != '\0' &&
-         parse_socket_mode(value, &config->manager_socket_mode,
-                           error, error_size) < 0)) {
-        return -1;
+    if (allow_manager_control_keys) {
+        if (get_optional_string(file, "manager", "socket_mode", value,
+                                sizeof(value), &present, error,
+                                error_size) < 0 ||
+            (value[0] != '\0' &&
+             parse_socket_mode(value, &config->manager_socket_mode,
+                               error, error_size) < 0)) {
+            return -1;
+        }
     }
-    if (value[0] != '\0') {
+    if (allow_manager_control_keys && value[0] != '\0') {
         set_origin(config, CUBICLE_CONFIG_MANAGER_SOCKET_MODE, source_kind,
                    source);
     }
@@ -684,6 +710,7 @@ static int apply_config_path(cubicle_config_t *config,
                              const char *path,
                              cubicle_config_source_kind_t source_kind,
                              int required,
+                             int allow_manager_control_keys,
                              int *loaded_out,
                              char *error,
                              size_t error_size)
@@ -705,7 +732,8 @@ static int apply_config_path(cubicle_config_t *config,
         return -1;
     }
 
-    if (apply_econf_file(config, file, source_kind, path, error,
+    if (apply_econf_file(config, file, source_kind,
+                         allow_manager_control_keys, path, error,
                          error_size) < 0) {
         econf_free(file);
         return -1;
@@ -721,6 +749,7 @@ static int apply_config_path(cubicle_config_t *config,
 static int load_dropin_dir(cubicle_config_t *config,
                            const char *directory,
                            cubicle_config_source_kind_t source_kind,
+                           int allow_manager_control_keys,
                            char *error,
                            size_t error_size)
 {
@@ -775,7 +804,8 @@ static int load_dropin_dir(cubicle_config_t *config,
             set_error(error, error_size, "config drop-in path is too long");
             return -1;
         }
-        if (apply_config_path(config, path, source_kind, 1, NULL, error,
+        if (apply_config_path(config, path, source_kind, 1,
+                              allow_manager_control_keys, NULL, error,
                               error_size) < 0) {
             free_names(names, count);
             return -1;
@@ -791,10 +821,12 @@ static int apply_config_path_with_dropins(
     const char *path,
     cubicle_config_source_kind_t source_kind,
     int required,
+    int allow_manager_control_keys,
     char *error,
     size_t error_size)
 {
-    if (apply_config_path(config, path, source_kind, required, NULL, error,
+    if (apply_config_path(config, path, source_kind, required,
+                          allow_manager_control_keys, NULL, error,
                           error_size) < 0) {
         return -1;
     }
@@ -805,7 +837,8 @@ static int apply_config_path_with_dropins(
         set_error(error, error_size, "config drop-in directory is too long");
         return -1;
     }
-    return load_dropin_dir(config, directory, source_kind, error, error_size);
+    return load_dropin_dir(config, directory, source_kind,
+                           allow_manager_control_keys, error, error_size);
 }
 
 int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
@@ -912,7 +945,10 @@ int cubicle_config_validate(const cubicle_config_t *config,
     return 0;
 }
 
-int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size)
+static int cubicle_config_load_with_user_policy(cubicle_config_t *config,
+                                                int user_manager_control_keys,
+                                                char *error,
+                                                size_t error_size)
 {
     if (error != NULL && error_size > 0) {
         error[0] = '\0';
@@ -922,7 +958,7 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     const char *override_path = getenv("CUBICLE_CONFIG");
     if (override_path != NULL && override_path[0] != '\0') {
         if (apply_config_path_with_dropins(config, override_path,
-                                           CUBICLE_CONFIG_SOURCE_OVERRIDE, 1,
+                                           CUBICLE_CONFIG_SOURCE_OVERRIDE, 1, 1,
                                            error, error_size) < 0) {
             return -1;
         }
@@ -937,7 +973,7 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     for (size_t i = 0; i < sizeof(system_paths) / sizeof(system_paths[0]);
          ++i) {
         if (apply_config_path_with_dropins(config, system_paths[i],
-                                           CUBICLE_CONFIG_SOURCE_SYSTEM, 0,
+                                           CUBICLE_CONFIG_SOURCE_SYSTEM, 0, 1,
                                            error, error_size) < 0) {
             return -1;
         }
@@ -947,6 +983,7 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     if (user_config_path(path, sizeof(path)) == 0) {
         if (apply_config_path_with_dropins(config, path,
                                            CUBICLE_CONFIG_SOURCE_USER, 0,
+                                           user_manager_control_keys,
                                            error, error_size) < 0) {
             return -1;
         }
@@ -960,6 +997,18 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     }
 
     return cubicle_config_validate(config, error, error_size);
+}
+
+int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size)
+{
+    return cubicle_config_load_with_user_policy(config, 1, error, error_size);
+}
+
+int cubicle_config_load_client(cubicle_config_t *config,
+                               char *error,
+                               size_t error_size)
+{
+    return cubicle_config_load_with_user_policy(config, 0, error, error_size);
 }
 
 const char *cubicle_launch_default_name(cubicle_launch_default_t launch)

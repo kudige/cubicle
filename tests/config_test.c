@@ -226,6 +226,75 @@ static void test_user_config_file(void)
     assert(unsetenv("XDG_CONFIG_HOME") == 0);
 }
 
+static void test_client_user_policy(void)
+{
+    char xdg_home[CUBICLE_PATH_MAX];
+    temp_dir(xdg_home, sizeof(xdg_home));
+
+    char cubicle_dir[CUBICLE_PATH_MAX];
+    int length = snprintf(cubicle_dir, sizeof(cubicle_dir), "%s/cubicle",
+                          xdg_home);
+    assert(length >= 0 && (size_t)length < sizeof(cubicle_dir));
+    assert(mkdir(cubicle_dir, 0700) == 0);
+
+    char path[CUBICLE_PATH_MAX];
+    length = snprintf(path, sizeof(path), "%s/config.cfg", cubicle_dir);
+    assert(length >= 0 && (size_t)length < sizeof(path));
+    write_file(path,
+               "[manager]\n"
+               "state_dir=relative-state\n"
+               "runtime_dir=relative-runtime\n"
+               "listen=relative.sock\n"
+               "socket_mode=9999\n"
+               "controller_binary=relative-controller\n"
+               "log_dir=/tmp/client-log\n"
+               "\n"
+               "[controller]\n"
+               "debug=invalid-controller-debug\n"
+               "\n"
+               "[client]\n"
+               "manager=unix:///tmp/client-manager.sock\n"
+               "\n"
+               "[cube]\n"
+               "debug=library\n"
+               "\n"
+               "[defaults]\n"
+               "launch=background\n"
+               "mode=stream\n");
+
+    assert(unsetenv("CUBICLE_CONFIG") == 0);
+    assert(setenv("XDG_CONFIG_HOME", xdg_home, 1) == 0);
+
+    cubicle_config_t config;
+    char error[256];
+    assert(cubicle_config_load_client(&config, error, sizeof(error)) == 0);
+    assert(strcmp(config.manager_state_dir, "relative-state") != 0);
+    assert(strcmp(config.manager_runtime_dir, "relative-runtime") != 0);
+    assert(strcmp(config.manager_listen_uri, "relative.sock") != 0);
+    assert(strcmp(config.controller_binary, "relative-controller") != 0);
+    assert(config.manager_socket_mode != 9999);
+    assert(config.controller_debug_input == 0);
+    assert(strcmp(config.manager_log_dir, "/tmp/client-log") == 0);
+    assert(strcmp(config.client_manager_uri,
+                  "unix:///tmp/client-manager.sock") == 0);
+    assert(config.cube_debug_library == 1);
+    assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
+    assert(config.default_mode == CUBICLE_PROCESS_STREAM);
+
+    const cubicle_config_origin_t *origin =
+        cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_STATE_DIR);
+    assert(origin != NULL);
+    assert(origin->kind != CUBICLE_CONFIG_SOURCE_USER);
+    origin = cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_LOG_DIR);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_USER);
+    origin = cubicle_config_origin(&config, CUBICLE_CONFIG_CLIENT_MANAGER);
+    assert(origin != NULL);
+    assert(origin->kind == CUBICLE_CONFIG_SOURCE_USER);
+
+    assert(unsetenv("XDG_CONFIG_HOME") == 0);
+}
+
 static void test_invalid_values(void)
 {
     char path[CUBICLE_PATH_MAX];
@@ -330,6 +399,7 @@ int main(void)
                   "background") == 0);
     test_override_file();
     test_user_config_file();
+    test_client_user_policy();
     test_invalid_values();
     test_tcp_endpoints();
     test_unix_uri_path();

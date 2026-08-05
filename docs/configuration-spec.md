@@ -520,7 +520,11 @@ Examples:
 - manager grant-signing keys
 - privileged resource limits
 
-User config files must not override system-manager-only values used by a privileged manager process.
+User config files must not override system-manager-only values used by a
+client process that is merely connecting to a manager. Manager processes may
+still load user manager settings for an explicitly user-owned manager. Explicit
+`CUBICLE_CONFIG` development/test overrides are applied as full configuration
+files.
 
 ### 10.3 Environment variables
 

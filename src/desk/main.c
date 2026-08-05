@@ -1185,7 +1185,8 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
 {
     cubicle_config_t config;
     char config_error[512];
-    if (cubicle_config_load(&config, config_error, sizeof(config_error)) < 0) {
+    if (cubicle_config_load_client(&config, config_error,
+                                   sizeof(config_error)) < 0) {
         snprintf(error, error_size, "configuration error: %s", config_error);
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }

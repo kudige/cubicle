@@ -958,8 +958,8 @@ static int cube_update_user_defaults(const cube_defaults_update_t *update,
 
     cubicle_config_t reloaded;
     char validation_error[512] = "";
-    if (cubicle_config_load(&reloaded, validation_error,
-                            sizeof(validation_error)) < 0) {
+    if (cubicle_config_load_client(&reloaded, validation_error,
+                                   sizeof(validation_error)) < 0) {
         snprintf(error, error_size, "updated config did not validate: %s",
                  validation_error);
         return -1;
@@ -4089,8 +4089,8 @@ int main(int argc, char **argv)
 
     cubicle_config_t config;
     char config_error[512] = "";
-    int config_loaded = cubicle_config_load(&config, config_error,
-                                            sizeof(config_error)) == 0;
+    int config_loaded = cubicle_config_load_client(&config, config_error,
+                                                   sizeof(config_error)) == 0;
     if (!config_loaded) {
         cubicle_config_defaults(&config);
     }

@@ -474,11 +474,14 @@
   - manager startup now verifies state/runtime/log directories are real, owned by the manager UID, and not group/other writable
   - manager startup errors now include the exact configured directory key and path
   - added runtime coverage for secure directory creation and unsafe directory rejection
+  - added role-aware config loading so cube/desk ignore user manager-control overrides
+  - kept explicit CUBICLE_CONFIG as a full development/test override
+  - added unit coverage for client-safe user config policy
 
 ## Next
 
 1. Continue configuration implementation from docs/configuration-spec.md.
-   - Enforce system-only versus user-overridable key policy.
+   - Add documented environment variables and explicit --config support.
 
 2. Continue implementing the cube CLI specification.
    - Harden post-exit connect draining through manager-retained output fallback.

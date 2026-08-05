@@ -74,6 +74,9 @@ typedef struct cubicle_config {
 
 void cubicle_config_defaults(cubicle_config_t *config);
 int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size);
+int cubicle_config_load_client(cubicle_config_t *config,
+                               char *error,
+                               size_t error_size);
 int cubicle_config_validate(const cubicle_config_t *config,
                             char *error,
                             size_t error_size);
