@@ -211,6 +211,7 @@ typedef struct desk_session {
     char layout_path[PATH_MAX];
     unsigned char prefix_key;
     bool mouse_titles;
+    long long mouse_suspended_until_ms;
     bool prefix_pending;
     bool zoomed;
     bool terminal_size_dirty;
@@ -230,6 +231,7 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   int pane_id,
                                   desk_grid_t *grid,
                                   const char *title);
+static long long desk_monotonic_ms(void);
 
 static void handle_signal(int signo)
 {
@@ -2951,6 +2953,27 @@ static void desk_menu_disable_mouse(void)
     (void)cubeui_write_all(STDOUT_FILENO, "\x1b[?1006l\x1b[?1000l", 16);
 }
 
+static void desk_suspend_mouse_for_selection(desk_session_t *session)
+{
+    desk_menu_disable_mouse();
+    session->mouse_suspended_until_ms = desk_monotonic_ms() + 1500;
+    desk_debug_log("event=mouse_selection_suspend duration_ms=1500");
+}
+
+static void desk_resume_mouse_if_ready(desk_session_t *session)
+{
+    if (!session->mouse_titles || session->mouse_suspended_until_ms == 0) {
+        return;
+    }
+    long long now = desk_monotonic_ms();
+    if (now == 0 || now < session->mouse_suspended_until_ms) {
+        return;
+    }
+    session->mouse_suspended_until_ms = 0;
+    desk_menu_enable_mouse();
+    desk_debug_log("event=mouse_selection_resume");
+}
+
 static bool desk_title_hit_test(const desk_terminal_t *terminal,
                                 const desk_session_t *session,
                                 int row,
@@ -3781,6 +3804,8 @@ static int handle_input(desk_session_t *session,
                     session->layout.active_pane_id = pane_id;
                     session->layout.zoom = DESK_ZOOM_NONE;
                     *layout_changed = true;
+                } else {
+                    desk_suspend_mouse_for_selection(session);
                 }
             }
             i += consumed - 1;
@@ -3928,6 +3953,7 @@ static int desk_run_workspace(const char *workspace_arg,
         bool layout_changed = false;
         bool quit_requested = false;
         bool output_seen = false;
+        desk_resume_mouse_if_ready(&session);
 
         if (g_resize_requested) {
             g_resize_requested = 0;
@@ -4068,11 +4094,14 @@ static int desk_run_workspace(const char *workspace_arg,
 
 static void print_usage(FILE *stream, const char *program)
 {
-    fprintf(stream, "Usage: %s [--workspace NAME|ID] [--prefix KEY] [--mouse]\n",
+    fprintf(stream,
+            "Usage: %s [--workspace NAME|ID] [--prefix KEY] [--mouse|--no-mouse]\n",
             program);
     fprintf(stream, "Render the Cubicle desk terminal view.\n");
     fprintf(stream,
-            "  --mouse    Enable mouse pane title selection; may affect terminal text selection.\n");
+            "  --mouse       Enable mouse pane title selection.\n");
+    fprintf(stream,
+            "  --no-mouse    Disable mouse pane title selection.\n");
 }
 
 static int parse_prefix_key(const char *text, unsigned char *key)
@@ -4119,7 +4148,7 @@ int main(int argc, char **argv)
 {
     const char *workspace = NULL;
     unsigned char prefix_key = 0x18;
-    bool mouse_titles = false;
+    bool mouse_titles = true;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -4144,6 +4173,10 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--mouse") == 0) {
             mouse_titles = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--no-mouse") == 0) {
+            mouse_titles = false;
             continue;
         }
         print_usage(stderr, argv[0]);
