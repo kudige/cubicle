@@ -63,6 +63,9 @@ fi
 [ -d "$state_dir" ]
 [ -d "$runtime_dir" ]
 [ -d "$log_dir" ]
+test "$(stat -c '%a' "$state_dir")" = "700"
+test "$(stat -c '%a' "$runtime_dir")" = "700"
+test "$(stat -c '%a' "$log_dir")" = "700"
 socket_mode=$(stat -c '%a' "$socket_path")
 if [ "$socket_mode" != "664" ]; then
     echo "configured socket mode was not applied: $socket_mode" >&2
@@ -222,3 +225,24 @@ if grep -q '^launch=' "$defaults_config" ||
     exit 1
 fi
 grep -q '^manager=unix:///tmp/preserved-manager.sock$' "$defaults_config"
+
+unsafe_config="$tmpdir/unsafe.cfg"
+unsafe_state_dir="$tmpdir/unsafe-state"
+mkdir -p "$unsafe_state_dir"
+chmod 0777 "$unsafe_state_dir"
+cat >"$unsafe_config" <<EOF
+[manager]
+state_dir=$unsafe_state_dir
+runtime_dir=$tmpdir/unsafe-runtime
+log_dir=$tmpdir/unsafe-log
+listen=unix://$tmpdir/unsafe-runtime/manager.sock
+controller_binary=$controller_binary
+EOF
+
+if CUBICLE_CONFIG="$unsafe_config" "$CUBICLE_MANAGER" workspace list \
+    >"$tmpdir/unsafe.out" 2>"$tmpdir/unsafe.err"; then
+    echo "manager accepted an unsafe configured state directory" >&2
+    exit 1
+fi
+grep -q "manager.state_dir ($unsafe_state_dir): must not be writable by group or other" \
+    "$tmpdir/unsafe.err"

@@ -446,7 +446,10 @@ The following must be absolute paths for a system manager:
 
 Paths should be normalized lexically. Symlink resolution should not be required during parsing because some paths may not yet exist, but runtime ownership and permission checks must occur before use.
 
-The manager must not follow unsafe writable-directory configurations without warning or rejection.
+The manager must not follow unsafe writable-directory configurations without
+warning or rejection. For user-owned managers, `state_dir`, `runtime_dir`, and
+`log_dir` must be real directories owned by the manager UID and must not be
+writable by group or other.
 
 ### 9.3 Runtime and state separation
 

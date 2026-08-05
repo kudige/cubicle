@@ -291,6 +291,62 @@ static int ensure_parent_directory(const char *path)
     return cubicle_mkdir_p(parent);
 }
 
+static void log_manager_directory_error(const char *label,
+                                        const char *path,
+                                        const char *detail)
+{
+    char message[PATH_MAX + 256];
+    snprintf(message, sizeof(message), "%s (%s): %s", label, path, detail);
+    cubicle_log(CUBICLE_LOG_ERROR, "manager", message);
+}
+
+static int verify_manager_directory(const char *label, const char *path)
+{
+    if (cubicle_mkdir_p(path) < 0) {
+        char detail[256];
+        snprintf(detail, sizeof(detail), "failed to create directory: %s",
+                 strerror(errno));
+        log_manager_directory_error(label, path, detail);
+        return -1;
+    }
+
+    struct stat status;
+    if (lstat(path, &status) < 0) {
+        char detail[256];
+        snprintf(detail, sizeof(detail), "failed to stat directory: %s",
+                 strerror(errno));
+        log_manager_directory_error(label, path, detail);
+        return -1;
+    }
+    if (S_ISLNK(status.st_mode)) {
+        log_manager_directory_error(label, path,
+                                    "must not be a symbolic link");
+        errno = ELOOP;
+        return -1;
+    }
+    if (!S_ISDIR(status.st_mode)) {
+        log_manager_directory_error(label, path, "must be a directory");
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (status.st_uid != geteuid()) {
+        char detail[256];
+        snprintf(detail, sizeof(detail),
+                 "owner uid %ld does not match manager uid %ld",
+                 (long)status.st_uid, (long)geteuid());
+        log_manager_directory_error(label, path, detail);
+        errno = EACCES;
+        return -1;
+    }
+    if ((status.st_mode & 0022) != 0) {
+        log_manager_directory_error(
+            label, path, "must not be writable by group or other");
+        errno = EACCES;
+        return -1;
+    }
+    return 0;
+}
+
 static int append_line(const manager_state_t *state, const char *file_name,
                        const char *line)
 {
@@ -6234,16 +6290,10 @@ int main(int argc, char **argv)
         }
     }
 
-    if (cubicle_mkdir_p(state.dir) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
-        return 1;
-    }
-    if (cubicle_mkdir_p(state.runtime_dir) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
-        return 1;
-    }
-    if (cubicle_mkdir_p(state.log_dir) < 0) {
-        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+    if (verify_manager_directory("manager.state_dir", state.dir) < 0 ||
+        verify_manager_directory("manager.runtime_dir",
+                                 state.runtime_dir) < 0 ||
+        verify_manager_directory("manager.log_dir", state.log_dir) < 0) {
         return 1;
     }
 

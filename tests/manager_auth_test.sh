@@ -10,6 +10,7 @@ log_dir="$tmpdir/log"
 socket_path="$runtime_dir/manager.sock"
 key_dir="$tmpdir/client-keys"
 mkdir -p "$state_dir" "$runtime_dir" "$log_dir"
+chmod 0700 "$state_dir" "$runtime_dir" "$log_dir"
 
 "$CUBICLE_MANAGER" \
     --state-dir "$state_dir" \
