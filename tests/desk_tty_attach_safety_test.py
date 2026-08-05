@@ -136,6 +136,104 @@ def run_desk_and_ctrl_c(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_click_inactive_title(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    clicked_title = False
+    saw_active_title = False
+    title_row = 0
+    title_col = 0
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if (
+                not clicked_title
+                and b"title-left" in captured
+                and b"title-right" in captured
+                and b"\x1b[?1000h\x1b[?1006h" in captured
+            ):
+                marker = captured.rfind(b"title-right")
+                positions = re.findall(rb"\x1b\[(\d+);(\d+)H", captured[:marker])
+                if positions:
+                    title_row = int(positions[-1][0])
+                    title_col = int(positions[-1][1])
+                    click_col = title_col + 2
+                    os.write(
+                        master_fd,
+                        f"\x1b[<0;{click_col};{title_row}M".encode("ascii"),
+                    )
+                    clicked_title = True
+
+            if clicked_title and not saw_active_title:
+                active_marker = (
+                    f"\x1b[{title_row};{title_col}H\x1b[1;7m title-right"
+                ).encode("ascii")
+                if active_marker in captured:
+                    saw_active_title = True
+
+            if saw_active_title and not sent_payload:
+                os.write(master_fd, b"TITLE")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "title-right"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_TITLE" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not clicked_title:
+            raise AssertionError(f"desk did not render inactive title: {captured!r}")
+        if not saw_active_title:
+            raise AssertionError(f"desk did not select clicked title: {captured!r}")
+        if not saw_payload:
+            raise AssertionError(f"clicked title pane did not receive input: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        os.close(master_fd)
+
+
 def run_desk_open_other_workspace_process(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1036,6 +1134,65 @@ def main():
             events = handle.read()
         if "type=input length=1" not in events:
             raise AssertionError(f"desk did not record forwarded Ctrl-C:\n{events}")
+
+        run_checked([cube, "workspace", "create", "DeskTitle"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskTitle",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "title-left",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY title-left\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(10)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskTitle",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "title-right",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY title-right\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+10\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if b'TITLE' in data:\n"
+                    "            sys.stdout.write('GOT_TITLE\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            break\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskTitle"], env)
+        run_desk_click_inactive_title(desk, cube, env)
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
 
         run_checked([cube, "workspace", "create", "DeskClick"], env)
         run_checked(

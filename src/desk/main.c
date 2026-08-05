@@ -2948,6 +2948,56 @@ static void desk_menu_disable_mouse(void)
     (void)cubeui_write_all(STDOUT_FILENO, "\x1b[?1006l\x1b[?1000l", 16);
 }
 
+static bool desk_title_hit_test(const desk_terminal_t *terminal,
+                                const desk_session_t *session,
+                                int row,
+                                int col,
+                                int *pane_id)
+{
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        int candidate = (int)i + 1;
+        if (candidate == session->layout.active_pane_id) {
+            continue;
+        }
+
+        desk_rect_t rect;
+        if (!pane_layout_rect_for_pane(&session->layout, terminal, candidate,
+                                       &rect) ||
+            rect.rows <= 0 || rect.cols <= 0) {
+            continue;
+        }
+        if (row != rect.row + 1) {
+            continue;
+        }
+
+        const char *label =
+            session->panes[i].process.friendly_name[0] != '\0'
+                ? session->panes[i].process.friendly_name
+                : session->panes[i].process.id;
+        int title_start = rect.col + 1;
+        int title_cols = rect.cols;
+        if (rect.cols > 2) {
+            title_cols = rect.cols - 2;
+        }
+        int label_cols = 0;
+        for (const char *cursor = label;
+             *cursor != '\0' && label_cols < title_cols;
+             ++cursor) {
+            ++label_cols;
+        }
+        int hit_start = title_start;
+        int hit_end = title_start + label_cols - 1;
+        if (rect.cols > 2) {
+            hit_end += 2;
+        }
+        if (label_cols > 0 && col >= hit_start && col <= hit_end) {
+            *pane_id = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void desk_menu_move_selection(desk_open_menu_t *menu, int delta)
 {
     if (menu->item_count == 0) {
@@ -3302,7 +3352,6 @@ static int desk_open_menu_select(desk_session_t *session,
         return 0;
     }
     desk_close_open_menu(session);
-    desk_menu_disable_mouse();
     if (menu_closed != NULL) {
         *menu_closed = true;
     }
@@ -3488,7 +3537,6 @@ static int handle_open_menu_input(desk_session_t *session,
         }
         if (input[i] == 'q') {
             desk_close_open_menu(session);
-            desk_menu_disable_mouse();
             if (menu_closed != NULL) {
                 *menu_closed = true;
             }
@@ -3499,7 +3547,6 @@ static int handle_open_menu_input(desk_session_t *session,
                 (void)desk_open_root_menu(session);
             } else {
                 desk_close_open_menu(session);
-                desk_menu_disable_mouse();
                 if (menu_closed != NULL) {
                     *menu_closed = true;
                 }
@@ -3631,6 +3678,27 @@ static int handle_input(desk_session_t *session,
 {
     for (size_t i = 0; i < length; ++i) {
         size_t consumed = 0;
+        int button = 0;
+        int mouse_row = 0;
+        int mouse_col = 0;
+        bool mouse_press = false;
+        if (parse_sgr_mouse(input, length, i, &button, &mouse_row,
+                            &mouse_col, &mouse_press, &consumed)) {
+            desk_debug_log("event=mouse_normal button=%d row=%d col=%d press=%d",
+                           button, mouse_row, mouse_col, (int)mouse_press);
+            if (mouse_press && button == 0) {
+                int pane_id = 0;
+                if (desk_title_hit_test(terminal, session, mouse_row,
+                                        mouse_col, &pane_id)) {
+                    desk_debug_log("event=mouse_title_select pane=%d", pane_id);
+                    session->layout.active_pane_id = pane_id;
+                    session->layout.zoom = DESK_ZOOM_NONE;
+                    *layout_changed = true;
+                }
+            }
+            i += consumed - 1;
+            continue;
+        }
         if (is_terminal_response_sequence(input, length, i, &consumed)) {
             i += consumed - 1;
             continue;
@@ -3750,6 +3818,7 @@ static int desk_run_workspace(const char *workspace_arg,
         return result;
     }
     render_all_panes(&terminal, &session);
+    desk_menu_enable_mouse();
     desk_debug_log("event=loop_start panes=%zu", session.pane_count);
     while (!g_stop_requested) {
         bool layout_changed = false;
@@ -3870,9 +3939,7 @@ static int desk_run_workspace(const char *workspace_arg,
         }
     }
 
-    if (session.open_menu.level != DESK_MENU_CLOSED) {
-        desk_menu_disable_mouse();
-    }
+    desk_menu_disable_mouse();
     cubeui_terminal_leave_alt_raw(&terminal);
     desk_debug_log("event=run_end result=%d stop_requested=%d",
                    result, (int)g_stop_requested);
