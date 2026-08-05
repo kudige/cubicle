@@ -480,6 +480,12 @@ are not logged. Include `terminal` in `desk.debug`, for example
 `desk.debug=library,terminal`, to write desk attach, snapshot, read, input, and
 exit diagnostics to `manager.log_dir/desk-terminal.log`.
 
+`desk --mouse` enables mouse selection of inactive pane titles. This uses
+terminal mouse reporting, so plain terminal text selection may require the
+terminal's mouse-selection modifier while that Desk instance is running. Without
+`--mouse`, Desk only enables mouse reporting while the open-cube picker is
+visible.
+
 Examples:
 
 ```sh

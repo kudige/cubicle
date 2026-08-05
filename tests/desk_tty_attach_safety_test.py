@@ -139,7 +139,7 @@ def run_desk_and_ctrl_c(desk, cube, env):
 def run_desk_click_inactive_title(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
-        [desk],
+        [desk, "--mouse"],
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=subprocess.PIPE,
@@ -436,8 +436,13 @@ def run_desk_click_workspace_switch(desk, cube, env):
                 os.write(master_fd, b"\x18o")
                 opened_menu = True
 
-            if opened_menu and not clicked_workspace and b"workspace: DeskClick" in captured:
-                marker = captured.find(b"workspace: DeskClick")
+            if (
+                opened_menu
+                and not clicked_workspace
+                and b"workspace: DeskClick" in captured
+                and b"\x1b[?1000h\x1b[?1006h" in captured
+            ):
+                marker = captured.rfind(b"workspace: DeskClick")
                 positions = re.findall(rb"\x1b\[(\d+);(\d+)H", captured[:marker])
                 if positions:
                     row = int(positions[-1][0])

@@ -210,6 +210,7 @@ typedef struct desk_session {
     desk_pane_layout_t layout;
     char layout_path[PATH_MAX];
     unsigned char prefix_key;
+    bool mouse_titles;
     bool prefix_pending;
     bool zoomed;
     bool terminal_size_dirty;
@@ -219,6 +220,8 @@ typedef struct desk_session {
     int cursor_pane_id;
     int cursor_row;
     int cursor_col;
+    unsigned char pending_input[64];
+    size_t pending_input_length;
     desk_open_menu_t open_menu;
 } desk_session_t;
 
@@ -3352,6 +3355,9 @@ static int desk_open_menu_select(desk_session_t *session,
         return 0;
     }
     desk_close_open_menu(session);
+    if (!session->mouse_titles) {
+        desk_menu_disable_mouse();
+    }
     if (menu_closed != NULL) {
         *menu_closed = true;
     }
@@ -3425,6 +3431,57 @@ static bool parse_sgr_mouse(const unsigned char *input,
     return true;
 }
 
+static bool is_incomplete_sgr_mouse(const unsigned char *input,
+                                    size_t length,
+                                    size_t offset)
+{
+    const unsigned char prefix[] = {0x1b, '[', '<'};
+    size_t available = length - offset;
+    if (available == 1) {
+        return false;
+    }
+    if (available == 0 || available > sizeof(prefix)) {
+        available = sizeof(prefix);
+    }
+    if (available < sizeof(prefix)) {
+        return memcmp(input + offset, prefix, available) == 0;
+    }
+    if (memcmp(input + offset, prefix, sizeof(prefix)) != 0) {
+        return false;
+    }
+
+    size_t cursor = offset + sizeof(prefix);
+    int separators = 0;
+    while (cursor < length) {
+        unsigned char ch = input[cursor];
+        if (ch == 'M' || ch == 'm') {
+            return false;
+        }
+        if (ch == ';') {
+            ++separators;
+        } else if (ch < '0' || ch > '9') {
+            return false;
+        }
+        ++cursor;
+    }
+    return separators <= 2;
+}
+
+static void desk_save_pending_input(desk_session_t *session,
+                                    const unsigned char *input,
+                                    size_t length,
+                                    size_t offset)
+{
+    size_t pending = length - offset;
+    if (pending > sizeof(session->pending_input)) {
+        pending = 0;
+    }
+    if (pending > 0) {
+        memcpy(session->pending_input, input + offset, pending);
+    }
+    session->pending_input_length = pending;
+}
+
 static desk_menu_item_t *desk_menu_item_at_position(
     desk_session_t *session,
     const desk_terminal_t *terminal,
@@ -3474,6 +3531,10 @@ static int handle_open_menu_input(desk_session_t *session,
                                   bool *menu_closed)
 {
     for (size_t i = 0; i < length; ++i) {
+        if (is_incomplete_sgr_mouse(input, length, i)) {
+            desk_save_pending_input(session, input, length, i);
+            break;
+        }
         size_t consumed = 0;
         int button = 0;
         int mouse_row = 0;
@@ -3537,6 +3598,9 @@ static int handle_open_menu_input(desk_session_t *session,
         }
         if (input[i] == 'q') {
             desk_close_open_menu(session);
+            if (!session->mouse_titles) {
+                desk_menu_disable_mouse();
+            }
             if (menu_closed != NULL) {
                 *menu_closed = true;
             }
@@ -3547,6 +3611,9 @@ static int handle_open_menu_input(desk_session_t *session,
                 (void)desk_open_root_menu(session);
             } else {
                 desk_close_open_menu(session);
+                if (!session->mouse_titles) {
+                    desk_menu_disable_mouse();
+                }
                 if (menu_closed != NULL) {
                     *menu_closed = true;
                 }
@@ -3677,12 +3744,17 @@ static int handle_input(desk_session_t *session,
                         bool *quit_requested)
 {
     for (size_t i = 0; i < length; ++i) {
+        if (is_incomplete_sgr_mouse(input, length, i)) {
+            desk_save_pending_input(session, input, length, i);
+            break;
+        }
         size_t consumed = 0;
         int button = 0;
         int mouse_row = 0;
         int mouse_col = 0;
         bool mouse_press = false;
-        if (parse_sgr_mouse(input, length, i, &button, &mouse_row,
+        if (session->mouse_titles &&
+            parse_sgr_mouse(input, length, i, &button, &mouse_row,
                             &mouse_col, &mouse_press, &consumed)) {
             desk_debug_log("event=mouse_normal button=%d row=%d col=%d press=%d",
                            button, mouse_row, mouse_col, (int)mouse_press);
@@ -3751,12 +3823,14 @@ static void desk_session_cleanup(desk_session_t *session)
 }
 
 static int desk_run_workspace(const char *workspace_arg,
-                              unsigned char prefix_key)
+                              unsigned char prefix_key,
+                              bool mouse_titles)
 {
     char error[512];
     desk_session_t session;
     memset(&session, 0, sizeof(session));
     session.prefix_key = prefix_key;
+    session.mouse_titles = mouse_titles;
     session.terminal_size_dirty = true;
 
     cubicle_error_code_t code = connect_client(&session.manager, error,
@@ -3818,7 +3892,9 @@ static int desk_run_workspace(const char *workspace_arg,
         return result;
     }
     render_all_panes(&terminal, &session);
-    desk_menu_enable_mouse();
+    if (session.mouse_titles) {
+        desk_menu_enable_mouse();
+    }
     desk_debug_log("event=loop_start panes=%zu", session.pane_count);
     while (!g_stop_requested) {
         bool layout_changed = false;
@@ -3889,6 +3965,20 @@ static int desk_run_workspace(const char *workspace_arg,
                 quit_requested = true;
             } else {
                 desk_debug_log("event=input_read bytes=%zd", input_length);
+                unsigned char combined_input[sizeof(session.pending_input) +
+                                             sizeof(input)];
+                const unsigned char *handled_input = input;
+                size_t handled_length = (size_t)input_length;
+                if (session.pending_input_length > 0) {
+                    memcpy(combined_input, session.pending_input,
+                           session.pending_input_length);
+                    memcpy(combined_input + session.pending_input_length,
+                           input, (size_t)input_length);
+                    handled_input = combined_input;
+                    handled_length = session.pending_input_length +
+                                     (size_t)input_length;
+                    session.pending_input_length = 0;
+                }
                 if (flush_pending_terminal_resize(&session, &terminal,
                                                   &layout_changed) < 0) {
                     result = 2;
@@ -3898,16 +3988,17 @@ static int desk_run_workspace(const char *workspace_arg,
                 }
                 bool menu_closed = false;
                 if (session.open_menu.level != DESK_MENU_CLOSED) {
-                    if (handle_open_menu_input(&session, &terminal, input,
-                                               (size_t)input_length,
+                    if (handle_open_menu_input(&session, &terminal,
+                                               handled_input,
+                                               handled_length,
                                                &menu_closed) < 0) {
                         result = 2;
                         desk_debug_log("event=handle_menu_input_failed errno=%d",
                                        errno);
                         break;
                     }
-                } else if (handle_input(&session, &terminal, input,
-                                        (size_t)input_length, &layout_changed,
+                } else if (handle_input(&session, &terminal, handled_input,
+                                        handled_length, &layout_changed,
                                         &quit_requested) < 0) {
                     result = 2;
                     desk_debug_log("event=handle_input_failed errno=%d",
@@ -3949,9 +4040,11 @@ static int desk_run_workspace(const char *workspace_arg,
 
 static void print_usage(FILE *stream, const char *program)
 {
-    fprintf(stream, "Usage: %s [--workspace NAME|ID] [--prefix KEY]\n",
+    fprintf(stream, "Usage: %s [--workspace NAME|ID] [--prefix KEY] [--mouse]\n",
             program);
     fprintf(stream, "Render the Cubicle desk terminal view.\n");
+    fprintf(stream,
+            "  --mouse    Enable mouse pane title selection; may affect terminal text selection.\n");
 }
 
 static int parse_prefix_key(const char *text, unsigned char *key)
@@ -3998,6 +4091,7 @@ int main(int argc, char **argv)
 {
     const char *workspace = NULL;
     unsigned char prefix_key = 0x18;
+    bool mouse_titles = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -4020,11 +4114,15 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--mouse") == 0) {
+            mouse_titles = true;
+            continue;
+        }
         print_usage(stderr, argv[0]);
         return 2;
     }
 
-    int result = desk_run_workspace(workspace, prefix_key);
+    int result = desk_run_workspace(workspace, prefix_key, mouse_titles);
     if (result < 0) {
         fprintf(stderr, "desk: %s\n", strerror(errno));
         return 1;
