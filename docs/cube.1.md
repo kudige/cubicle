@@ -459,6 +459,8 @@ mode=tty
 kill_cleanup=false
 ```
 
+Set `controller.debug` to a comma-separated list of `input`, `library`, and
+`terminal` to write controller debug events to each process `events.log`.
 Set `cube.debug=library` or `desk.debug=library` to write libcubicle call
 traces to `manager.log_dir/client-library.log`; payload bytes are not logged.
 

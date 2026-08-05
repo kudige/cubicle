@@ -182,6 +182,16 @@ int append_event(controller_state_t *state, const char *event)
     }
 }
 
+int append_debug_event(controller_state_t *state,
+                       unsigned int flag,
+                       const char *event)
+{
+    if (state == NULL || (state->debug_flags & flag) == 0) {
+        return 0;
+    }
+    return append_event(state, event);
+}
+
 static char printable_escape(unsigned char byte)
 {
     switch (byte) {
@@ -209,7 +219,7 @@ int append_input_event(controller_state_t *state,
         errno = EINVAL;
         return -1;
     }
-    if (!state->debug_input) {
+    if ((state->debug_flags & CONTROLLER_DEBUG_INPUT) == 0) {
         char event[128];
         int event_length = snprintf(event, sizeof(event),
                                     "type=input length=%zu", length);

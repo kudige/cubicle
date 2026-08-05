@@ -152,6 +152,50 @@ static int parse_library_debug(const char *value,
     return -1;
 }
 
+static int parse_controller_debug(const char *value,
+                                  cubicle_config_t *config,
+                                  char *error,
+                                  size_t error_size)
+{
+    if (strcmp(value, "none") == 0 || strcmp(value, "off") == 0 ||
+        strcmp(value, "false") == 0) {
+        config->controller_debug_input = 0;
+        config->controller_debug_library = 0;
+        config->controller_debug_terminal = 0;
+        return 0;
+    }
+
+    config->controller_debug_input = 0;
+    config->controller_debug_library = 0;
+    config->controller_debug_terminal = 0;
+
+    char copy[128];
+    int length = snprintf(copy, sizeof(copy), "%s", value);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        set_error(error, error_size, "controller.debug is too long");
+        return -1;
+    }
+
+    char *save = NULL;
+    for (char *part = strtok_r(copy, ",", &save); part != NULL;
+         part = strtok_r(NULL, ",", &save)) {
+        if (strcmp(part, "input") == 0) {
+            config->controller_debug_input = 1;
+        } else if (strcmp(part, "library") == 0) {
+            config->controller_debug_library = 1;
+        } else if (strcmp(part, "terminal") == 0) {
+            config->controller_debug_terminal = 1;
+        } else {
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size,
+                         "controller.debug must contain input, library, terminal, none, off, or false");
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int parse_socket_mode(const char *value,
                              unsigned int *mode,
                              char *error,
@@ -289,6 +333,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
     snprintf(config->controller_binary, sizeof(config->controller_binary),
              "/usr/libexec/cubicle/cubicle-controller");
     config->controller_debug_input = 0;
+    config->controller_debug_library = 0;
+    config->controller_debug_terminal = 0;
     config->cube_debug_library = 0;
     config->desk_debug_library = 0;
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
@@ -395,15 +441,8 @@ static int apply_econf_file(cubicle_config_t *config,
         return -1;
     }
     if (controller_debug[0] != '\0') {
-        if (strcmp(controller_debug, "input") == 0) {
-            config->controller_debug_input = 1;
-        } else if (strcmp(controller_debug, "none") == 0 ||
-                   strcmp(controller_debug, "off") == 0 ||
-                   strcmp(controller_debug, "false") == 0) {
-            config->controller_debug_input = 0;
-        } else {
-            snprintf(error, error_size,
-                     "controller.debug must be input, none, off, or false");
+        if (parse_controller_debug(controller_debug, config, error,
+                                   error_size) < 0) {
             return -1;
         }
     }

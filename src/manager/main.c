@@ -49,7 +49,7 @@ typedef struct manager_state {
     mode_t socket_mode;
     char socket_group[256];
     char controller_bin[PATH_MAX];
-    int controller_debug_input;
+    char controller_debug[64];
     cubicle_auth_identity_t identity;
 } manager_state_t;
 
@@ -2255,7 +2255,10 @@ static int launch_controller(const manager_state_t *state,
         ++command_count;
     }
 
-    size_t argv_count = 15 + (state->controller_debug_input ? 2 : 0) +
+    int controller_debug_enabled =
+        state->controller_debug[0] != '\0' &&
+        strcmp(state->controller_debug, "none") != 0;
+    size_t argv_count = 15 + (controller_debug_enabled ? 2 : 0) +
                         command_count + 1;
     char **controller_argv = calloc(argv_count, sizeof(char *));
     if (controller_argv == NULL) {
@@ -2277,9 +2280,9 @@ static int launch_controller(const manager_state_t *state,
     controller_argv[index++] = (char *)mode;
     controller_argv[index++] = "--cwd";
     controller_argv[index++] = (char *)cwd;
-    if (state->controller_debug_input) {
+    if (controller_debug_enabled) {
         controller_argv[index++] = "--debug";
-        controller_argv[index++] = "input";
+        controller_argv[index++] = (char *)state->controller_debug;
     }
     controller_argv[index++] = "--";
     for (size_t i = 0; i < command_count; ++i) {
@@ -6122,7 +6125,25 @@ int main(int argc, char **argv)
              config.manager_log_dir);
     snprintf(state.controller_bin, sizeof(state.controller_bin), "%s",
              config.controller_binary);
-    state.controller_debug_input = config.controller_debug_input;
+    state.controller_debug[0] = '\0';
+    if (config.controller_debug_input) {
+        snprintf(state.controller_debug + strlen(state.controller_debug),
+                 sizeof(state.controller_debug) - strlen(state.controller_debug),
+                 "%sinput", state.controller_debug[0] == '\0' ? "" : ",");
+    }
+    if (config.controller_debug_library) {
+        snprintf(state.controller_debug + strlen(state.controller_debug),
+                 sizeof(state.controller_debug) - strlen(state.controller_debug),
+                 "%slibrary", state.controller_debug[0] == '\0' ? "" : ",");
+    }
+    if (config.controller_debug_terminal) {
+        snprintf(state.controller_debug + strlen(state.controller_debug),
+                 sizeof(state.controller_debug) - strlen(state.controller_debug),
+                 "%sterminal", state.controller_debug[0] == '\0' ? "" : ",");
+    }
+    if (state.controller_debug[0] == '\0') {
+        snprintf(state.controller_debug, sizeof(state.controller_debug), "none");
+    }
     snprintf(state.listen_uri, sizeof(state.listen_uri), "%s",
              config.manager_listen_uri);
     state.socket_mode = (mode_t)config.manager_socket_mode;

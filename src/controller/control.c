@@ -130,6 +130,41 @@ int open_control_socket(const char *path)
     return fd;
 }
 
+static int append_controller_library_debug(controller_state_t *state,
+                                           const char *event_name,
+                                           const char *method,
+                                           size_t request_bytes,
+                                           int result,
+                                           size_t response_bytes)
+{
+    char event[256];
+    int length = snprintf(
+        event, sizeof(event),
+        "type=debug category=library event=%s method=%s request_bytes=%zu result=%d response_bytes=%zu",
+        event_name, method == NULL || method[0] == '\0' ? "(unknown)" : method,
+        request_bytes, result, response_bytes);
+    if (length < 0 || (size_t)length >= sizeof(event)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_debug_event(state, CONTROLLER_DEBUG_LIBRARY, event);
+}
+
+static void control_request_name(const char *request,
+                                 char name[32])
+{
+    size_t length = 0;
+    while (request[length] != '\0' && request[length] != ' ' &&
+           length + 1 < 32) {
+        ++length;
+    }
+    memcpy(name, request, length);
+    name[length] = '\0';
+    if (name[0] == '\0') {
+        snprintf(name, 32, "(empty)");
+    }
+}
+
 static int enqueue_response(control_client_t *client, const char *buffer,
                             size_t length)
 {
@@ -766,6 +801,9 @@ static int dispatch_api_request(control_client_t *client,
     cubicle_rpc_request_envelope_t envelope;
     char request_id[64] = "";
     if (cubicle_rpc_decode_request(&envelope, client->request) < 0) {
+        append_controller_library_debug(state, "api_response", "(invalid)",
+                                        client->request_length, -1,
+                                        client->response_length);
         return enqueue_api_error(client, request_id, CUBICLE_ERR_PROTOCOL,
                                  "invalid request envelope", false, 0);
     }
@@ -774,6 +812,11 @@ static int dispatch_api_request(control_client_t *client,
 
 #define CONTROLLER_API_RETURN(expression) do { \
         int cubicle_controller_result__ = (expression); \
+        append_controller_library_debug(state, "api_response", \
+                                        envelope.method, \
+                                        client->request_length, \
+                                        cubicle_controller_result__, \
+                                        client->response_length); \
         cubicle_rpc_request_envelope_cleanup(&envelope); \
         return cubicle_controller_result__; \
     } while (0)
@@ -908,6 +951,16 @@ static int dispatch_api_request(control_client_t *client,
                     client, request_id, CUBICLE_ERR_IO, "resize failed", true,
                     errno));
             }
+            event_length = snprintf(
+                event, sizeof(event),
+                "type=debug category=terminal event=api_resize action=skipped rows=%llu columns=%llu reason=unchanged",
+                (unsigned long long)rows, (unsigned long long)columns);
+            if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+                append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event) < 0) {
+                CONTROLLER_API_RETURN(enqueue_api_error(
+                    client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                    errno));
+            }
             CONTROLLER_API_RETURN(enqueue_api_success(client, request_id,
                                                       "{}"));
         }
@@ -940,6 +993,16 @@ static int dispatch_api_request(control_client_t *client,
             (unsigned long long)rows, (unsigned long long)columns);
         if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
             append_event(state, event) < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_IO, "resize failed", true,
+                errno));
+        }
+        event_length = snprintf(
+            event, sizeof(event),
+            "type=debug category=terminal event=api_resize action=applied rows=%llu columns=%llu",
+            (unsigned long long)rows, (unsigned long long)columns);
+        if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+            append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event) < 0) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_IO, "resize failed", true,
                 errno));
@@ -999,6 +1062,17 @@ static int dispatch_api_request(control_client_t *client,
              (channels & CUBICLE_CHANNEL_STDOUT) != 0)) {
             state->terminal_attachment_active = 1;
             append_event(state, "type=attachment_active active=true");
+            char event[192];
+            int event_length = snprintf(
+                event, sizeof(event),
+                "type=debug category=terminal event=attachment_active active=true channels=%llu mode=%s",
+                (unsigned long long)channels, mode);
+            if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+                append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event) < 0) {
+                CONTROLLER_API_RETURN(enqueue_api_error(
+                    client, request_id, CUBICLE_ERR_IO,
+                    "attachment event failed", true, errno));
+            }
         }
         char result[512];
         int length = snprintf(
@@ -1015,6 +1089,9 @@ static int dispatch_api_request(control_client_t *client,
     if (strcmp(envelope.method, "controller.detach") == 0) {
         state->terminal_attachment_active = 0;
         append_event(state, "type=attachment_active active=false reason=detach");
+        append_debug_event(
+            state, CONTROLLER_DEBUG_TERMINAL,
+            "type=debug category=terminal event=attachment_active active=false reason=detach");
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
 
@@ -1177,6 +1254,8 @@ static int dispatch_control_request(control_client_t *client,
 {
     char *request = client->request;
     int result = 0;
+    char request_name[32];
+    control_request_name(request, request_name);
     if (strcmp(request, "status") == 0) {
         char response[256];
         int length;
@@ -1293,6 +1372,10 @@ static int dispatch_control_request(control_client_t *client,
                         client->kind = CONTROL_CLIENT_ATTACHED_STDERR;
                         append_event(state, "type=client_attached stream=stderr");
                     }
+                    append_controller_library_debug(
+                        state, "control_response", request_name,
+                        client->request_length, result,
+                        client->response_length);
                     return 0;
                 } else if (result > 0) {
                     result = 0;
@@ -1336,6 +1419,9 @@ static int dispatch_control_request(control_client_t *client,
     }
 
 finish:
+    append_controller_library_debug(state, "control_response", request_name,
+                                    client->request_length, result,
+                                    client->response_length);
     if (result < 0) {
         close_control_client(client, state);
     }

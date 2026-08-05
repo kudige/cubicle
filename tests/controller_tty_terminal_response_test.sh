@@ -5,7 +5,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 state_dir="$tmpdir/state"
 
-"$CUBICLE_CONTROLLER" --state-dir "$state_dir" --mode tty --stdin-policy open -- \
+"$CUBICLE_CONTROLLER" --debug terminal --state-dir "$state_dir" --mode tty --stdin-policy open -- \
     python3 -c '
 import os
 import select
@@ -43,3 +43,5 @@ grep -q 'type=terminal_response query=foreground-color ' "$state_dir/events.log"
 grep -q 'type=terminal_response query=background-color ' "$state_dir/events.log"
 grep -q 'type=terminal_response query=keyboard-protocol ' "$state_dir/events.log"
 grep -q 'type=terminal_response query=primary-da ' "$state_dir/events.log"
+grep -q 'type=debug category=terminal event=query query=dsr action=answered' "$state_dir/events.log"
+grep -q 'type=debug category=terminal event=model_feed stream=stdout ' "$state_dir/events.log"

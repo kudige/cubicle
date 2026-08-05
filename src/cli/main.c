@@ -339,8 +339,20 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
         printf("manager.socket_group=%s\n", config->manager_socket_group);
         printf("manager.controller_binary=%s\n", config->controller_binary);
-        printf("controller.debug=%s\n",
-               config->controller_debug_input ? "input" : "none");
+        printf("controller.debug=%s%s%s%s\n",
+               config->controller_debug_input ? "input" : "",
+               config->controller_debug_input &&
+                       (config->controller_debug_library ||
+                        config->controller_debug_terminal)
+                   ? ","
+                   : "",
+               config->controller_debug_library ? "library" : "",
+               config->controller_debug_terminal
+                   ? (config->controller_debug_library ? ",terminal" : "terminal")
+                   : (config->controller_debug_input ||
+                              config->controller_debug_library
+                          ? ""
+                          : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
         printf("desk.debug=%s\n",
@@ -359,8 +371,20 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.log_dir=%s\n", config->manager_log_dir);
         printf("manager.socket_mode=%04o\n", config->manager_socket_mode);
         printf("manager.socket_group=%s\n", config->manager_socket_group);
-        printf("controller.debug=%s\n",
-               config->controller_debug_input ? "input" : "none");
+        printf("controller.debug=%s%s%s%s\n",
+               config->controller_debug_input ? "input" : "",
+               config->controller_debug_input &&
+                       (config->controller_debug_library ||
+                        config->controller_debug_terminal)
+                   ? ","
+                   : "",
+               config->controller_debug_library ? "library" : "",
+               config->controller_debug_terminal
+                   ? (config->controller_debug_library ? ",terminal" : "terminal")
+                   : (config->controller_debug_input ||
+                              config->controller_debug_library
+                          ? ""
+                          : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
         printf("desk.debug=%s\n",

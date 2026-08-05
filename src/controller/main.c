@@ -15,7 +15,7 @@
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s [--daemon] [--completed-retention-ms N] [--debug input] [--stdin-policy open|eof] [--cwd dir] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
+            "Usage: %s [--daemon] [--completed-retention-ms N] [--debug input,library,terminal|none] [--stdin-policy open|eof] [--cwd dir] [--state-dir dir] [--log-dir dir] [--control-socket path] --mode stream|tty|term -- command [args...]\n",
             program);
 }
 
@@ -114,6 +114,40 @@ static int parse_nonnegative_int(const char *value, int *number)
     return 0;
 }
 
+static int parse_debug_flags(const char *value, unsigned int *flags)
+{
+    if (strcmp(value, "none") == 0 ||
+        strcmp(value, "off") == 0 ||
+        strcmp(value, "false") == 0) {
+        *flags = 0;
+        return 0;
+    }
+
+    char copy[128];
+    if (strlen(value) >= sizeof(copy)) {
+        return -1;
+    }
+    snprintf(copy, sizeof(copy), "%s", value);
+
+    unsigned int parsed = 0;
+    char *save = NULL;
+    for (char *token = strtok_r(copy, ",", &save); token != NULL;
+         token = strtok_r(NULL, ",", &save)) {
+        if (strcmp(token, "input") == 0) {
+            parsed |= CONTROLLER_DEBUG_INPUT;
+        } else if (strcmp(token, "library") == 0) {
+            parsed |= CONTROLLER_DEBUG_LIBRARY;
+        } else if (strcmp(token, "terminal") == 0) {
+            parsed |= CONTROLLER_DEBUG_TERMINAL;
+        } else {
+            return -1;
+        }
+    }
+
+    *flags = parsed;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -126,7 +160,7 @@ int main(int argc, char **argv)
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
     int completed_retention_ms = 0;
-    int debug_input = 0;
+    unsigned int debug_flags = 0;
     int command_index = -1;
 
     for (int i = 1; i < argc; ++i) {
@@ -182,14 +216,8 @@ int main(int argc, char **argv)
         }
 
         if (strcmp(argv[i], "--debug") == 0 && i + 1 < argc) {
-            const char *debug = argv[++i];
-            if (strcmp(debug, "input") == 0) {
-                debug_input = 1;
-            } else if (strcmp(debug, "none") == 0 ||
-                       strcmp(debug, "off") == 0) {
-                debug_input = 0;
-            } else {
-                fprintf(stderr, "Unknown debug option: %s\n", debug);
+            if (parse_debug_flags(argv[++i], &debug_flags) < 0) {
+                fprintf(stderr, "Unknown debug option: %s\n", argv[i]);
                 return 2;
             }
             continue;
@@ -219,14 +247,14 @@ int main(int argc, char **argv)
 
     if (process_mode == CUBICLE_PROCESS_TTY) {
         return run_tty(&argv[command_index], state_dir, log_dir, control_socket,
-                       cwd, stdin_policy, completed_retention_ms, debug_input);
+                       cwd, stdin_policy, completed_retention_ms, debug_flags);
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
         return run_term(&argv[command_index], state_dir, log_dir, control_socket,
-                        cwd, stdin_policy, completed_retention_ms, debug_input);
+                        cwd, stdin_policy, completed_retention_ms, debug_flags);
     }
 
     return run_stream(&argv[command_index], state_dir, log_dir, control_socket,
-                      cwd, stdin_policy, completed_retention_ms, debug_input);
+                      cwd, stdin_policy, completed_retention_ms, debug_flags);
 }

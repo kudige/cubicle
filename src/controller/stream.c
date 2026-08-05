@@ -125,6 +125,7 @@ static int apply_terminal_window_size(int pty_fd,
 
 static int sync_local_terminal_window_size(int resize_fd,
                                            int stderr_resize_fd,
+                                           controller_state_t *state,
                                            terminal_size_state_t *terminal_size,
                                            cubicle_terminal_model_t *terminal_model,
                                            pid_t child_pid)
@@ -144,6 +145,28 @@ static int sync_local_terminal_window_size(int resize_fd,
         if (terminal_model != NULL && terminal_size != NULL &&
             cubicle_terminal_model_resize(terminal_model, terminal_size->rows,
                                           terminal_size->columns) < 0) {
+            return -1;
+        }
+        if (state != NULL && terminal_size != NULL) {
+            char event[160];
+            int event_length = snprintf(
+                event, sizeof(event),
+                "type=debug category=terminal event=local_resize action=applied rows=%hu columns=%hu",
+                terminal_size->rows, terminal_size->columns);
+            if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+                append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event) < 0) {
+                return -1;
+            }
+        }
+    } else if (state != NULL && terminal_size != NULL &&
+               terminal_size->known) {
+        char event[160];
+        int event_length = snprintf(
+            event, sizeof(event),
+            "type=debug category=terminal event=local_resize action=skipped rows=%hu columns=%hu reason=unchanged",
+            terminal_size->rows, terminal_size->columns);
+        if (event_length < 0 || (size_t)event_length >= sizeof(event) ||
+            append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event) < 0) {
             return -1;
         }
     }
@@ -169,25 +192,34 @@ static int write_terminal_response(controller_state_t *state,
         errno = ENAMETOOLONG;
         return -1;
     }
-    return append_event(state, event);
+    if (append_event(state, event) < 0) {
+        return -1;
+    }
+
+    event_length = snprintf(event, sizeof(event),
+                            "type=debug category=terminal event=query query=%s action=answered response_length=%zu attachment_active=%s",
+                            name, length,
+                            state->terminal_attachment_active ? "true" : "false");
+    if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event);
 }
 
 static int log_terminal_query_passthrough(controller_state_t *state,
                                           const char *name)
 {
-    if (!state->debug_input) {
-        return 0;
-    }
-
-    char event[128];
+    char event[160];
     int event_length = snprintf(event, sizeof(event),
-                                "type=terminal_query query=%s action=passthrough",
-                                name);
+                                "type=debug category=terminal event=query query=%s action=passthrough attachment_active=%s",
+                                name,
+                                state->terminal_attachment_active ? "true" : "false");
     if (event_length < 0 || (size_t)event_length >= sizeof(event)) {
         errno = ENAMETOOLONG;
         return -1;
     }
-    return append_event(state, event);
+    return append_debug_event(state, CONTROLLER_DEBUG_TERMINAL, event);
 }
 
 static int handle_terminal_query(controller_state_t *state,
@@ -396,6 +428,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
         if (resize_fd >= 0 && terminal_resize_pending) {
             terminal_resize_pending = 0;
             if (sync_local_terminal_window_size(resize_fd, stderr_resize_fd,
+                                                state,
                                                 terminal_size, terminal_model,
                                                 child_pid) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller", strerror(errno));
@@ -510,6 +543,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                     return -1;
                 } else if (sync_local_terminal_window_size(resize_fd,
                                                            stderr_resize_fd,
+                                                           state,
                                                            terminal_size,
                                                            terminal_model,
                                                            child_pid) < 0) {
@@ -636,6 +670,23 @@ static int stream_event_loop(stream_pipe_t pipes[2],
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed updating terminal snapshot");
                 return -1;
+            }
+
+            if (terminal_model != NULL &&
+                pipes[i].offset == &state->stdout_offset) {
+                char debug_event[192];
+                int debug_length = snprintf(
+                    debug_event, sizeof(debug_event),
+                    "type=debug category=terminal event=model_feed stream=%s start=%lld length=%zd offset=%lld",
+                    pipes[i].name, start, read_result, *pipes[i].offset);
+                if (debug_length < 0 ||
+                    (size_t)debug_length >= sizeof(debug_event) ||
+                    append_debug_event(state, CONTROLLER_DEBUG_TERMINAL,
+                                       debug_event) < 0) {
+                    cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                                "failed appending terminal debug event");
+                    return -1;
+                }
             }
 
             if (terminal_model != NULL && local_input_fd < 0 &&
@@ -853,7 +904,7 @@ int run_stream(char **command, const char *state_dir,
                const char *cwd,
                stdin_policy_t stdin_policy,
                int completed_retention_ms,
-               int debug_input)
+               unsigned int debug_flags)
 {
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
@@ -939,7 +990,7 @@ int run_stream(char **command, const char *state_dir,
         close_controller_state(&state);
         return 1;
     }
-    state.debug_input = debug_input;
+    state.debug_flags = debug_flags;
 
     cubicle_log(CUBICLE_LOG_INFO, "controller", "state directory initialized");
 
@@ -1034,7 +1085,7 @@ static int run_pty_mode(char **command, const char *state_dir,
                         stdin_policy_t stdin_policy,
                         int completed_retention_ms,
                         cubicle_process_mode_t process_mode,
-                        int debug_input)
+                        unsigned int debug_flags)
 {
     int master_fd = -1;
     int slave_fd = -1;
@@ -1130,7 +1181,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         close_controller_state(&state);
         return 1;
     }
-    state.debug_input = debug_input;
+    state.debug_flags = debug_flags;
 
     cubicle_log(CUBICLE_LOG_INFO, "controller", "state directory initialized");
 
@@ -1175,6 +1226,23 @@ static int run_pty_mode(char **command, const char *state_dir,
         close_if_open(&control_fd);
         close_if_open(&master_fd);
         close_if_open(&stdout_master_fd);
+        close_controller_state(&state);
+        return 1;
+    }
+    char debug_event[160];
+    int debug_length = snprintf(
+        debug_event, sizeof(debug_event),
+        "type=debug category=terminal event=model_initialized rows=%u columns=%u",
+        model_rows, model_cols);
+    if (debug_length < 0 || (size_t)debug_length >= sizeof(debug_event) ||
+        append_debug_event(&state, CONTROLLER_DEBUG_TERMINAL, debug_event) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "controller",
+                    "failed appending terminal debug event");
+        kill(-child_pid, SIGTERM);
+        close_if_open(&control_fd);
+        close_if_open(&master_fd);
+        close_if_open(&stdout_master_fd);
+        cubicle_terminal_model_destroy(terminal_model);
         close_controller_state(&state);
         return 1;
     }
@@ -1247,11 +1315,11 @@ int run_tty(char **command, const char *state_dir,
             const char *cwd,
             stdin_policy_t stdin_policy,
             int completed_retention_ms,
-            int debug_input)
+            unsigned int debug_flags)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
                         stdin_policy, completed_retention_ms,
-                        CUBICLE_PROCESS_TTY, debug_input);
+                        CUBICLE_PROCESS_TTY, debug_flags);
 }
 
 int run_term(char **command, const char *state_dir,
@@ -1260,9 +1328,9 @@ int run_term(char **command, const char *state_dir,
              const char *cwd,
              stdin_policy_t stdin_policy,
              int completed_retention_ms,
-             int debug_input)
+             unsigned int debug_flags)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
                         stdin_policy, completed_retention_ms,
-                        CUBICLE_PROCESS_TTY_CAPTURED_STDERR, debug_input);
+                        CUBICLE_PROCESS_TTY_CAPTURED_STDERR, debug_flags);
 }

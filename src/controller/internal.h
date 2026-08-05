@@ -21,6 +21,9 @@
 #define CUBICLE_REQUEST_MAX 8192
 #define CUBICLE_RESPONSE_MAX (4U * 1024U * 1024U)
 #define CUBICLE_CONTROL_CLIENT_IDLE_TIMEOUT_MS 120000ULL
+#define CONTROLLER_DEBUG_INPUT 0x01u
+#define CONTROLLER_DEBUG_LIBRARY 0x02u
+#define CONTROLLER_DEBUG_TERMINAL 0x04u
 
 typedef enum control_client_kind {
     CONTROL_CLIENT_EMPTY = 0,
@@ -56,7 +59,7 @@ typedef struct controller_state {
     long long next_sequence;
     long long stdout_offset;
     long long stderr_offset;
-    int debug_input;
+    unsigned int debug_flags;
     int terminal_attachment_active;
 } controller_state_t;
 
@@ -93,6 +96,9 @@ int make_log_file_path(char path[PATH_MAX], const controller_state_t *state,
 void initialize_empty_controller_state(controller_state_t *state);
 void close_controller_state(controller_state_t *state);
 int append_event(controller_state_t *state, const char *event);
+int append_debug_event(controller_state_t *state,
+                       unsigned int flag,
+                       const char *event);
 int append_input_event(controller_state_t *state,
                        const char *source,
                        const char *buffer,
@@ -144,20 +150,20 @@ int run_stream(char **command, const char *state_dir,
                const char *cwd,
                stdin_policy_t stdin_policy,
                int completed_retention_ms,
-               int debug_input);
+               unsigned int debug_flags);
 int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
             const char *cwd,
             stdin_policy_t stdin_policy,
             int completed_retention_ms,
-            int debug_input);
+            unsigned int debug_flags);
 int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
              const char *cwd,
              stdin_policy_t stdin_policy,
              int completed_retention_ms,
-             int debug_input);
+             unsigned int debug_flags);
 
 #endif

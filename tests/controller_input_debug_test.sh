@@ -6,7 +6,7 @@ trap 'if [ -n "${controller_pid:-}" ]; then kill "$controller_pid" 2>/dev/null |
 state_dir="$tmpdir/state"
 socket_path="$tmpdir/control.sock"
 
-"$CUBICLE_CONTROLLER" --debug input --state-dir "$state_dir" \
+"$CUBICLE_CONTROLLER" --debug input,library --state-dir "$state_dir" \
     --control-socket "$socket_path" --mode stream -- \
     sh -c 'cat >/dev/null; sleep 30' >/dev/null 2>/dev/null &
 controller_pid=$!
@@ -47,6 +47,12 @@ if ! grep -Fq 'data_escaped=\e[10;1R' "$state_dir/events.log" ||
    ! grep -Fq 'rgb:e3e3/e3e3/eaea' "$state_dir/events.log" ||
    ! grep -Fq '\e[?1;2;4c' "$state_dir/events.log"; then
     echo "debug input event did not include escaped terminal bytes" >&2
+    cat "$state_dir/events.log" >&2
+    exit 1
+fi
+
+if ! grep -q 'type=debug category=library event=api_response method=controller.write ' "$state_dir/events.log"; then
+    echo "library debug event did not include controller.write" >&2
     cat "$state_dir/events.log" >&2
     exit 1
 fi

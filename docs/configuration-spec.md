@@ -239,9 +239,13 @@ debug=none
 
 Keys:
 
-- `debug`: `none`, `off`, or `false` records normal input events with lengths
-  only. `input` adds input source, hex bytes, and escaped text to controller
-  input events for terminal-response and keystroke debugging.
+- `debug`: comma-separated debug categories. `none`, `off`, or `false`
+  disables optional controller debug records. `input` adds input source, hex
+  bytes, and escaped text to controller input events for terminal-response and
+  keystroke debugging. `library` logs controller-side control/API calls with
+  method names, byte counts, and return codes. `terminal` logs terminal query
+  handling, attachment-active state changes, resize decisions, and terminal
+  model updates. Example: `debug=input,library,terminal`.
 
 ### 5.4 `[cube]` and `[desk]`
 
@@ -398,6 +402,8 @@ typedef struct cubicle_config {
     char controller_binary[PATH_MAX];
     char manager_log_dir[PATH_MAX];
     bool controller_debug_input;
+    bool controller_debug_library;
+    bool controller_debug_terminal;
     bool cube_debug_library;
     bool desk_debug_library;
 
