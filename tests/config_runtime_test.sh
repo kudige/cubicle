@@ -45,7 +45,8 @@ cat >"$config_file.d/90-cube-debug.cfg" <<EOF
 debug=library
 EOF
 
-"$CUBICLE_MANAGER" --config "$config_file" daemon --foreground --event-interval-ms 50 &
+"$CUBICLE_MANAGER" --config "$config_file" daemon --foreground --event-interval-ms 50 \
+    >"$tmpdir/manager-config.out" 2>"$tmpdir/manager-config.err" &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -57,8 +58,14 @@ done
 
 if [ ! -S "$socket_path" ]; then
     echo "manager did not create configured runtime socket" >&2
+    cat "$tmpdir/manager-config.err" >&2 || true
     exit 1
 fi
+
+grep -q "manager.config: manager.state_dir=$state_dir" "$tmpdir/manager-config.err"
+grep -q "manager.config: manager.runtime_dir=$runtime_dir" "$tmpdir/manager-config.err"
+grep -q "manager.config: manager.log_dir=$log_dir" "$tmpdir/manager-config.err"
+grep -q "manager.config: manager.listen=unix://$socket_path" "$tmpdir/manager-config.err"
 
 [ -d "$state_dir" ]
 [ -d "$runtime_dir" ]

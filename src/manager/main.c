@@ -372,6 +372,29 @@ static int verify_manager_directory(const char *label, const char *path)
     return 0;
 }
 
+static void log_manager_setting(const char *key, const char *value)
+{
+    char message[PATH_MAX + 128];
+    snprintf(message, sizeof(message), "%s=%s", key,
+             value != NULL && value[0] != '\0' ? value : "(none)");
+    cubicle_log(CUBICLE_LOG_INFO, "manager.config", message);
+}
+
+static void log_manager_effective_config(const manager_state_t *state)
+{
+    char socket_mode[16];
+    snprintf(socket_mode, sizeof(socket_mode), "%04o",
+             (unsigned int)state->socket_mode);
+    log_manager_setting("manager.state_dir", state->dir);
+    log_manager_setting("manager.runtime_dir", state->runtime_dir);
+    log_manager_setting("manager.log_dir", state->log_dir);
+    log_manager_setting("manager.listen", state->listen_uri);
+    log_manager_setting("manager.socket_mode", socket_mode);
+    log_manager_setting("manager.socket_group", state->socket_group);
+    log_manager_setting("manager.controller_binary", state->controller_bin);
+    log_manager_setting("controller.debug", state->controller_debug);
+}
+
 static int append_line(const manager_state_t *state, const char *file_name,
                        const char *line)
 {
@@ -6327,6 +6350,8 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+
+    log_manager_effective_config(&state);
 
     if (verify_manager_directory("manager.state_dir", state.dir) < 0 ||
         verify_manager_directory("manager.runtime_dir",
