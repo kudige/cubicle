@@ -40,6 +40,7 @@ fi
 grep -q 'Usage: .*cubicle-manager' "$PWD/manager-help.err"
 grep -q 'events follow \[--iterations N\]' "$PWD/manager-help.err"
 grep -q 'daemon \[--foreground\] \[--control-socket PATH\] \[--listen URI\] \[--allow-insecure\] \[--event-interval-ms N\] \[--max-clients N\]' "$PWD/manager-help.err"
+grep -q 'Global options: --config PATH' "$PWD/manager-help.err"
 
 cube --help >"$PWD/cube-help.out" 2>"$PWD/cube-help.err"
 if [ -s "$PWD/cube-help.err" ]; then
@@ -47,6 +48,7 @@ if [ -s "$PWD/cube-help.err" ]; then
     exit 1
 fi
 grep -q 'Usage:' "$PWD/cube-help.out"
+grep -q 'cube \[--config PATH\]' "$PWD/cube-help.out"
 grep -q 'cube workspace \[NAME\]' "$PWD/cube-help.out"
 grep -q 'cube run \[--fg|--bg\] \[--stream|--tty|--term\]' "$PWD/cube-help.out"
 grep -q 'cube inspect NAME' "$PWD/cube-help.out"

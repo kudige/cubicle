@@ -7,7 +7,7 @@
 ## Synopsis
 
 ```text
-cube [--manager-socket ENDPOINT] [--workspace NAME] [--json] COMMAND [ARG...]
+cube [--config PATH] [--manager-socket ENDPOINT] [--workspace NAME] [--json] COMMAND [ARG...]
 cube help
 cube workspace [NAME]
 cube workspace list
@@ -64,6 +64,10 @@ future command design is tracked separately in `docs/cli-command-spec.md`.
 : Print JSON results for commands that support it. Most command JSON output is
   the raw manager API result. Some successful lifecycle commands print `{}`.
 
+`--config PATH`
+: Load `PATH` as a full development/test configuration override. This is
+  equivalent to setting `CUBICLE_CONFIG=PATH` for the command.
+
 `help`, `--help`, `-h`
 : Print top-level help.
 
@@ -80,8 +84,9 @@ Installed packages provide `/usr/lib/cubicle/config.cfg`. Administrators can
 override through system configuration handled by `libeconf`, such as
 `/etc/cubicle/config.cfg`. User configuration is read from
 `$XDG_CONFIG_HOME/cubicle/config.cfg`, or `~/.config/cubicle/config.cfg` when
-`XDG_CONFIG_HOME` is unset. Setting `CUBICLE_CONFIG=/path/to/config.cfg` makes
-`cube` load that exact file. Each loaded `config.cfg` also applies lexical
+`XDG_CONFIG_HOME` is unset. Passing `--config /path/to/config.cfg` or setting
+`CUBICLE_CONFIG=/path/to/config.cfg` makes `cube` load that exact file. Each
+loaded `config.cfg` also applies lexical
 `config.cfg.d/*.cfg` drop-ins when that directory exists.
 
 Examples:
@@ -91,6 +96,7 @@ cube --manager-socket /run/user/$UID/cubicle/manager.sock ps
 cube --manager-socket unix:///tmp/cubicle/manager.sock workspace Dev
 cube --manager-socket tcp://127.0.0.1:7777 ps
 CUBICLE_CONFIG=/tmp/cubicle.cfg cube config paths
+cube --config /tmp/cubicle.cfg config paths
 ```
 
 ## Workspaces

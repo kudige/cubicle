@@ -167,6 +167,31 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
+    fprintf(stderr, "Global options: --config PATH, --state-dir dir, --runtime-dir dir, --log-dir dir\n");
+}
+
+static int apply_config_option_prescan(int argc, char **argv)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        if (strcmp(argv[i], "--config") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cubicle-manager: --config requires a path\n");
+                return -1;
+            }
+            if (setenv("CUBICLE_CONFIG", argv[i + 1], 1) < 0) {
+                fprintf(stderr,
+                        "cubicle-manager: failed to set config override: %s\n",
+                        strerror(errno));
+                return -1;
+            }
+            ++i;
+        }
+    }
+    return 0;
 }
 
 static int validate_field(const char *value, const char *name)
@@ -6165,6 +6190,14 @@ static int dispatch_command(const manager_state_t *state, int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    int config_option_result = apply_config_option_prescan(argc, argv);
+    if (config_option_result > 0) {
+        return 0;
+    }
+    if (config_option_result < 0) {
+        return 2;
+    }
+
     cubicle_config_t config;
     char config_error[512];
     if (cubicle_config_load(&config, config_error, sizeof(config_error)) < 0) {
@@ -6214,6 +6247,11 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
+        }
+
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            ++i;
+            continue;
         }
 
         if (strcmp(argv[i], "--state-dir") == 0 && i + 1 < argc) {

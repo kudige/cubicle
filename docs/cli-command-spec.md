@@ -65,6 +65,15 @@ Pushed input to [shell]
 
 ## 3. Launch command shape
 
+Global options:
+
+```text
+cube [--config PATH] [--manager-socket ENDPOINT] [--workspace NAME] [--json] COMMAND [ARG...]
+```
+
+`--config PATH` is a development/test override equivalent to
+`CUBICLE_CONFIG=PATH`.
+
 ```text
 cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
 ```

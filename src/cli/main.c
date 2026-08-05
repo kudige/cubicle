@@ -122,7 +122,7 @@ static void print_usage(FILE *stream)
 {
     fprintf(stream,
             "Usage:\n"
-            "  cube [--manager-socket PATH] [--workspace NAME] [--json] COMMAND [ARG...]\n"
+            "  cube [--config PATH] [--manager-socket PATH] [--workspace NAME] [--json] COMMAND [ARG...]\n"
             "  cube workspace [NAME]\n"
             "  cube workspace list|create|select|stop|delete ...\n"
             "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n"
@@ -273,6 +273,19 @@ static int parse_global_options(int argc,
         if (strcmp(argument, "--json") == 0) {
             options->json = 1;
             ++(*command_index);
+            continue;
+        }
+        if (strcmp(argument, "--config") == 0) {
+            if (*command_index + 1 >= argc) {
+                fprintf(stderr, "cube: --config requires a path\n");
+                return -1;
+            }
+            if (setenv("CUBICLE_CONFIG", argv[*command_index + 1], 1) < 0) {
+                fprintf(stderr, "cube: failed to set config override: %s\n",
+                        strerror(errno));
+                return -1;
+            }
+            *command_index += 2;
             continue;
         }
         if (strcmp(argument, "--manager-socket") == 0) {

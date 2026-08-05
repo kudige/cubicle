@@ -45,7 +45,7 @@ cat >"$config_file.d/90-cube-debug.cfg" <<EOF
 debug=library
 EOF
 
-CUBICLE_CONFIG="$config_file" "$CUBICLE_MANAGER" daemon --foreground --event-interval-ms 50 &
+"$CUBICLE_MANAGER" --config "$config_file" daemon --foreground --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
@@ -72,18 +72,18 @@ if [ "$socket_mode" != "664" ]; then
     exit 1
 fi
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config validate \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" config validate \
     >"$tmpdir/config-validate.out"
 grep -q '^configuration valid$' "$tmpdir/config-validate.out"
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config paths \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" config paths \
     >"$tmpdir/config-paths.out"
 grep -q "^manager.state_dir=$state_dir$" "$tmpdir/config-paths.out"
 grep -q "^manager.runtime_dir=$runtime_dir$" "$tmpdir/config-paths.out"
 grep -q "^manager.log_dir=$log_dir$" "$tmpdir/config-paths.out"
 grep -q '^manager.socket_mode=0664$' "$tmpdir/config-paths.out"
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" config effective \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" config effective \
     >"$tmpdir/config-effective.out"
 grep -q '^Configuration sources:$' "$tmpdir/config-effective.out"
 grep -q "^  $config_file$" "$tmpdir/config-effective.out"
@@ -95,7 +95,7 @@ grep -q "^      source: $config_file.d/90-cube-debug.cfg (override)$" "$tmpdir/c
 grep -q '^  desk.debug .* none$' "$tmpdir/config-effective.out"
 grep -q '^      source: built-in defaults (built-in)$' "$tmpdir/config-effective.out"
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" workspace "Project A" \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" workspace "Project A" \
     >"$tmpdir/workspace.out"
 workspace_json=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" call workspace.get '{"workspace":"Project A"}')
 workspace_id=$(python3 - "$workspace_json" <<'PY'
@@ -105,7 +105,7 @@ print(json.loads(sys.argv[1])["result"]["id"])
 PY
 )
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" run --name config-run \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" run --name config-run \
     sh -c 'test -t 0 && test -t 1 && ! test -t 2; printf "config-out\n"; printf "config-err\n" >&2' \
     >"$tmpdir/run.out" 2>"$tmpdir/run.err"
 grep -q '^\[config-run\] started in term mode$' "$tmpdir/run.out"
@@ -140,7 +140,7 @@ if [ -f "$state_dir/controllers/$process_id/stdout.log" ] ||
     exit 1
 fi
 
-CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" logs config-run \
+XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" logs config-run \
     >"$tmpdir/logs.out" 2>"$tmpdir/logs.err"
 grep -q 'config-out' "$tmpdir/logs.out"
 grep -q 'config-err' "$tmpdir/logs.err"
@@ -239,7 +239,7 @@ listen=unix://$tmpdir/unsafe-runtime/manager.sock
 controller_binary=$controller_binary
 EOF
 
-if CUBICLE_CONFIG="$unsafe_config" "$CUBICLE_MANAGER" workspace list \
+if "$CUBICLE_MANAGER" --config "$unsafe_config" workspace list \
     >"$tmpdir/unsafe.out" 2>"$tmpdir/unsafe.err"; then
     echo "manager accepted an unsafe configured state directory" >&2
     exit 1

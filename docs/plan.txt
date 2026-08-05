@@ -477,11 +477,14 @@
   - added role-aware config loading so cube/desk ignore user manager-control overrides
   - kept explicit CUBICLE_CONFIG as a full development/test override
   - added unit coverage for client-safe user config policy
+  - documented supported configuration environment variables
+  - added --config PATH override support to cube and cubicle-manager
+  - added help/runtime coverage for explicit config override usage
 
 ## Next
 
 1. Continue configuration implementation from docs/configuration-spec.md.
-   - Add documented environment variables and explicit --config support.
+   - Add manager startup logging of resolved non-sensitive config settings.
 
 2. Continue implementing the cube CLI specification.
    - Harden post-exit connect draining through manager-retained output fallback.

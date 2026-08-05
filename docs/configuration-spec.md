@@ -528,16 +528,15 @@ files.
 
 ### 10.3 Environment variables
 
-Environment variables are useful for development and one-off client selection, but should be limited and explicitly named, for example:
+Environment variables are useful for development and one-off client selection,
+but should be limited and explicitly named. Currently supported variables:
 
 ```text
-CUBICLE_CONFIG
-CUBICLE_MANAGER
-CUBICLE_DEFAULT_LAUNCH
-CUBICLE_DEFAULT_MODE
-CUBICLE_STATE_DIR
-CUBICLE_RUNTIME_DIR
-CUBICLE_CONTROLLER_BINARY
+CUBICLE_CONFIG          full config-file override, equivalent to --config
+CUBICLE_MANAGER_SOCKET  cube/desk manager endpoint override
+XDG_CONFIG_HOME         user config root
+XDG_STATE_HOME          user state root
+XDG_RUNTIME_DIR         user runtime root
 ```
 
 Manager-only environment overrides should be ignored in privileged/setuid contexts and should be constrained by service configuration.
