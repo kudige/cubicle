@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -174,7 +175,7 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 opened_menu = True
 
             if opened_menu and not selected_workspace and b"workspace: DeskOther" in captured:
-                os.write(master_fd, b"\r")
+                os.write(master_fd, b"\x1b[C")
                 selected_workspace = True
 
             if selected_workspace and not selected_process and b"desk-other" in captured:
@@ -211,6 +212,90 @@ def run_desk_open_other_workspace_process(desk, cube, env):
             raise AssertionError(f"desk open menu did not show other process: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"newly opened pane did not receive input: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        os.close(master_fd)
+
+
+def run_desk_click_workspace_switch(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    opened_menu = False
+    clicked_workspace = False
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not opened_menu and b"desk-safe" in captured:
+                os.write(master_fd, b"\x18o")
+                opened_menu = True
+
+            if opened_menu and not clicked_workspace and b"workspace: DeskClick" in captured:
+                marker = captured.find(b"workspace: DeskClick")
+                positions = re.findall(rb"\x1b\[(\d+);(\d+)H", captured[:marker])
+                if positions:
+                    row = int(positions[-1][0])
+                    col = int(positions[-1][1]) + 2
+                    os.write(master_fd, f"\x1b[<0;{col};{row}M".encode("ascii"))
+                    clicked_workspace = True
+
+            if clicked_workspace and not sent_payload and b"READY desk-click" in captured:
+                os.write(master_fd, b"CLICK")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskClick", "logs", "--stdout", "desk-click"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_CLICK" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not opened_menu:
+            raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if not clicked_workspace:
+            raise AssertionError(f"desk open menu did not expose clickable workspace: {captured!r}")
+        if not saw_payload:
+            raise AssertionError(f"clicked workspace did not replace desk session: {captured!r}")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
@@ -835,6 +920,43 @@ def main():
             events = handle.read()
         if "type=input length=1" not in events:
             raise AssertionError(f"desk did not record forwarded Ctrl-C:\n{events}")
+
+        run_checked([cube, "workspace", "create", "DeskClick"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskClick",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "desk-click",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY desk-click\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+10\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if b'CLICK' in data:\n"
+                    "            sys.stdout.write('GOT_CLICK\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            break\n"
+                    "time.sleep(5)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_desk_click_workspace_switch(desk, cube, env)
+        run_checked([cube, "--workspace", "DeskClick", "kill", "--all", "--cleanup"], env)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked(
