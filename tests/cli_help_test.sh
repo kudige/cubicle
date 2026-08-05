@@ -18,8 +18,9 @@ rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
 rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
+rm -f "$PWD/cube-defaults-help.out" "$PWD/cube-defaults-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
-rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
+rm -f "$PWD/cube-defaults.out" "$PWD/cube-defaults.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"
 
 "$CUBICLE_CONTROLLER" --help >"$PWD/controller-help.out" 2>"$PWD/controller-help.err"
@@ -57,6 +58,7 @@ grep -q 'cube save NAME' "$PWD/cube-help.out"
 grep -q 'cube unsave NAME' "$PWD/cube-help.out"
 grep -q 'cube remove NAME' "$PWD/cube-help.out"
 grep -q 'cube config show|effective|paths|validate' "$PWD/cube-help.out"
+grep -q 'cube defaults show|set|reset' "$PWD/cube-help.out"
 grep -q 'cube cleanup' "$PWD/cube-help.out"
 grep -q 'cube access list|add|set-role|remove|revoke' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
@@ -90,6 +92,15 @@ if [ -s "$PWD/cube-save-help.err" ]; then
 fi
 grep -q 'cube save NAME' "$PWD/cube-save-help.out"
 
+cube defaults --help >"$PWD/cube-defaults-help.out" 2>"$PWD/cube-defaults-help.err"
+if [ -s "$PWD/cube-defaults-help.err" ]; then
+    echo "cube defaults help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube defaults \[show\]' "$PWD/cube-defaults-help.out"
+grep -q 'cube defaults set launch foreground|background' "$PWD/cube-defaults-help.out"
+grep -q 'cube defaults reset \[launch|mode|kill-cleanup\]' "$PWD/cube-defaults-help.out"
+
 set +e
 cube --manager-socket "$PWD/missing-manager.sock" --workspace "Project A" ps \
     >"$PWD/cube-missing-manager.out" 2>"$PWD/cube-missing-manager.err"
@@ -105,15 +116,15 @@ if [ -s "$PWD/cube-missing-manager.out" ]; then
 fi
 grep -q 'failed to connect to manager' "$PWD/cube-missing-manager.err"
 
-set +e
-cube --manager-socket /tmp/cubicle-test.sock defaults >"$PWD/cube-unimplemented.out" 2>"$PWD/cube-unimplemented.err"
-status=$?
-set -e
-if [ "$status" -ne 2 ]; then
-    echo "cube unimplemented command should exit 2, got $status" >&2
+cube --manager-socket "$PWD/missing-manager.sock" defaults \
+    >"$PWD/cube-defaults.out" 2>"$PWD/cube-defaults.err"
+grep -q '^launch=' "$PWD/cube-defaults.out"
+grep -q '^mode=' "$PWD/cube-defaults.out"
+grep -q '^kill_cleanup=' "$PWD/cube-defaults.out"
+if [ -s "$PWD/cube-defaults.err" ]; then
+    echo "cube defaults should not require manager connection" >&2
     exit 1
 fi
-grep -q "command 'defaults' is not implemented yet" "$PWD/cube-unimplemented.err"
 
 set +e
 cube wat >"$PWD/cube-unknown.out" 2>"$PWD/cube-unknown.err"
@@ -132,6 +143,7 @@ rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
 rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
+rm -f "$PWD/cube-defaults-help.out" "$PWD/cube-defaults-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
-rm -f "$PWD/cube-unimplemented.out" "$PWD/cube-unimplemented.err"
+rm -f "$PWD/cube-defaults.out" "$PWD/cube-defaults.err"
 rm -f "$PWD/cube-unknown.out" "$PWD/cube-unknown.err"

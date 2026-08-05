@@ -577,12 +577,16 @@ cube defaults set launch background
 cube defaults set mode stream
 cube defaults set mode tty
 cube defaults set mode term
+cube defaults set kill-cleanup true
+cube defaults set kill-cleanup false
 cube defaults reset launch
 cube defaults reset mode
+cube defaults reset kill-cleanup
 cube defaults reset
 ```
 
-These commands edit user configuration by default.
+These commands edit user configuration by default. Writes must preserve
+unrelated settings and use the atomic update rules in section 12.
 
 ### 11.3 General mutation interface
 

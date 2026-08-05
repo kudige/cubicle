@@ -14,20 +14,27 @@
 #include "cubicle/workspace.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <pwd.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX CUBICLE_PATH_MAX
+#endif
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
 #endif
 
 #define CUBE_CHANNEL_STDIN 1U
@@ -133,6 +140,7 @@ static void print_usage(FILE *stream)
             "  cube cleanup\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
             "  cube config show|effective|paths|validate\n"
+            "  cube defaults show|set|reset ...\n"
             "\n"
             "Run and reconnect to persistent processes inside Cubicle workspaces.\n");
 }
@@ -230,6 +238,16 @@ static int print_command_usage(const char *command, FILE *stream)
                 "Usage:\n  cube config show|effective|paths|validate\n");
         return 0;
     }
+    if (strcmp(command, "defaults") == 0) {
+        fprintf(stream,
+                "Usage:\n"
+                "  cube defaults [show]\n"
+                "  cube defaults set launch foreground|background\n"
+                "  cube defaults set mode stream|tty|term\n"
+                "  cube defaults set kill-cleanup true|false\n"
+                "  cube defaults reset [launch|mode|kill-cleanup]\n");
+        return 0;
+    }
     return -1;
 }
 
@@ -302,8 +320,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "cleanup") == 0 ||
            strcmp(command, "access") == 0 ||
            strcmp(command, "logs") == 0 ||
-           strcmp(command, "events") == 0 ||
-           strcmp(command, "defaults") == 0;
+           strcmp(command, "events") == 0;
 }
 
 static int command_config(const cubicle_config_t *config,
@@ -537,6 +554,559 @@ static int command_config(const cubicle_config_t *config,
 
     fprintf(stderr, "cube: unknown config command '%s'\n", subcommand);
     return 2;
+}
+
+typedef struct cube_defaults_update {
+    int set_launch;
+    int reset_launch;
+    const char *launch;
+    int set_mode;
+    int reset_mode;
+    const char *mode;
+    int set_kill_cleanup;
+    int reset_kill_cleanup;
+    const char *kill_cleanup;
+} cube_defaults_update_t;
+
+static const char *cube_user_home_directory(void)
+{
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        return home;
+    }
+    struct passwd *entry = getpwuid(geteuid());
+    return entry != NULL ? entry->pw_dir : NULL;
+}
+
+static int cube_user_config_path(char path[CUBICLE_PATH_MAX])
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    int length;
+    if (config_home != NULL && config_home[0] != '\0') {
+        length = snprintf(path, CUBICLE_PATH_MAX, "%s/cubicle/config.cfg",
+                          config_home);
+    } else {
+        const char *home = cube_user_home_directory();
+        if (home == NULL || home[0] == '\0') {
+            errno = ENOENT;
+            return -1;
+        }
+        length = snprintf(path, CUBICLE_PATH_MAX,
+                          "%s/.config/cubicle/config.cfg", home);
+    }
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int cube_parent_directory(const char *path,
+                                 char parent[CUBICLE_PATH_MAX])
+{
+    int length = snprintf(parent, CUBICLE_PATH_MAX, "%s", path);
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char *slash = strrchr(parent, '/');
+    if (slash == NULL || slash == parent) {
+        errno = EINVAL;
+        return -1;
+    }
+    *slash = '\0';
+    return 0;
+}
+
+static char *cube_read_optional_file(const char *path)
+{
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            char *empty = calloc(1, 1);
+            if (empty == NULL) {
+                errno = ENOMEM;
+            }
+            return empty;
+        }
+        return NULL;
+    }
+
+    if (fseek(file, 0, SEEK_END) < 0) {
+        fclose(file);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0) {
+        fclose(file);
+        return NULL;
+    }
+    rewind(file);
+    char *buffer = malloc((size_t)length + 1);
+    if (buffer == NULL) {
+        fclose(file);
+        errno = ENOMEM;
+        return NULL;
+    }
+    size_t read_count = fread(buffer, 1, (size_t)length, file);
+    int read_error = ferror(file);
+    fclose(file);
+    if (read_error || read_count != (size_t)length) {
+        free(buffer);
+        errno = EIO;
+        return NULL;
+    }
+    buffer[length] = '\0';
+    return buffer;
+}
+
+static char *cube_trim_left(char *text)
+{
+    while (*text == ' ' || *text == '\t' || *text == '\r' ||
+           *text == '\n') {
+        ++text;
+    }
+    return text;
+}
+
+static void cube_trim_right(char *text)
+{
+    size_t length = strlen(text);
+    while (length > 0 &&
+           (text[length - 1] == ' ' || text[length - 1] == '\t' ||
+            text[length - 1] == '\r' || text[length - 1] == '\n')) {
+        text[--length] = '\0';
+    }
+}
+
+static int cube_config_line_section(const char *line,
+                                    char section[64])
+{
+    char copy[256];
+    int length = snprintf(copy, sizeof(copy), "%s", line);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        return 0;
+    }
+    char *trimmed = cube_trim_left(copy);
+    cube_trim_right(trimmed);
+    size_t trimmed_length = strlen(trimmed);
+    if (trimmed_length < 3 || trimmed[0] != '[' ||
+        trimmed[trimmed_length - 1] != ']') {
+        return 0;
+    }
+    trimmed[trimmed_length - 1] = '\0';
+    length = snprintf(section, 64, "%s", trimmed + 1);
+    return length >= 0 && length < 64;
+}
+
+static int cube_config_line_key_matches(const char *line, const char *key)
+{
+    char copy[256];
+    int length = snprintf(copy, sizeof(copy), "%s", line);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        return 0;
+    }
+    char *trimmed = cube_trim_left(copy);
+    if (*trimmed == '#' || *trimmed == ';' || *trimmed == '\0' ||
+        *trimmed == '[') {
+        return 0;
+    }
+    char *equals = strchr(trimmed, '=');
+    if (equals == NULL) {
+        return 0;
+    }
+    *equals = '\0';
+    cube_trim_right(trimmed);
+    return strcmp(trimmed, key) == 0;
+}
+
+static int cube_defaults_update_wants_key(const cube_defaults_update_t *update,
+                                          const char *key)
+{
+    if (strcmp(key, "launch") == 0) {
+        return update->set_launch || update->reset_launch;
+    }
+    if (strcmp(key, "mode") == 0) {
+        return update->set_mode || update->reset_mode;
+    }
+    if (strcmp(key, "kill_cleanup") == 0) {
+        return update->set_kill_cleanup || update->reset_kill_cleanup;
+    }
+    return 0;
+}
+
+static int cube_append_updated_defaults(cubicle_json_builder_t *output,
+                                        const cube_defaults_update_t *update)
+{
+    if (update->set_launch &&
+        cubicle_json_builder_appendf(output, "launch=%s\n",
+                                     update->launch) < 0) {
+        return -1;
+    }
+    if (update->set_mode &&
+        cubicle_json_builder_appendf(output, "mode=%s\n", update->mode) < 0) {
+        return -1;
+    }
+    if (update->set_kill_cleanup &&
+        cubicle_json_builder_appendf(output, "kill_cleanup=%s\n",
+                                     update->kill_cleanup) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int cube_append_updated_defaults_block(cubicle_json_builder_t *output,
+                                              const cube_defaults_update_t *update)
+{
+    if (output->length > 0 && output->data[output->length - 1] != '\n' &&
+        cubicle_json_builder_append(output, "\n") < 0) {
+        return -1;
+    }
+    return cube_append_updated_defaults(output, update);
+}
+
+static int cube_render_updated_config(const char *existing,
+                                      const cube_defaults_update_t *update,
+                                      char **rendered_out)
+{
+    cubicle_json_builder_t output = {0};
+    int in_defaults = 0;
+    int saw_defaults = 0;
+    int inserted = 0;
+    const char *cursor = existing;
+
+    while (*cursor != '\0') {
+        const char *line_start = cursor;
+        const char *line_end = strchr(cursor, '\n');
+        size_t line_length;
+        if (line_end == NULL) {
+            line_length = strlen(cursor);
+            cursor += line_length;
+        } else {
+            line_length = (size_t)(line_end - line_start) + 1;
+            cursor = line_end + 1;
+        }
+
+        char line[1024];
+        size_t copy_length =
+            line_length < sizeof(line) - 1 ? line_length : sizeof(line) - 1;
+        memcpy(line, line_start, copy_length);
+        line[copy_length] = '\0';
+
+        char section[64];
+        if (cube_config_line_section(line, section)) {
+            if (in_defaults && !inserted) {
+                if (cube_append_updated_defaults_block(&output, update) < 0) {
+                    cubicle_json_builder_cleanup(&output);
+                    return -1;
+                }
+                inserted = 1;
+            }
+            in_defaults = strcmp(section, "defaults") == 0;
+            saw_defaults = saw_defaults || in_defaults;
+        }
+
+        if (in_defaults &&
+            (cube_config_line_key_matches(line, "launch") ||
+             cube_config_line_key_matches(line, "mode") ||
+             cube_config_line_key_matches(line, "kill_cleanup"))) {
+            if (cube_defaults_update_wants_key(update, "launch") &&
+                cube_config_line_key_matches(line, "launch")) {
+                continue;
+            }
+            if (cube_defaults_update_wants_key(update, "mode") &&
+                cube_config_line_key_matches(line, "mode")) {
+                continue;
+            }
+            if (cube_defaults_update_wants_key(update, "kill_cleanup") &&
+                cube_config_line_key_matches(line, "kill_cleanup")) {
+                continue;
+            }
+        }
+
+        if (cubicle_json_builder_reserve(&output, line_length) < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+        memcpy(output.data + output.length, line_start, line_length);
+        output.length += line_length;
+        output.data[output.length] = '\0';
+    }
+
+    if (in_defaults && !inserted) {
+        if (cube_append_updated_defaults_block(&output, update) < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+        inserted = 1;
+    }
+    if (!saw_defaults &&
+        (update->set_launch || update->set_mode || update->set_kill_cleanup)) {
+        if (output.length > 0 && output.data[output.length - 1] != '\n' &&
+            cubicle_json_builder_append(&output, "\n") < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+        if (output.length > 0 &&
+            cubicle_json_builder_append(&output, "\n") < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+        if (cubicle_json_builder_append(&output, "[defaults]\n") < 0 ||
+            cube_append_updated_defaults(&output, update) < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+    }
+    if (output.data == NULL &&
+        cubicle_json_builder_append(&output, "") < 0) {
+        cubicle_json_builder_cleanup(&output);
+        return -1;
+    }
+
+    *rendered_out = output.data;
+    output.data = NULL;
+    cubicle_json_builder_cleanup(&output);
+    return 0;
+}
+
+static int cube_atomic_write_user_config(const char *path, const char *content)
+{
+    char parent[CUBICLE_PATH_MAX];
+    if (cube_parent_directory(path, parent) < 0 ||
+        cubicle_mkdir_p(parent) < 0) {
+        return -1;
+    }
+
+    char temporary[CUBICLE_PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
+                          (long)getpid());
+    if (length < 0 || (size_t)length >= sizeof(temporary)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+    int result = cubicle_write_all(fd, content, strlen(content)) == 0 &&
+                         fsync(fd) == 0
+                     ? 0
+                     : -1;
+    int saved_errno = errno;
+    if (close(fd) < 0 && result == 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result == 0 && chmod(temporary, 0600) < 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result == 0 && rename(temporary, path) < 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+
+    if (result == 0) {
+        int dir_fd = open(parent, O_RDONLY | O_DIRECTORY);
+        if (dir_fd >= 0) {
+            (void)fsync(dir_fd);
+            (void)close(dir_fd);
+        }
+        return 0;
+    }
+
+    (void)unlink(temporary);
+    errno = saved_errno;
+    return -1;
+}
+
+static int cube_update_user_defaults(const cube_defaults_update_t *update,
+                                     char *error,
+                                     size_t error_size)
+{
+    char path[CUBICLE_PATH_MAX];
+    if (cube_user_config_path(path) < 0) {
+        snprintf(error, error_size, "failed to resolve user config path: %s",
+                 strerror(errno));
+        return -1;
+    }
+
+    char *existing = cube_read_optional_file(path);
+    if (existing == NULL) {
+        snprintf(error, error_size, "failed to read %s: %s", path,
+                 strerror(errno));
+        return -1;
+    }
+
+    char *rendered = NULL;
+    if (cube_render_updated_config(existing, update, &rendered) < 0) {
+        free(existing);
+        snprintf(error, error_size, "failed to update defaults");
+        return -1;
+    }
+    free(existing);
+
+    if (cube_atomic_write_user_config(path, rendered) < 0) {
+        snprintf(error, error_size, "failed to write %s: %s", path,
+                 strerror(errno));
+        free(rendered);
+        return -1;
+    }
+    free(rendered);
+
+    cubicle_config_t reloaded;
+    char validation_error[512] = "";
+    if (cubicle_config_load(&reloaded, validation_error,
+                            sizeof(validation_error)) < 0) {
+        snprintf(error, error_size, "updated config did not validate: %s",
+                 validation_error);
+        return -1;
+    }
+    return 0;
+}
+
+static int cube_defaults_valid_key(const char *key, const char **canonical)
+{
+    if (strcmp(key, "launch") == 0 || strcmp(key, "mode") == 0) {
+        *canonical = key;
+        return 1;
+    }
+    if (strcmp(key, "kill-cleanup") == 0 ||
+        strcmp(key, "kill_cleanup") == 0) {
+        *canonical = "kill_cleanup";
+        return 1;
+    }
+    return 0;
+}
+
+static int command_defaults_show(const cube_options_t *options,
+                                 const cubicle_config_t *config)
+{
+    const char *launch = cubicle_launch_default_name(config->default_launch);
+    const char *mode = cube_mode_name(config->default_mode);
+    const char *kill_cleanup =
+        config->default_kill_cleanup ? "true" : "false";
+    if (options->json) {
+        printf("{\"launch\":\"%s\",\"mode\":\"%s\",\"kill_cleanup\":%s}\n",
+               launch, mode, kill_cleanup);
+    } else {
+        printf("launch=%s\n", launch);
+        printf("mode=%s\n", mode);
+        printf("kill_cleanup=%s\n", kill_cleanup);
+    }
+    return 0;
+}
+
+static int command_defaults(const cube_options_t *options,
+                            const cubicle_config_t *config,
+                            int argc,
+                            char **argv,
+                            int command_index)
+{
+    if (command_index + 1 >= argc ||
+        strcmp(argv[command_index + 1], "show") == 0) {
+        if (command_index + 2 < argc) {
+            fprintf(stderr, "cube: defaults show does not take arguments\n");
+            return 2;
+        }
+        return command_defaults_show(options, config);
+    }
+
+    const char *subcommand = argv[command_index + 1];
+    cube_defaults_update_t update = {0};
+    const char *changed_key = NULL;
+    const char *changed_value = NULL;
+
+    if (strcmp(subcommand, "set") == 0) {
+        if (command_index + 4 != argc) {
+            fprintf(stderr, "cube: defaults set requires a key and value\n");
+            return 2;
+        }
+        const char *canonical = NULL;
+        if (!cube_defaults_valid_key(argv[command_index + 2], &canonical)) {
+            fprintf(stderr, "cube: unknown defaults key '%s'\n",
+                    argv[command_index + 2]);
+            return 2;
+        }
+        const char *value = argv[command_index + 3];
+        if (strcmp(canonical, "launch") == 0) {
+            if (strcmp(value, "foreground") != 0 &&
+                strcmp(value, "background") != 0) {
+                fprintf(stderr,
+                        "cube: defaults.launch must be foreground or background\n");
+                return 2;
+            }
+            update.set_launch = 1;
+            update.launch = value;
+        } else if (strcmp(canonical, "mode") == 0) {
+            if (strcmp(value, "stream") != 0 && strcmp(value, "tty") != 0 &&
+                strcmp(value, "term") != 0) {
+                fprintf(stderr,
+                        "cube: defaults.mode must be stream, tty, or term\n");
+                return 2;
+            }
+            update.set_mode = 1;
+            update.mode = value;
+        } else {
+            if (strcmp(value, "true") != 0 && strcmp(value, "false") != 0) {
+                fprintf(stderr,
+                        "cube: defaults.kill_cleanup must be true or false\n");
+                return 2;
+            }
+            update.set_kill_cleanup = 1;
+            update.kill_cleanup = value;
+        }
+        changed_key = canonical;
+        changed_value = value;
+    } else if (strcmp(subcommand, "reset") == 0) {
+        if (command_index + 2 == argc) {
+            update.reset_launch = 1;
+            update.reset_mode = 1;
+            update.reset_kill_cleanup = 1;
+            changed_key = "all";
+        } else if (command_index + 3 == argc) {
+            const char *canonical = NULL;
+            if (!cube_defaults_valid_key(argv[command_index + 2],
+                                         &canonical)) {
+                fprintf(stderr, "cube: unknown defaults key '%s'\n",
+                        argv[command_index + 2]);
+                return 2;
+            }
+            update.reset_launch = strcmp(canonical, "launch") == 0;
+            update.reset_mode = strcmp(canonical, "mode") == 0;
+            update.reset_kill_cleanup =
+                strcmp(canonical, "kill_cleanup") == 0;
+            changed_key = canonical;
+        } else {
+            fprintf(stderr, "cube: defaults reset takes at most one key\n");
+            return 2;
+        }
+    } else {
+        fprintf(stderr, "cube: unknown defaults command '%s'\n", subcommand);
+        return 2;
+    }
+
+    char error[512] = "";
+    if (cube_update_user_defaults(&update, error, sizeof(error)) < 0) {
+        fprintf(stderr, "cube: %s\n", error);
+        return 2;
+    }
+
+    if (options->json) {
+        if (changed_value != NULL) {
+            printf("{\"updated\":\"%s\",\"value\":\"%s\"}\n", changed_key,
+                   changed_value);
+        } else {
+            printf("{\"reset\":\"%s\"}\n", changed_key);
+        }
+    } else if (changed_value != NULL) {
+        printf("defaults.%s=%s\n", changed_key, changed_value);
+    } else {
+        printf("defaults.%s reset\n", changed_key);
+    }
+    return 0;
 }
 
 static void configure_library_debug(const cubicle_config_t *config,
@@ -3528,6 +4098,14 @@ int main(int argc, char **argv)
     if (strcmp(command, "config") == 0) {
         return command_config(&config, config_error, argc, argv,
                               command_index);
+    }
+
+    if (strcmp(command, "defaults") == 0) {
+        if (!config_loaded) {
+            fprintf(stderr, "cube: configuration error: %s\n", config_error);
+            return 2;
+        }
+        return command_defaults(&options, &config, argc, argv, command_index);
     }
 
     if (!config_loaded) {

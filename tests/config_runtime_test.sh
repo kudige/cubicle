@@ -175,3 +175,50 @@ grep -q "^manager.log_dir=$user_state_home/cubicle/log$" "$tmpdir/user-config-pa
 kill "$manager_pid" 2>/dev/null || true
 wait "$manager_pid" 2>/dev/null || true
 manager_pid=
+
+defaults_config_home="$tmpdir/defaults-config"
+defaults_config="$defaults_config_home/cubicle/config.cfg"
+mkdir -p "$defaults_config_home/cubicle"
+cat >"$defaults_config" <<EOF
+[client]
+manager=unix:///tmp/preserved-manager.sock
+EOF
+
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults set launch background >"$tmpdir/defaults-set-launch.out"
+grep -q '^defaults.launch=background$' "$tmpdir/defaults-set-launch.out"
+grep -q '^manager=unix:///tmp/preserved-manager.sock$' "$defaults_config"
+grep -q '^\[defaults\]$' "$defaults_config"
+grep -q '^launch=background$' "$defaults_config"
+
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults set mode stream >"$tmpdir/defaults-set-mode.out"
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults set kill-cleanup true >"$tmpdir/defaults-set-cleanup.out"
+
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults show >"$tmpdir/defaults-show.out"
+grep -q '^launch=background$' "$tmpdir/defaults-show.out"
+grep -q '^mode=stream$' "$tmpdir/defaults-show.out"
+grep -q '^kill_cleanup=true$' "$tmpdir/defaults-show.out"
+
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults reset mode >"$tmpdir/defaults-reset-mode.out"
+grep -q '^defaults.mode reset$' "$tmpdir/defaults-reset-mode.out"
+if grep -q '^mode=' "$defaults_config"; then
+    echo "defaults reset mode should remove the user mode override" >&2
+    exit 1
+fi
+grep -q '^launch=background$' "$defaults_config"
+grep -q '^kill_cleanup=true$' "$defaults_config"
+
+XDG_CONFIG_HOME="$defaults_config_home" XDG_STATE_HOME="$xdg_state" \
+    "$CUBE" defaults reset >"$tmpdir/defaults-reset-all.out"
+grep -q '^defaults.all reset$' "$tmpdir/defaults-reset-all.out"
+if grep -q '^launch=' "$defaults_config" ||
+    grep -q '^mode=' "$defaults_config" ||
+    grep -q '^kill_cleanup=' "$defaults_config"; then
+    echo "defaults reset should remove all user default overrides" >&2
+    exit 1
+fi
+grep -q '^manager=unix:///tmp/preserved-manager.sock$' "$defaults_config"

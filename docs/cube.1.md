@@ -481,8 +481,26 @@ cube config validate
 cube config paths
 cube config show
 cube config effective
+cube defaults
+cube defaults show
+cube defaults set launch foreground|background
+cube defaults set mode stream|tty|term
+cube defaults set kill-cleanup true|false
+cube defaults reset [launch|mode|kill-cleanup]
 CUBICLE_CONFIG=/tmp/cubicle.cfg cube config validate
 ```
+
+`cube defaults` and `cube defaults show` print the effective launch defaults:
+
+```sh
+cube defaults
+launch=foreground
+mode=tty
+kill_cleanup=false
+```
+
+`cube defaults set` and `cube defaults reset` edit the per-user
+`config.cfg` atomically while preserving unrelated settings.
 
 ## Output And Exit Status
 

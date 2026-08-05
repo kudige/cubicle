@@ -541,8 +541,11 @@ cube defaults set launch background
 cube defaults set mode stream
 cube defaults set mode tty
 cube defaults set mode term
+cube defaults set kill-cleanup true
+cube defaults set kill-cleanup false
 cube defaults reset launch
 cube defaults reset mode
+cube defaults reset kill-cleanup
 cube defaults reset
 ```
 
@@ -550,14 +553,15 @@ Example:
 
 ```console
 $ cube defaults
-Launch: foreground
-Mode:   tty
+launch=foreground
+mode=tty
+kill_cleanup=false
 
 $ cube defaults set launch background
-Default launch behaviour set to background
+defaults.launch=background
 
 $ cube defaults set mode stream
-Default process mode set to stream
+defaults.mode=stream
 ```
 
 Then:
@@ -577,23 +581,23 @@ cube run --fg --tty make watch
 
 A simple initial representation:
 
-```toml
+```ini
 [defaults]
-launch = "foreground"
-mode = "tty"
-kill_cleanup = false
+launch=foreground
+mode=tty
+kill_cleanup=false
 ```
 
 Suggested user configuration location:
 
 ```text
-$XDG_CONFIG_HOME/cubicle/config.toml
+$XDG_CONFIG_HOME/cubicle/config.cfg
 ```
 
 or, when `XDG_CONFIG_HOME` is unset:
 
 ```text
-~/.config/cubicle/config.toml
+~/.config/cubicle/config.cfg
 ```
 
 Writes should be atomic and preserve unrelated future settings.

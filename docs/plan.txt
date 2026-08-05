@@ -468,11 +468,13 @@
   - added lexical config.cfg.d/*.cfg drop-in loading for system, user, and explicit override configs
   - config effective now lists distinct effective sources, including drop-in files
   - added config unit/runtime coverage for drop-in precedence and source reporting
+  - implemented cube defaults show/set/reset for launch, mode, and kill-cleanup
+  - cube defaults edits the user config atomically and preserves unrelated settings
+  - added CLI help/runtime coverage for defaults updates
 
 ## Next
 
 1. Continue configuration implementation from docs/configuration-spec.md.
-   - Add atomic cube defaults show/set/reset.
    - Harden ownership and permission policy for configured directories.
 
 2. Continue implementing the cube CLI specification.
