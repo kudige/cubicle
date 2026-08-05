@@ -31,6 +31,7 @@ int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
     char *control_socket = strtok(NULL, "\t\n");
     char *cwd = strtok(NULL, "\t\n");
     char *saved = strtok(NULL, "\t\n");
+    char *argv_json = strtok(NULL, "\t\n");
     if (process_id == NULL || workspace_id == NULL || friendly_name == NULL ||
         mode == NULL || state == NULL || controller_id == NULL ||
         control_socket == NULL) {
@@ -46,6 +47,8 @@ int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
     snprintf(record->control_socket, sizeof(record->control_socket), "%s", control_socket);
     snprintf(record->cwd, sizeof(record->cwd), "%s", cwd == NULL ? "" : cwd);
     record->saved = saved != NULL && strcmp(saved, "1") == 0 ? 1 : 0;
+    snprintf(record->argv_json, sizeof(record->argv_json), "%s",
+             argv_json == NULL ? "" : argv_json);
     return 0;
 }
 
