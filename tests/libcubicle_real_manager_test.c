@@ -490,6 +490,23 @@ int main(void)
            CUBICLE_OK);
     assert(strcmp(process.id, process_id) == 0);
 
+    const char *other_argv[] = {"sh", "-c", "exit 0"};
+    cubicle_process_start_options_t other_start_options;
+    memset(&other_start_options, 0, sizeof(other_start_options));
+    other_start_options.workspace_id = workspace.id;
+    other_start_options.friendly_name = "other-workspace";
+    other_start_options.mode = CUBICLE_PROCESS_STREAM;
+    other_start_options.stdin_policy = CUBICLE_STDIN_EOF;
+    other_start_options.argv = other_argv;
+    other_start_options.argc = sizeof(other_argv) / sizeof(other_argv[0]);
+    cubicle_process_info_t other_started;
+    memset(&other_started, 0, sizeof(other_started));
+    // Endpoint test for process.start in a second workspace
+    assert(cubicle_process_start(client, &other_start_options,
+                                 &other_started) == CUBICLE_OK);
+    assert(strcmp(other_started.workspace_id, workspace.id) == 0);
+    assert(reconcile_with_retry(client) == CUBICLE_OK);
+
     cubicle_process_info_t *processes = NULL;
     size_t process_count = 0;
     cubicle_process_filter_t filter;
@@ -499,6 +516,21 @@ int main(void)
     assert(cubicle_process_list(client, &filter, &processes,
                                 &process_count, NULL) == CUBICLE_OK);
     assert(process_count == 2);
+    for (size_t i = 0; i < process_count; ++i) {
+        assert(strcmp(processes[i].workspace_id, workspace_id) == 0);
+    }
+    cubicle_process_list_free(processes);
+
+    processes = NULL;
+    process_count = 0;
+    memset(&filter, 0, sizeof(filter));
+    filter.workspace_id = workspace.id;
+    // Endpoint test for process.list scoped to a second workspace
+    assert(cubicle_process_list(client, &filter, &processes,
+                                &process_count, NULL) == CUBICLE_OK);
+    assert(process_count == 1);
+    assert(strcmp(processes[0].workspace_id, workspace.id) == 0);
+    assert(strcmp(processes[0].friendly_name, "other-workspace") == 0);
     cubicle_process_list_free(processes);
 
     cubicle_output_chunk_t chunk;

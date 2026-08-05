@@ -2430,6 +2430,13 @@ static bool process_is_attachable(const cubicle_process_info_t *process)
             process->mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
 }
 
+static bool process_belongs_to_workspace(const cubicle_process_info_t *process,
+                                         const char *workspace_id)
+{
+    return workspace_id != NULL && workspace_id[0] != '\0' &&
+           strcmp(process->workspace_id, workspace_id) == 0;
+}
+
 static int resolve_workspace(desk_session_t *session,
                              const char *workspace_arg,
                              char *error,
@@ -2751,7 +2758,8 @@ static int desk_switch_workspace(desk_session_t *session,
     cubicle_process_info_t attachable[32];
     size_t attachable_count = 0;
     for (size_t i = 0; i < process_count; ++i) {
-        if (!process_is_attachable(&processes[i])) {
+        if (!process_belongs_to_workspace(&processes[i], workspace->id) ||
+            !process_is_attachable(&processes[i])) {
             continue;
         }
         if (attachable_count >= sizeof(attachable) / sizeof(attachable[0])) {
@@ -2866,7 +2874,8 @@ static int desk_load_process_menu(desk_session_t *session,
     }
 
     for (size_t i = 0; i < process_count; ++i) {
-        if (process_is_attachable(&processes[i])) {
+        if (process_belongs_to_workspace(&processes[i], workspace->id) &&
+            process_is_attachable(&processes[i])) {
             (void)desk_menu_add_process(session, &processes[i]);
         }
     }
@@ -2905,7 +2914,8 @@ static int desk_open_root_menu(desk_session_t *session)
     }
 
     for (size_t i = 0; i < process_count; ++i) {
-        if (process_is_attachable(&processes[i])) {
+        if (process_belongs_to_workspace(&processes[i], session->workspace.id) &&
+            process_is_attachable(&processes[i])) {
             (void)desk_menu_add_process(session, &processes[i]);
         }
     }
@@ -3616,7 +3626,8 @@ static int handle_open_menu_input(desk_session_t *session,
                 if (item != NULL &&
                     item->kind == DESK_MENU_ITEM_WORKSPACE &&
                     !item->disabled) {
-                    (void)desk_load_process_menu(session, &item->workspace);
+                    cubicle_workspace_info_t workspace = item->workspace;
+                    (void)desk_load_process_menu(session, &workspace);
                 }
             } else if (arrow == 'D') {
                 if (session->open_menu.level == DESK_MENU_WORKSPACE) {

@@ -292,6 +292,7 @@ def run_desk_open_other_workspace_process(desk, cube, env):
     captured = bytearray()
     opened_menu = False
     selected_workspace = False
+    checked_workspace_scope = False
     selected_process = False
     sent_payload = False
     saw_payload = False
@@ -317,10 +318,28 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 opened_menu = True
 
             if opened_menu and not selected_workspace and b"workspace: DeskOther" in captured:
-                os.write(master_fd, b"\x1b[C")
+                os.write(master_fd, b"j\x1b[C")
                 selected_workspace = True
+                captured.clear()
 
-            if selected_workspace and not selected_process and b"desk-other" in captured:
+            if (
+                selected_workspace
+                and not checked_workspace_scope
+                and b"Workspace: DeskOther" in captured
+                and b"desk-other" in captured
+            ):
+                submenu = captured[captured.rfind(b"Workspace: DeskOther"):]
+                leaked_current_item = re.search(
+                    rb"\x1b\[[0-9]+;8H(?:\x1b\[[0-9;]*m)*desk-safe",
+                    submenu,
+                )
+                if leaked_current_item is not None:
+                    raise AssertionError(
+                        f"workspace submenu included current workspace cube: {captured!r}"
+                    )
+                checked_workspace_scope = True
+
+            if checked_workspace_scope and not selected_process and b"desk-other" in captured:
                 os.write(master_fd, b"\r")
                 selected_process = True
 
@@ -350,6 +369,8 @@ def run_desk_open_other_workspace_process(desk, cube, env):
             raise AssertionError(f"desk did not render initial pane: {captured!r}")
         if not selected_workspace:
             raise AssertionError(f"desk open menu did not show other workspace: {captured!r}")
+        if not checked_workspace_scope:
+            raise AssertionError(f"desk did not render scoped workspace submenu: {captured!r}")
         if not selected_process:
             raise AssertionError(f"desk open menu did not show other process: {captured!r}")
         if not saw_payload:
