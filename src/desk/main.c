@@ -56,6 +56,7 @@
 #define DESK_CURSOR_BLINK_MS 500
 #define DESK_PANE_TITLE_ROWS 1
 #define DESK_MENU_MAX_ITEMS 128
+#define DESK_NEW_COMMAND_MAX 512
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -169,12 +170,14 @@ typedef struct desk_pane {
 typedef enum desk_menu_level {
     DESK_MENU_CLOSED = 0,
     DESK_MENU_ROOT,
-    DESK_MENU_WORKSPACE
+    DESK_MENU_WORKSPACE,
+    DESK_MENU_NEW_COMMAND
 } desk_menu_level_t;
 
 typedef enum desk_menu_item_kind {
     DESK_MENU_ITEM_PROCESS = 1,
-    DESK_MENU_ITEM_WORKSPACE
+    DESK_MENU_ITEM_WORKSPACE,
+    DESK_MENU_ITEM_NEW
 } desk_menu_item_kind_t;
 
 typedef struct desk_menu_item {
@@ -190,6 +193,8 @@ typedef struct desk_open_menu {
     desk_menu_item_t items[DESK_MENU_MAX_ITEMS];
     size_t item_count;
     size_t selected;
+    char command[DESK_NEW_COMMAND_MAX];
+    size_t command_length;
     char status[256];
 } desk_open_menu_t;
 
@@ -2862,6 +2867,18 @@ static int desk_menu_add_workspace(desk_session_t *session,
     return 0;
 }
 
+static int desk_menu_add_new_process(desk_session_t *session)
+{
+    if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
+        return 0;
+    }
+    desk_menu_item_t *item =
+        &session->open_menu.items[session->open_menu.item_count++];
+    memset(item, 0, sizeof(*item));
+    item->kind = DESK_MENU_ITEM_NEW;
+    return 0;
+}
+
 static int desk_load_process_menu(desk_session_t *session,
                                   const cubicle_workspace_info_t *workspace)
 {
@@ -2955,6 +2972,7 @@ static int desk_open_root_menu(desk_session_t *session)
         }
     }
     cubicle_workspace_list_free(workspaces);
+    (void)desk_menu_add_new_process(session);
     if (menu->item_count == 0) {
         snprintf(menu->status, sizeof(menu->status),
                  "no cubes or other workspaces available");
@@ -3195,9 +3213,12 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
     size_t used = 0;
 
     char line[512];
-    const char *heading = menu->level == DESK_MENU_ROOT
-                              ? "Open cube"
-                              : "Open cube from workspace";
+    const char *heading = "Open cube";
+    if (menu->level == DESK_MENU_WORKSPACE) {
+        heading = "Open cube from workspace";
+    } else if (menu->level == DESK_MENU_NEW_COMMAND) {
+        heading = "New cube";
+    }
 
     for (int row = 0; row < box_rows; ++row) {
         int terminal_row = box_row + row + 1;
@@ -3236,6 +3257,22 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
     }
 
     int row = box_row + 6;
+    if (menu->level == DESK_MENU_NEW_COMMAND) {
+        int prompt_cols = inner_cols > 9 ? inner_cols - 9 : 0;
+        const char *command = menu->command;
+        size_t command_length = strlen(command);
+        if ((int)command_length > prompt_cols) {
+            command += command_length - (size_t)prompt_cols;
+        }
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236mCommand: %.*s\x1b[0m",
+                          row, box_col + 3, prompt_cols, command);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+        goto render_menu_status;
+    }
+
     if (menu->item_count == 0) {
         length = snprintf(line, sizeof(line),
                           "\x1b[%d;%dH\x1b[48;5;236m%.*s\x1b[0m",
@@ -3253,7 +3290,19 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                                 ? "\x1b[1;7;48;5;236m"
                                 : (item->disabled ? "\x1b[2;48;5;236m"
                                                   : "\x1b[48;5;236m");
-        if (item->kind == DESK_MENU_ITEM_PROCESS) {
+        if (item->kind == DESK_MENU_ITEM_NEW) {
+            int name_cols = inner_cols > 2 ? inner_cols - 2 : 0;
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols,
+                              marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 5, style, name_cols, "New");
+        } else if (item->kind == DESK_MENU_ITEM_PROCESS) {
             const char *name = item->process.friendly_name[0] != '\0'
                                    ? item->process.friendly_name
                                    : item->process.id;
@@ -3290,6 +3339,7 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         ++row;
     }
 
+render_menu_status:
     if (menu->status[0] != '\0' && row + 1 < box_row + box_rows) {
         length = snprintf(line, sizeof(line),
                           "\x1b[%d;%dH\x1b[2;48;5;236m%.*s\x1b[0m",
@@ -3406,6 +3456,181 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
                                          const cubicle_workspace_info_t *workspace,
                                          bool *menu_closed);
 
+static void desk_begin_new_process_prompt(desk_session_t *session)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    memset(menu->command, 0, sizeof(menu->command));
+    menu->command_length = 0;
+    menu->item_count = 0;
+    menu->selected = 0;
+    menu->level = DESK_MENU_NEW_COMMAND;
+    menu->workspace = session->workspace;
+    menu->status[0] = '\0';
+}
+
+static int desk_generated_process_name(char *buffer,
+                                       size_t buffer_size,
+                                       const char *command)
+{
+    while (*command != '\0' && isspace((unsigned char)*command)) {
+        ++command;
+    }
+    if (*command == '\'' || *command == '"') {
+        ++command;
+    }
+    const char *end = command;
+    while (*end != '\0' && !isspace((unsigned char)*end) &&
+           *end != '\'' && *end != '"') {
+        ++end;
+    }
+    while (end > command && (*(end - 1) == '/' || *(end - 1) == '\\')) {
+        --end;
+    }
+    const char *base = end;
+    while (base > command && *(base - 1) != '/' && *(base - 1) != '\\') {
+        --base;
+    }
+    if (base >= end) {
+        return -1;
+    }
+
+    size_t used = 0;
+    for (const char *cursor = base; cursor < end; ++cursor) {
+        char c = *cursor;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-') {
+            if (used + 1 >= buffer_size) {
+                break;
+            }
+            buffer[used++] = c;
+        } else if (used > 0 && buffer[used - 1] != '-') {
+            if (used + 1 >= buffer_size) {
+                break;
+            }
+            buffer[used++] = '-';
+        }
+    }
+    while (used > 0 && buffer[used - 1] == '-') {
+        --used;
+    }
+    if (used == 0) {
+        return -1;
+    }
+    buffer[used] = '\0';
+    return 0;
+}
+
+static int desk_generated_process_name_with_suffix(char *buffer,
+                                                   size_t buffer_size,
+                                                   const char *base_name,
+                                                   int suffix)
+{
+    int length = suffix == 0
+                     ? snprintf(buffer, buffer_size, "%s", base_name)
+                     : snprintf(buffer, buffer_size, "%s-%d", base_name,
+                                suffix);
+    return length < 0 || (size_t)length >= buffer_size ? -1 : 0;
+}
+
+static int desk_start_new_process_from_prompt(desk_session_t *session,
+                                              const desk_terminal_t *terminal,
+                                              bool *menu_closed)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    const char *command = menu->command;
+    while (*command != '\0' && isspace((unsigned char)*command)) {
+        ++command;
+    }
+    if (*command == '\0') {
+        snprintf(menu->status, sizeof(menu->status), "command is empty");
+        return 0;
+    }
+
+    int active = session->layout.active_pane_id;
+    unsigned int rows = 0;
+    unsigned int cols = 0;
+    if (active <= 0 ||
+        pane_content_size(terminal, &session->layout, active, &rows, &cols) <
+            0) {
+        snprintf(menu->status, sizeof(menu->status), "no active pane");
+        return 0;
+    }
+
+    char base_name[CUBICLE_NAME_MAX];
+    if (desk_generated_process_name(base_name, sizeof(base_name), command) <
+        0) {
+        snprintf(base_name, sizeof(base_name), "cube");
+    }
+
+    const char *argv[] = {"sh", "-lc", command};
+    cubicle_process_info_t process;
+    cubicle_error_code_t code = CUBICLE_ERR_INTERNAL;
+    for (int suffix = 0; suffix < 1000; ++suffix) {
+        char candidate_name[CUBICLE_NAME_MAX];
+        if (desk_generated_process_name_with_suffix(
+                candidate_name, sizeof(candidate_name), base_name, suffix) <
+            0) {
+            continue;
+        }
+
+        cubicle_process_start_options_t options;
+        memset(&options, 0, sizeof(options));
+        options.workspace_id = session->workspace.id;
+        options.friendly_name = candidate_name;
+        options.mode = CUBICLE_PROCESS_TTY;
+        options.stdin_policy = CUBICLE_STDIN_OPEN;
+        options.cwd = session->workspace.directory[0] != '\0'
+                          ? session->workspace.directory
+                          : NULL;
+        options.argv = argv;
+        options.argc = sizeof(argv) / sizeof(argv[0]);
+        options.tty_rows = rows;
+        options.tty_cols = cols;
+
+        memset(&process, 0, sizeof(process));
+        code = cubicle_process_start(session->manager, &options, &process);
+        if (code == CUBICLE_OK) {
+            break;
+        }
+        if (code != CUBICLE_ERR_ALREADY_EXISTS) {
+            const cubicle_error_t *last =
+                cubicle_client_last_error(session->manager);
+            snprintf(menu->status, sizeof(menu->status), "%s",
+                     last != NULL && last->message[0] != '\0'
+                         ? last->message
+                         : "process start failed");
+            return 0;
+        }
+    }
+    if (code != CUBICLE_OK) {
+        snprintf(menu->status, sizeof(menu->status),
+                 "failed to allocate a unique process name");
+        return 0;
+    }
+
+    char error[256];
+    if (desk_replace_active_pane_process(session, terminal, &process, error,
+                                         sizeof(error)) < 0) {
+        cubicle_process_terminate_options_t terminate_options;
+        memset(&terminate_options, 0, sizeof(terminate_options));
+        terminate_options.grace_period_ms = 0;
+        terminate_options.force_after_grace = true;
+        (void)cubicle_process_terminate(session->manager, process.id,
+                                        &terminate_options);
+        snprintf(menu->status, sizeof(menu->status), "%s", error);
+        return 0;
+    }
+
+    desk_close_open_menu(session);
+    if (!session->mouse_titles) {
+        desk_menu_disable_mouse();
+    }
+    if (menu_closed != NULL) {
+        *menu_closed = true;
+    }
+    return 0;
+}
+
 static int desk_open_menu_select(desk_session_t *session,
                                  const desk_terminal_t *terminal,
                                  bool *menu_closed)
@@ -3420,6 +3645,10 @@ static int desk_open_menu_select(desk_session_t *session,
         return desk_open_workspace_from_menu(session, terminal,
                                              &selected.workspace,
                                              menu_closed);
+    }
+    if (selected.kind == DESK_MENU_ITEM_NEW) {
+        desk_begin_new_process_prompt(session);
+        return 0;
     }
 
     char error[256];
@@ -3605,6 +3834,45 @@ static int handle_open_menu_input(desk_session_t *session,
                                   bool *menu_closed)
 {
     for (size_t i = 0; i < length; ++i) {
+        if (session->open_menu.level == DESK_MENU_NEW_COMMAND) {
+            unsigned char ch = input[i];
+            if (ch == '\r' || ch == '\n') {
+                if (desk_start_new_process_from_prompt(session, terminal,
+                                                       menu_closed) < 0) {
+                    return -1;
+                }
+                continue;
+            }
+            if (ch == 0x1b) {
+                (void)desk_open_root_menu(session);
+                continue;
+            }
+            if (ch == 0x08 || ch == 0x7f) {
+                if (session->open_menu.command_length > 0) {
+                    session->open_menu.command
+                        [--session->open_menu.command_length] = '\0';
+                }
+                session->open_menu.status[0] = '\0';
+                continue;
+            }
+            if (ch == 0x15) {
+                memset(session->open_menu.command, 0,
+                       sizeof(session->open_menu.command));
+                session->open_menu.command_length = 0;
+                session->open_menu.status[0] = '\0';
+                continue;
+            }
+            if (ch >= 0x20 && ch < 0x7f &&
+                session->open_menu.command_length + 1 <
+                    sizeof(session->open_menu.command)) {
+                session->open_menu.command
+                    [session->open_menu.command_length++] = (char)ch;
+                session->open_menu.command
+                    [session->open_menu.command_length] = '\0';
+                session->open_menu.status[0] = '\0';
+            }
+            continue;
+        }
         if (is_incomplete_sgr_mouse(input, length, i)) {
             desk_save_pending_input(session, input, length, i);
             break;
