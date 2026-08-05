@@ -648,6 +648,40 @@ def main():
                 "--bg",
                 "--tty",
                 "--name",
+                "dsr-single-response",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "time.sleep(0.5)\n"
+                    "sys.stdout.write('\\x1b[6n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+1\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,256)\n"
+                    "sys.stdout.write('DSR_COUNT:%d\\n' % data.count(b'R'))\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(3)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_until_command_output(
+            desk, cube, env, "dsr-single-response", "DSR_COUNT:1"
+        )
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
                 "terminal-noise",
                 sys.executable,
                 "-c",

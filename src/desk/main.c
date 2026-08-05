@@ -1882,6 +1882,35 @@ static int refresh_pane_from_model(desk_pane_t *pane)
     return 0;
 }
 
+static int reload_pane_snapshot(desk_pane_t *pane)
+{
+    cubicle_terminal_snapshot_t snapshot;
+    cubicle_error_code_t code = cubicle_attachment_snapshot(pane->attachment,
+                                                            &snapshot);
+    if (code != CUBICLE_OK) {
+        return -1;
+    }
+
+    if (pane->terminal_model == NULL) {
+        if (cubicle_terminal_model_create(snapshot.rows, snapshot.cols,
+                                          &pane->terminal_model) < 0) {
+            cubicle_terminal_snapshot_cleanup(&snapshot);
+            return -1;
+        }
+    }
+    if (cubicle_terminal_model_load_snapshot(pane->terminal_model,
+                                             &snapshot) < 0 ||
+        grid_resize(&pane->grid, (int)snapshot.rows,
+                    (int)snapshot.cols) < 0) {
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        return -1;
+    }
+    grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    return 0;
+}
+
 static void grid_clear_row(desk_grid_t *grid, int row)
 {
     if (row < 0 || row >= grid->rows) {
@@ -2921,24 +2950,10 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         return code;
     }
 
-    cubicle_terminal_snapshot_t snapshot;
-    code = cubicle_attachment_snapshot(pane->attachment, &snapshot);
-    if (code != CUBICLE_OK) {
-        (void)error;
-        (void)error_size;
-        return CUBICLE_OK;
-    }
-    if (cubicle_terminal_model_create(snapshot.rows, snapshot.cols,
-                                      &pane->terminal_model) < 0 ||
-        cubicle_terminal_model_load_snapshot(pane->terminal_model,
-                                             &snapshot) < 0) {
-        cubicle_terminal_snapshot_cleanup(&snapshot);
+    if (reload_pane_snapshot(pane) < 0) {
         snprintf(error, error_size, "terminal model initialization failed");
         return CUBICLE_ERR_INTERNAL;
     }
-    grid_apply_snapshot(&pane->grid, &snapshot);
-    cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
-    cubicle_terminal_snapshot_cleanup(&snapshot);
     return CUBICLE_OK;
 }
 
@@ -2991,7 +3006,14 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         if (pane->terminal_model != NULL &&
             cubicle_terminal_model_feed(pane->terminal_model, output,
                                         (size_t)nread) < 0) {
-            return -1;
+            if (reload_pane_snapshot(pane) < 0) {
+                return -1;
+            }
+            pane_changed = true;
+            if (output_seen != NULL) {
+                *output_seen = true;
+            }
+            break;
         }
         pane_changed = true;
         if (output_seen != NULL) {
