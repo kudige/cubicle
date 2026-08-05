@@ -450,6 +450,15 @@
   - desk filters local terminal response sequences before forwarding input to cubes
   - added controller.debug=input to log escaped and hex input bytes for debugging
   - package/build dependencies now include libvterm
+- Hardened desk snapshot/live handoff:
+  - created fix/desk-libvterm-streams and fast-forwarded the fixes into main
+  - controller uses libvterm-generated terminal responses for supported queries while retaining controller-only fallbacks for unsupported startup queries
+  - desk no longer generates terminal query responses from its local render cache
+  - libcubicle exposes attachment read offsets for diagnostics and regression tests
+  - attachment snapshots explicitly advance the TTY read offset to the snapshot offset
+  - desk regression coverage verifies large settled backlogs are not replayed after snapshot restore
+  - attachment reads cap raw controller read requests so decoded JSON string expansion cannot overflow the caller buffer
+  - attachment regression coverage verifies expanded JSON string data no longer causes invalid read data
 
 ## Next
 
