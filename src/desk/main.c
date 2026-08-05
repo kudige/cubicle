@@ -54,6 +54,8 @@
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
 #define DESK_CURSOR_BLINK_MS 500
+#define DESK_PANE_TITLE_ROWS 1
+#define DESK_MENU_MAX_ITEMS 128
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
@@ -164,6 +166,42 @@ typedef struct desk_pane {
     unsigned int cols;
 } desk_pane_t;
 
+typedef enum desk_menu_level {
+    DESK_MENU_CLOSED = 0,
+    DESK_MENU_ROOT,
+    DESK_MENU_WORKSPACE
+} desk_menu_level_t;
+
+typedef enum desk_menu_item_kind {
+    DESK_MENU_ITEM_PROCESS = 1,
+    DESK_MENU_ITEM_WORKSPACE
+} desk_menu_item_kind_t;
+
+typedef struct desk_menu_item {
+    desk_menu_item_kind_t kind;
+    bool disabled;
+    cubicle_workspace_info_t workspace;
+    cubicle_process_info_t process;
+} desk_menu_item_t;
+
+typedef struct desk_open_menu {
+    desk_menu_level_t level;
+    cubicle_workspace_info_t workspace;
+    desk_menu_item_t items[DESK_MENU_MAX_ITEMS];
+    size_t item_count;
+    size_t selected;
+    char status[256];
+} desk_open_menu_t;
+
+typedef struct desk_menu_geometry {
+    int row;
+    int col;
+    int rows;
+    int cols;
+    int item_row;
+    int visible_items;
+} desk_menu_geometry_t;
+
 typedef struct desk_session {
     cubicle_client_t *manager;
     cubicle_workspace_info_t workspace;
@@ -181,6 +219,7 @@ typedef struct desk_session {
     int cursor_pane_id;
     int cursor_row;
     int cursor_col;
+    desk_open_menu_t open_menu;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -616,6 +655,24 @@ static bool pane_layout_rect_for_pane(const desk_pane_layout_t *panes,
 {
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
     return pane_layout_rect_for_node(panes, panes->root, pane_id, root, out);
+}
+
+static bool pane_content_rect_for_pane(const desk_pane_layout_t *panes,
+                                       const desk_terminal_t *terminal,
+                                       int pane_id,
+                                       desk_rect_t *out)
+{
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect)) {
+        return false;
+    }
+    if (rect.rows <= DESK_PANE_TITLE_ROWS) {
+        return false;
+    }
+    rect.row += DESK_PANE_TITLE_ROWS;
+    rect.rows -= DESK_PANE_TITLE_ROWS;
+    *out = rect;
+    return true;
 }
 
 static bool pane_layout_rect_for_tree_node(const desk_pane_layout_t *panes,
@@ -2026,8 +2083,8 @@ static bool desk_cursor_target(const desk_terminal_t *terminal,
     desk_pane_t *pane = desk_pane_for_id(session, active);
     desk_rect_t rect;
     if (pane == NULL || !pane->grid.cursor_visible ||
-        !pane_layout_rect_for_pane(&session->layout, terminal, active,
-                                   &rect)) {
+        !pane_content_rect_for_pane(&session->layout, terminal, active,
+                                    &rect)) {
         return false;
     }
     if (pane->grid.cursor_row < 0 || pane->grid.cursor_col < 0 ||
@@ -2052,7 +2109,7 @@ static void desk_render_grid_cell(const desk_terminal_t *terminal,
                                   bool reverse)
 {
     desk_rect_t rect;
-    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
+    if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect) ||
         row < 0 || col < 0 || row >= grid->rows || col >= grid->cols ||
         row >= rect.rows || col >= rect.cols) {
         return;
@@ -2133,6 +2190,58 @@ static void desk_cursor_tick(const desk_terminal_t *terminal,
     desk_cursor_render(terminal, session);
 }
 
+static void desk_render_pane_title(const desk_terminal_t *terminal,
+                                   const desk_pane_layout_t *panes,
+                                   int pane_id,
+                                   const char *title)
+{
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect) ||
+        rect.rows <= 0 || rect.cols <= 0) {
+        return;
+    }
+
+    const char *label = title != NULL && title[0] != '\0' ? title : "untitled";
+    bool active = pane_id == panes->active_pane_id;
+    char frame[2048];
+    size_t used = 0;
+    char cursor[32];
+    int cursor_length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
+                                 rect.row + 1, rect.col + 1);
+    if (cursor_length <= 0 || (size_t)cursor_length >= sizeof(cursor)) {
+        return;
+    }
+
+    append_text(frame, sizeof(frame), &used, cursor);
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    for (int col = 0; col < rect.cols; ++col) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+
+    append_text(frame, sizeof(frame), &used, cursor);
+    append_text(frame, sizeof(frame), &used,
+                active ? "\x1b[1;7m" : "\x1b[2m");
+    if (rect.cols > 2) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+    int remaining = rect.cols > 2 ? rect.cols - 2 : rect.cols;
+    for (const char *cursor_label = label;
+         *cursor_label != '\0' && remaining > 0;
+         ++cursor_label, --remaining) {
+        unsigned char byte = (unsigned char)*cursor_label;
+        char out[2] = {
+            (char)(byte >= 0x20 && byte != 0x7f ? byte : '?'),
+            '\0',
+        };
+        append_text(frame, sizeof(frame), &used, out);
+    }
+    if (rect.cols > 2) {
+        append_text(frame, sizeof(frame), &used, " ");
+    }
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+}
+
 static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const desk_pane_layout_t *panes,
                                        int pane_id,
@@ -2140,12 +2249,11 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const char *title,
                                        bool dirty_only)
 {
-    (void)title;
     char frame[65536];
     size_t used = 0;
     desk_rect_t rect;
 
-    if (!pane_layout_rect_for_pane(panes, terminal, pane_id, &rect)) {
+    if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect)) {
         return;
     }
 
@@ -2190,6 +2298,7 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+    desk_render_pane_title(terminal, panes, pane_id, title);
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -2597,6 +2706,354 @@ static int attach_all_panes(desk_session_t *session,
     return 0;
 }
 
+static void desk_disconnect_all_panes(desk_session_t *session)
+{
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        cubicle_attachment_disconnect(session->panes[i].attachment);
+        session->panes[i].attachment = NULL;
+        cubicle_terminal_model_destroy(session->panes[i].terminal_model);
+        session->panes[i].terminal_model = NULL;
+        grid_cleanup(&session->panes[i].grid);
+    }
+    memset(session->panes, 0, sizeof(session->panes));
+    session->pane_count = 0;
+}
+
+static int desk_switch_workspace(desk_session_t *session,
+                                 const desk_terminal_t *terminal,
+                                 const cubicle_workspace_info_t *workspace,
+                                 char *error,
+                                 size_t error_size)
+{
+    cubicle_process_filter_t filter;
+    memset(&filter, 0, sizeof(filter));
+    filter.workspace_id = workspace->id;
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    cubicle_page_info_t page;
+    memset(&page, 0, sizeof(page));
+    cubicle_error_code_t code = cubicle_process_list(
+        session->manager, &filter, &processes, &process_count, &page);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        snprintf(error, error_size, "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "process list failed");
+        return 2;
+    }
+
+    cubicle_process_info_t attachable[32];
+    size_t attachable_count = 0;
+    for (size_t i = 0; i < process_count; ++i) {
+        if (!process_is_attachable(&processes[i])) {
+            continue;
+        }
+        if (attachable_count >= sizeof(attachable) / sizeof(attachable[0])) {
+            break;
+        }
+        attachable[attachable_count++] = processes[i];
+    }
+    cubicle_process_list_free(processes);
+    if (attachable_count == 0) {
+        snprintf(error, error_size,
+                 "workspace '%s' has no running TTY cubes", workspace->name);
+        return 1;
+    }
+
+    desk_disconnect_all_panes(session);
+    session->workspace = *workspace;
+    for (size_t i = 0; i < attachable_count; ++i) {
+        session->panes[i].process = attachable[i];
+    }
+    session->pane_count = attachable_count;
+    session->zoomed = false;
+    session->cursor_drawn = false;
+    session->terminal_size_dirty = true;
+    int result = load_or_create_layout(session, error, error_size);
+    bool changed = false;
+    if (result == 0 &&
+        resize_all_panes(session, terminal, &changed) < 0) {
+        snprintf(error, error_size, "terminal too small for desk");
+        result = 2;
+    }
+    if (result == 0) {
+        result = attach_all_panes(session, error, error_size);
+    }
+    return result;
+}
+
+static bool desk_process_is_open(const desk_session_t *session,
+                                 const char *process_id)
+{
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        if (strcmp(session->panes[i].process.id, process_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void desk_menu_select_first_enabled(desk_open_menu_t *menu)
+{
+    menu->selected = 0;
+    for (size_t i = 0; i < menu->item_count; ++i) {
+        if (!menu->items[i].disabled) {
+            menu->selected = i;
+            return;
+        }
+    }
+}
+
+static int desk_menu_add_process(desk_session_t *session,
+                                 const cubicle_process_info_t *process)
+{
+    if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
+        return 0;
+    }
+    desk_menu_item_t *item =
+        &session->open_menu.items[session->open_menu.item_count++];
+    memset(item, 0, sizeof(*item));
+    item->kind = DESK_MENU_ITEM_PROCESS;
+    item->process = *process;
+    item->disabled = desk_process_is_open(session, process->id);
+    return 0;
+}
+
+static int desk_menu_add_workspace(desk_session_t *session,
+                                   const cubicle_workspace_info_t *workspace)
+{
+    if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
+        return 0;
+    }
+    desk_menu_item_t *item =
+        &session->open_menu.items[session->open_menu.item_count++];
+    memset(item, 0, sizeof(*item));
+    item->kind = DESK_MENU_ITEM_WORKSPACE;
+    item->workspace = *workspace;
+    return 0;
+}
+
+static int desk_load_process_menu(desk_session_t *session,
+                                  const cubicle_workspace_info_t *workspace)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    memset(menu, 0, sizeof(*menu));
+    menu->level = DESK_MENU_WORKSPACE;
+    menu->workspace = *workspace;
+
+    cubicle_process_filter_t filter;
+    memset(&filter, 0, sizeof(filter));
+    filter.workspace_id = workspace->id;
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    cubicle_page_info_t page;
+    memset(&page, 0, sizeof(page));
+    cubicle_error_code_t code = cubicle_process_list(
+        session->manager, &filter, &processes, &process_count, &page);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        snprintf(menu->status, sizeof(menu->status), "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "process list failed");
+        return -1;
+    }
+
+    for (size_t i = 0; i < process_count; ++i) {
+        if (process_is_attachable(&processes[i])) {
+            (void)desk_menu_add_process(session, &processes[i]);
+        }
+    }
+    cubicle_process_list_free(processes);
+    if (menu->item_count == 0) {
+        snprintf(menu->status, sizeof(menu->status),
+                 "workspace has no running TTY cubes");
+    }
+    desk_menu_select_first_enabled(menu);
+    return 0;
+}
+
+static int desk_open_root_menu(desk_session_t *session)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    memset(menu, 0, sizeof(*menu));
+    menu->level = DESK_MENU_ROOT;
+    menu->workspace = session->workspace;
+
+    cubicle_process_filter_t filter;
+    memset(&filter, 0, sizeof(filter));
+    filter.workspace_id = session->workspace.id;
+    cubicle_process_info_t *processes = NULL;
+    size_t process_count = 0;
+    cubicle_page_info_t page;
+    memset(&page, 0, sizeof(page));
+    cubicle_error_code_t code = cubicle_process_list(
+        session->manager, &filter, &processes, &process_count, &page);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        snprintf(menu->status, sizeof(menu->status), "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "process list failed");
+        return -1;
+    }
+
+    for (size_t i = 0; i < process_count; ++i) {
+        if (process_is_attachable(&processes[i])) {
+            (void)desk_menu_add_process(session, &processes[i]);
+        }
+    }
+    cubicle_process_list_free(processes);
+
+    cubicle_workspace_info_t *workspaces = NULL;
+    size_t workspace_count = 0;
+    memset(&page, 0, sizeof(page));
+    code = cubicle_workspace_list(session->manager, NULL, &workspaces,
+                                  &workspace_count, &page);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        snprintf(menu->status, sizeof(menu->status), "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "workspace list failed");
+        return -1;
+    }
+    for (size_t i = 0; i < workspace_count; ++i) {
+        if (strcmp(workspaces[i].id, session->workspace.id) != 0) {
+            (void)desk_menu_add_workspace(session, &workspaces[i]);
+        }
+    }
+    cubicle_workspace_list_free(workspaces);
+    if (menu->item_count == 0) {
+        snprintf(menu->status, sizeof(menu->status),
+                 "no cubes or other workspaces available");
+    }
+    desk_menu_select_first_enabled(menu);
+    return 0;
+}
+
+static void desk_close_open_menu(desk_session_t *session)
+{
+    memset(&session->open_menu, 0, sizeof(session->open_menu));
+}
+
+static void desk_menu_enable_mouse(void)
+{
+    (void)cubeui_write_all(STDOUT_FILENO, "\x1b[?1000h\x1b[?1006h", 16);
+}
+
+static void desk_menu_disable_mouse(void)
+{
+    (void)cubeui_write_all(STDOUT_FILENO, "\x1b[?1006l\x1b[?1000l", 16);
+}
+
+static bool desk_title_hit_test(const desk_terminal_t *terminal,
+                                const desk_session_t *session,
+                                int row,
+                                int col,
+                                int *pane_id)
+{
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        int candidate = (int)i + 1;
+        if (candidate == session->layout.active_pane_id) {
+            continue;
+        }
+
+        desk_rect_t rect;
+        if (!pane_layout_rect_for_pane(&session->layout, terminal, candidate,
+                                       &rect) ||
+            rect.rows <= 0 || rect.cols <= 0) {
+            continue;
+        }
+        if (row != rect.row + 1) {
+            continue;
+        }
+
+        const char *label =
+            session->panes[i].process.friendly_name[0] != '\0'
+                ? session->panes[i].process.friendly_name
+                : session->panes[i].process.id;
+        int title_start = rect.col + 1;
+        int title_cols = rect.cols;
+        if (rect.cols > 2) {
+            title_cols = rect.cols - 2;
+        }
+        int label_cols = 0;
+        for (const char *cursor = label;
+             *cursor != '\0' && label_cols < title_cols;
+             ++cursor) {
+            ++label_cols;
+        }
+        int hit_start = title_start;
+        int hit_end = title_start + label_cols - 1;
+        if (rect.cols > 2) {
+            hit_end += 2;
+        }
+        if (label_cols > 0 && col >= hit_start && col <= hit_end) {
+            *pane_id = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void desk_menu_move_selection(desk_open_menu_t *menu, int delta)
+{
+    if (menu->item_count == 0) {
+        return;
+    }
+    size_t current = menu->selected < menu->item_count ? menu->selected : 0;
+    for (size_t tries = 0; tries < menu->item_count; ++tries) {
+        if (delta > 0) {
+            current = (current + 1) % menu->item_count;
+        } else {
+            current = current == 0 ? menu->item_count - 1 : current - 1;
+        }
+        if (!menu->items[current].disabled) {
+            menu->selected = current;
+            return;
+        }
+    }
+}
+
+static int desk_replace_active_pane_process(desk_session_t *session,
+                                            const desk_terminal_t *terminal,
+                                            const cubicle_process_info_t *process,
+                                            char *error,
+                                            size_t error_size)
+{
+    int active = session->layout.active_pane_id;
+    if (active <= 0 || (size_t)active > session->pane_count) {
+        snprintf(error, error_size, "no active pane");
+        return -1;
+    }
+    size_t pane_index = (size_t)active - 1;
+    desk_pane_t *pane = &session->panes[pane_index];
+    cubicle_attachment_disconnect(pane->attachment);
+    pane->attachment = NULL;
+    cubicle_terminal_model_destroy(pane->terminal_model);
+    pane->terminal_model = NULL;
+    grid_cleanup(&pane->grid);
+    memset(&pane->grid, 0, sizeof(pane->grid));
+    memset(&pane->resize, 0, sizeof(pane->resize));
+    pane->rows = 0;
+    pane->cols = 0;
+    pane->process = *process;
+    bool changed = false;
+    if (resize_pane_attachment(session, terminal, pane_index, &changed) < 0) {
+        snprintf(error, error_size, "failed to resize pane");
+        return -1;
+    }
+    cubicle_error_code_t code = attach_pane(session, pane_index, error,
+                                            error_size);
+    if (code != CUBICLE_OK) {
+        return -1;
+    }
+    desk_apply_pane_labels(session);
+    return 0;
+}
+
 static void render_all_panes(const desk_terminal_t *terminal,
                              desk_session_t *session)
 {
@@ -2609,6 +3066,175 @@ static void render_all_panes(const desk_terminal_t *terminal,
     }
     desk_cursor_reset_blink(session);
     desk_cursor_render(terminal, session);
+}
+
+static bool desk_menu_geometry(const desk_terminal_t *terminal,
+                               const desk_session_t *session,
+                               desk_menu_geometry_t *geometry)
+{
+    const desk_open_menu_t *menu = &session->open_menu;
+    desk_rect_t pane_rect;
+    if (!pane_layout_rect_for_pane(&session->layout, terminal,
+                                   session->layout.active_pane_id,
+                                   &pane_rect)) {
+        return false;
+    }
+
+    int box_cols = pane_rect.cols > 74 ? 74 : pane_rect.cols;
+    if (box_cols < 32) {
+        box_cols = pane_rect.cols;
+    }
+    int wanted_rows = 7 + (int)menu->item_count;
+    if (menu->status[0] != '\0') {
+        wanted_rows += 2;
+    }
+    int box_rows = wanted_rows;
+    if (box_rows > pane_rect.rows) {
+        box_rows = pane_rect.rows;
+    }
+    if (box_rows < 6) {
+        box_rows = pane_rect.rows < 6 ? pane_rect.rows : 6;
+    }
+    if (box_rows <= 0 || box_cols <= 0) {
+        return false;
+    }
+    geometry->row = pane_rect.row + (pane_rect.rows - box_rows) / 2;
+    geometry->col = pane_rect.col + (pane_rect.cols - box_cols) / 2;
+    geometry->rows = box_rows;
+    geometry->cols = box_cols;
+    geometry->item_row = geometry->row + 6;
+    geometry->visible_items = box_rows > 6 ? box_rows - 6 : 0;
+    return true;
+}
+
+static void desk_render_open_menu(const desk_terminal_t *terminal,
+                                  const desk_session_t *session)
+{
+    const desk_open_menu_t *menu = &session->open_menu;
+    if (menu->level == DESK_MENU_CLOSED) {
+        return;
+    }
+
+    desk_menu_geometry_t geometry;
+    if (!desk_menu_geometry(terminal, session, &geometry)) {
+        return;
+    }
+    int box_row = geometry.row;
+    int box_col = geometry.col;
+    int box_rows = geometry.rows;
+    int box_cols = geometry.cols;
+    int inner_cols = box_cols > 2 ? box_cols - 2 : box_cols;
+    int visible_items = geometry.visible_items;
+
+    char frame[262144];
+    size_t used = 0;
+
+    char line[512];
+    const char *heading = menu->level == DESK_MENU_ROOT
+                              ? "Open cube"
+                              : "Open cube from workspace";
+
+    for (int row = 0; row < box_rows; ++row) {
+        int terminal_row = box_row + row + 1;
+        int terminal_col = box_col + 1;
+        int length = snprintf(line, sizeof(line), "\x1b[%d;%dH",
+                              terminal_row, terminal_col);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+        append_text(frame, sizeof(frame), &used, "\x1b[48;5;236m");
+        for (int col = 0; col < box_cols; ++col) {
+            append_text(frame, sizeof(frame), &used, " ");
+        }
+    }
+
+    int length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236m\x1b[1m%.*s\x1b[0m",
+                          box_row + 2, box_col + 3, inner_cols, heading);
+    if (length > 0 && (size_t)length < sizeof(line)) {
+        append_text(frame, sizeof(frame), &used, line);
+    }
+    int workspace_name_cols = inner_cols > 11 ? inner_cols - 11 : 0;
+    length = snprintf(line, sizeof(line),
+                      "\x1b[%d;%dH\x1b[48;5;236mWorkspace: %.*s\x1b[0m",
+                      box_row + 3, box_col + 3, workspace_name_cols,
+                      menu->workspace.name);
+    if (length > 0 && (size_t)length < sizeof(line)) {
+        append_text(frame, sizeof(frame), &used, line);
+    }
+    length = snprintf(line, sizeof(line),
+                      "\x1b[%d;%dH\x1b[48;5;236m\x1b[2m%.*s\x1b[0m",
+                      box_row + 4, box_col + 3, inner_cols,
+                      "Enter selects. q closes. Esc goes back.");
+    if (length > 0 && (size_t)length < sizeof(line)) {
+        append_text(frame, sizeof(frame), &used, line);
+    }
+
+    int row = box_row + 6;
+    if (menu->item_count == 0) {
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236m%.*s\x1b[0m",
+                          row, box_col + 3, inner_cols,
+                          menu->status[0] != '\0' ? menu->status
+                                                   : "No entries");
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+    }
+    for (size_t i = 0; i < menu->item_count && (int)i < visible_items; ++i) {
+        const desk_menu_item_t *item = &menu->items[i];
+        const char *marker = i == menu->selected ? ">" : " ";
+        const char *style = i == menu->selected
+                                ? "\x1b[1;7;48;5;236m"
+                                : (item->disabled ? "\x1b[2;48;5;236m"
+                                                  : "\x1b[48;5;236m");
+        if (item->kind == DESK_MENU_ITEM_PROCESS) {
+            const char *name = item->process.friendly_name[0] != '\0'
+                                   ? item->process.friendly_name
+                                   : item->process.id;
+            int name_cols = inner_cols > 2 ? inner_cols - 2 : 0;
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols,
+                              marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 5, style, name_cols, name);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+        } else {
+            int name_cols = inner_cols > 13 ? inner_cols - 13 : 0;
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols, marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%sworkspace: %.*s  >\x1b[0m",
+                              row, box_col + 5, style, name_cols,
+                              item->workspace.name);
+        }
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+        ++row;
+    }
+
+    if (menu->status[0] != '\0' && row + 1 < box_row + box_rows) {
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[2;48;5;236m%.*s\x1b[0m",
+                          row + 1, box_col + 3, inner_cols, menu->status);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+    }
+    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
 }
 
 static int read_and_render_pane_output(const desk_terminal_t *terminal,
@@ -2709,6 +3335,239 @@ static int flush_active_input(desk_session_t *session,
     return write_active_pane(session, input + start, end - start);
 }
 
+static int desk_open_workspace_from_menu(desk_session_t *session,
+                                         const desk_terminal_t *terminal,
+                                         const cubicle_workspace_info_t *workspace,
+                                         bool *menu_closed);
+
+static int desk_open_menu_select(desk_session_t *session,
+                                 const desk_terminal_t *terminal,
+                                 bool *menu_closed)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    if (menu->selected >= menu->item_count ||
+        menu->items[menu->selected].disabled) {
+        return 0;
+    }
+    desk_menu_item_t selected = menu->items[menu->selected];
+    if (selected.kind == DESK_MENU_ITEM_WORKSPACE) {
+        return desk_open_workspace_from_menu(session, terminal,
+                                             &selected.workspace,
+                                             menu_closed);
+    }
+
+    char error[256];
+    if (desk_replace_active_pane_process(session, terminal, &selected.process,
+                                         error, sizeof(error)) < 0) {
+        snprintf(menu->status, sizeof(menu->status), "%s", error);
+        return 0;
+    }
+    desk_close_open_menu(session);
+    if (menu_closed != NULL) {
+        *menu_closed = true;
+    }
+    return 0;
+}
+
+static bool parse_menu_arrow(const unsigned char *input,
+                             size_t length,
+                             size_t offset,
+                             char *arrow,
+                             size_t *consumed)
+{
+    if (offset + 2 >= length || input[offset] != 0x1b ||
+        input[offset + 1] != '[') {
+        return false;
+    }
+    size_t final = offset + 2;
+    while (final < length &&
+           !(input[final] == 'A' || input[final] == 'B' ||
+             input[final] == 'C' || input[final] == 'D')) {
+        ++final;
+    }
+    if (final >= length) {
+        return false;
+    }
+    *arrow = (char)input[final];
+    *consumed = final - offset + 1;
+    return true;
+}
+
+static bool parse_sgr_mouse(const unsigned char *input,
+                            size_t length,
+                            size_t offset,
+                            int *button,
+                            int *row,
+                            int *col,
+                            bool *press,
+                            size_t *consumed)
+{
+    if (offset + 6 >= length || input[offset] != 0x1b ||
+        input[offset + 1] != '[' || input[offset + 2] != '<') {
+        return false;
+    }
+    size_t cursor = offset + 3;
+    int values[3] = {0, 0, 0};
+    for (int index = 0; index < 3; ++index) {
+        if (cursor >= length || input[cursor] < '0' ||
+            input[cursor] > '9') {
+            return false;
+        }
+        while (cursor < length && input[cursor] >= '0' &&
+               input[cursor] <= '9') {
+            values[index] = values[index] * 10 + (input[cursor] - '0');
+            ++cursor;
+        }
+        if (index < 2) {
+            if (cursor >= length || input[cursor] != ';') {
+                return false;
+            }
+            ++cursor;
+        }
+    }
+    if (cursor >= length || (input[cursor] != 'M' && input[cursor] != 'm')) {
+        return false;
+    }
+    *button = values[0];
+    *col = values[1];
+    *row = values[2];
+    *press = input[cursor] == 'M';
+    *consumed = cursor - offset + 1;
+    return true;
+}
+
+static desk_menu_item_t *desk_menu_item_at_position(
+    desk_session_t *session,
+    const desk_terminal_t *terminal,
+    int row,
+    int col)
+{
+    desk_menu_geometry_t geometry;
+    if (!desk_menu_geometry(terminal, session, &geometry) ||
+        row < geometry.item_row ||
+        row >= geometry.item_row + geometry.visible_items ||
+        col < geometry.col + 1 ||
+        col > geometry.col + geometry.cols) {
+        return NULL;
+    }
+    size_t index = (size_t)(row - geometry.item_row);
+    if (index >= session->open_menu.item_count) {
+        return NULL;
+    }
+    session->open_menu.selected = index;
+    return &session->open_menu.items[index];
+}
+
+static int desk_open_workspace_from_menu(desk_session_t *session,
+                                         const desk_terminal_t *terminal,
+                                         const cubicle_workspace_info_t *workspace,
+                                         bool *menu_closed)
+{
+    char error[256];
+    if (desk_switch_workspace(session, terminal, workspace, error,
+                              sizeof(error)) != 0) {
+        snprintf(session->open_menu.status, sizeof(session->open_menu.status),
+                 "%s", error);
+        return 0;
+    }
+    desk_close_open_menu(session);
+    desk_menu_disable_mouse();
+    if (menu_closed != NULL) {
+        *menu_closed = true;
+    }
+    return 0;
+}
+
+static int handle_open_menu_input(desk_session_t *session,
+                                  const desk_terminal_t *terminal,
+                                  const unsigned char *input,
+                                  size_t length,
+                                  bool *menu_closed)
+{
+    for (size_t i = 0; i < length; ++i) {
+        size_t consumed = 0;
+        int button = 0;
+        int mouse_row = 0;
+        int mouse_col = 0;
+        bool mouse_press = false;
+        if (parse_sgr_mouse(input, length, i, &button, &mouse_row,
+                            &mouse_col, &mouse_press, &consumed)) {
+            if (mouse_press && button == 0) {
+                desk_menu_item_t *item = desk_menu_item_at_position(
+                    session, terminal, mouse_row, mouse_col);
+                if (item != NULL && !item->disabled) {
+                    if (item->kind == DESK_MENU_ITEM_WORKSPACE) {
+                        (void)desk_open_workspace_from_menu(
+                            session, terminal, &item->workspace, menu_closed);
+                    } else {
+                        (void)desk_open_menu_select(session, terminal,
+                                                   menu_closed);
+                    }
+                }
+            }
+            i += consumed - 1;
+            continue;
+        }
+        char arrow = '\0';
+        if (parse_menu_arrow(input, length, i, &arrow, &consumed)) {
+            if (arrow == 'A') {
+                desk_menu_move_selection(&session->open_menu, -1);
+            } else if (arrow == 'B') {
+                desk_menu_move_selection(&session->open_menu, 1);
+            } else if (arrow == 'C') {
+                desk_menu_item_t *item =
+                    session->open_menu.selected < session->open_menu.item_count
+                        ? &session->open_menu.items[session->open_menu.selected]
+                        : NULL;
+                if (item != NULL &&
+                    item->kind == DESK_MENU_ITEM_WORKSPACE &&
+                    !item->disabled) {
+                    (void)desk_load_process_menu(session, &item->workspace);
+                }
+            } else if (arrow == 'D') {
+                if (session->open_menu.level == DESK_MENU_WORKSPACE) {
+                    (void)desk_open_root_menu(session);
+                }
+            }
+            i += consumed - 1;
+            continue;
+        }
+        if (input[i] == 'j') {
+            desk_menu_move_selection(&session->open_menu, 1);
+            continue;
+        }
+        if (input[i] == 'k') {
+            desk_menu_move_selection(&session->open_menu, -1);
+            continue;
+        }
+        if (input[i] == '\r' || input[i] == '\n') {
+            if (desk_open_menu_select(session, terminal, menu_closed) < 0) {
+                return -1;
+            }
+            continue;
+        }
+        if (input[i] == 'q') {
+            desk_close_open_menu(session);
+            if (menu_closed != NULL) {
+                *menu_closed = true;
+            }
+            continue;
+        }
+        if (input[i] == 0x1b) {
+            if (session->open_menu.level == DESK_MENU_WORKSPACE) {
+                (void)desk_open_root_menu(session);
+            } else {
+                desk_close_open_menu(session);
+                if (menu_closed != NULL) {
+                    *menu_closed = true;
+                }
+            }
+            continue;
+        }
+    }
+    return 0;
+}
+
 static bool handle_prefix_command(desk_session_t *session,
                                   desk_terminal_t *terminal,
                                   unsigned char key,
@@ -2736,6 +3595,12 @@ static bool handle_prefix_command(desk_session_t *session,
     case 's':
         session->layout.resize_mode = !session->layout.resize_mode;
         *layout_changed = true;
+        return true;
+    case 'o':
+        (void)desk_open_root_menu(session);
+        desk_menu_enable_mouse();
+        desk_cursor_erase(terminal, session);
+        desk_render_open_menu(terminal, session);
         return true;
     case 'q':
         *quit_requested = true;
@@ -2825,6 +3690,31 @@ static int handle_input(desk_session_t *session,
     size_t start = 0;
     for (size_t i = 0; i < length; ++i) {
         size_t consumed = 0;
+        int button = 0;
+        int mouse_row = 0;
+        int mouse_col = 0;
+        bool mouse_press = false;
+        if (parse_sgr_mouse(input, length, i, &button, &mouse_row,
+                            &mouse_col, &mouse_press, &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            desk_debug_log("event=mouse_normal button=%d row=%d col=%d press=%d",
+                           button, mouse_row, mouse_col, (int)mouse_press);
+            if (mouse_press && button == 0) {
+                int pane_id = 0;
+                if (desk_title_hit_test(terminal, session, mouse_row,
+                                        mouse_col, &pane_id)) {
+                    desk_debug_log("event=mouse_title_select pane=%d", pane_id);
+                    session->layout.active_pane_id = pane_id;
+                    session->layout.zoom = DESK_ZOOM_NONE;
+                    *layout_changed = true;
+                }
+            }
+            i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
         if (is_terminal_response_sequence(input, length, i, &consumed)) {
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
@@ -2955,10 +3845,8 @@ static int desk_run_workspace(const char *workspace_arg,
         desk_session_cleanup(&session);
         return result;
     }
-    cubicle_client_disconnect(session.manager);
-    session.manager = NULL;
-
     render_all_panes(&terminal, &session);
+    desk_menu_enable_mouse();
     desk_debug_log("event=loop_start panes=%zu", session.pane_count);
     while (!g_stop_requested) {
         bool layout_changed = false;
@@ -2974,21 +3862,30 @@ static int desk_run_workspace(const char *workspace_arg,
                 desk_debug_log("event=resize_flush_failed errno=%d", errno);
                 break;
             }
+            if (session.open_menu.level != DESK_MENU_CLOSED) {
+                render_all_panes(&terminal, &session);
+                desk_render_open_menu(&terminal, &session);
+                layout_changed = false;
+            }
         }
 
-        for (size_t i = 0; i < session.pane_count; ++i) {
-            if (read_and_render_pane_output(&terminal, &session, i,
-                                            &output_seen) < 0) {
-                result = 2;
-                desk_debug_log("event=loop_read_failed pane=%zu", i + 1);
-                break;
+        if (session.open_menu.level == DESK_MENU_CLOSED) {
+            for (size_t i = 0; i < session.pane_count; ++i) {
+                if (read_and_render_pane_output(&terminal, &session, i,
+                                                &output_seen) < 0) {
+                    result = 2;
+                    desk_debug_log("event=loop_read_failed pane=%zu", i + 1);
+                    break;
+                }
             }
         }
         if (result != 0) {
             break;
         }
         (void)output_seen;
-        desk_cursor_tick(&terminal, &session);
+        if (session.open_menu.level == DESK_MENU_CLOSED) {
+            desk_cursor_tick(&terminal, &session);
+        }
 
         fd_set read_set;
         FD_ZERO(&read_set);
@@ -3027,16 +3924,33 @@ static int desk_run_workspace(const char *workspace_arg,
                                    errno);
                     break;
                 }
-                if (handle_input(&session, &terminal, input,
-                                 (size_t)input_length, &layout_changed,
-                                 &quit_requested) < 0) {
+                bool menu_closed = false;
+                if (session.open_menu.level != DESK_MENU_CLOSED) {
+                    if (handle_open_menu_input(&session, &terminal, input,
+                                               (size_t)input_length,
+                                               &menu_closed) < 0) {
+                        result = 2;
+                        desk_debug_log("event=handle_menu_input_failed errno=%d",
+                                       errno);
+                        break;
+                    }
+                } else if (handle_input(&session, &terminal, input,
+                                        (size_t)input_length, &layout_changed,
+                                        &quit_requested) < 0) {
                     result = 2;
                     desk_debug_log("event=handle_input_failed errno=%d",
                                    errno);
                     break;
                 }
-                desk_cursor_reset_blink(&session);
-                desk_cursor_render(&terminal, &session);
+                if (session.open_menu.level != DESK_MENU_CLOSED) {
+                    render_all_panes(&terminal, &session);
+                    desk_render_open_menu(&terminal, &session);
+                } else if (menu_closed) {
+                    render_all_panes(&terminal, &session);
+                } else {
+                    desk_cursor_reset_blink(&session);
+                    desk_cursor_render(&terminal, &session);
+                }
             }
         }
 
@@ -3053,6 +3967,7 @@ static int desk_run_workspace(const char *workspace_arg,
         }
     }
 
+    desk_menu_disable_mouse();
     cubeui_terminal_leave_alt_raw(&terminal);
     desk_debug_log("event=run_end result=%d stop_requested=%d",
                    result, (int)g_stop_requested);
