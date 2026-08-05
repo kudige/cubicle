@@ -2,6 +2,7 @@
 
 #include "cubicle/config.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <libeconf.h>
 #include <pwd.h>
@@ -655,6 +656,158 @@ static int apply_econf_file(cubicle_config_t *config,
     return 0;
 }
 
+static int has_cfg_suffix(const char *name)
+{
+    size_t length = name == NULL ? 0 : strlen(name);
+    return length > 4 && strcmp(name + length - 4, ".cfg") == 0;
+}
+
+static int compare_names(const void *left, const void *right)
+{
+    const char *const *left_name = left;
+    const char *const *right_name = right;
+    return strcmp(*left_name, *right_name);
+}
+
+static void free_names(char **names, size_t count)
+{
+    if (names == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        free(names[i]);
+    }
+    free(names);
+}
+
+static int apply_config_path(cubicle_config_t *config,
+                             const char *path,
+                             cubicle_config_source_kind_t source_kind,
+                             int required,
+                             int *loaded_out,
+                             char *error,
+                             size_t error_size)
+{
+    if (loaded_out != NULL) {
+        *loaded_out = 0;
+    }
+
+    econf_file *file = NULL;
+    econf_err result = econf_readFile(&file, path, "=", "#");
+    if (result == ECONF_NOFILE && !required) {
+        return 0;
+    }
+    if (result != ECONF_SUCCESS) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s: %s", path,
+                     econf_errString(result));
+        }
+        return -1;
+    }
+
+    if (apply_econf_file(config, file, source_kind, path, error,
+                         error_size) < 0) {
+        econf_free(file);
+        return -1;
+    }
+    econf_free(file);
+    snprintf(config->source, sizeof(config->source), "%s", path);
+    if (loaded_out != NULL) {
+        *loaded_out = 1;
+    }
+    return 0;
+}
+
+static int load_dropin_dir(cubicle_config_t *config,
+                           const char *directory,
+                           cubicle_config_source_kind_t source_kind,
+                           char *error,
+                           size_t error_size)
+{
+    DIR *dir = opendir(directory);
+    if (dir == NULL) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s: %s", directory,
+                     strerror(errno));
+        }
+        return -1;
+    }
+
+    char **names = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.' || !has_cfg_suffix(entry->d_name)) {
+            continue;
+        }
+        if (count == capacity) {
+            size_t next_capacity = capacity == 0 ? 8 : capacity * 2;
+            char **next = realloc(names, next_capacity * sizeof(*next));
+            if (next == NULL) {
+                closedir(dir);
+                free_names(names, count);
+                return -1;
+            }
+            names = next;
+            capacity = next_capacity;
+        }
+        names[count] = strdup(entry->d_name);
+        if (names[count] == NULL) {
+            closedir(dir);
+            free_names(names, count);
+            return -1;
+        }
+        ++count;
+    }
+    closedir(dir);
+
+    qsort(names, count, sizeof(*names), compare_names);
+    for (size_t i = 0; i < count; ++i) {
+        char path[CUBICLE_PATH_MAX];
+        int length = snprintf(path, sizeof(path), "%s/%s", directory,
+                              names[i]);
+        if (length < 0 || (size_t)length >= sizeof(path)) {
+            free_names(names, count);
+            set_error(error, error_size, "config drop-in path is too long");
+            return -1;
+        }
+        if (apply_config_path(config, path, source_kind, 1, NULL, error,
+                              error_size) < 0) {
+            free_names(names, count);
+            return -1;
+        }
+    }
+
+    free_names(names, count);
+    return 0;
+}
+
+static int apply_config_path_with_dropins(
+    cubicle_config_t *config,
+    const char *path,
+    cubicle_config_source_kind_t source_kind,
+    int required,
+    char *error,
+    size_t error_size)
+{
+    if (apply_config_path(config, path, source_kind, required, NULL, error,
+                          error_size) < 0) {
+        return -1;
+    }
+
+    char directory[CUBICLE_PATH_MAX];
+    int length = snprintf(directory, sizeof(directory), "%s.d", path);
+    if (length < 0 || (size_t)length >= sizeof(directory)) {
+        set_error(error, error_size, "config drop-in directory is too long");
+        return -1;
+    }
+    return load_dropin_dir(config, directory, source_kind, error, error_size);
+}
+
 int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
 {
     const char prefix[] = "unix://";
@@ -767,68 +920,35 @@ int cubicle_config_load(cubicle_config_t *config, char *error, size_t error_size
     cubicle_config_defaults(config);
 
     const char *override_path = getenv("CUBICLE_CONFIG");
-    econf_err result;
     if (override_path != NULL && override_path[0] != '\0') {
-        econf_file *file = NULL;
-        result = econf_readFile(&file, override_path, "=", "#");
-        if (result != ECONF_SUCCESS) {
-            if (error != NULL && error_size > 0) {
-                snprintf(error, error_size, "%s: %s", override_path,
-                         econf_errString(result));
-            }
+        if (apply_config_path_with_dropins(config, override_path,
+                                           CUBICLE_CONFIG_SOURCE_OVERRIDE, 1,
+                                           error, error_size) < 0) {
             return -1;
         }
-        snprintf(config->source, sizeof(config->source), "%s", override_path);
-        if (apply_econf_file(config, file, CUBICLE_CONFIG_SOURCE_OVERRIDE,
-                             override_path, error, error_size) < 0) {
-            econf_free(file);
-            return -1;
-        }
-        econf_free(file);
         return cubicle_config_validate(config, error, error_size);
     }
 
-    econf_file *system_file = NULL;
-    result = econf_readConfig(&system_file, "cubicle", "/usr/lib", "config",
-                              "cfg", "=", "#");
-    if (result != ECONF_NOFILE && result != ECONF_SUCCESS) {
-        if (error != NULL && error_size > 0) {
-            snprintf(error, error_size, "system config: %s",
-                     econf_errString(result));
-        }
-        return -1;
-    }
-    if (result == ECONF_SUCCESS) {
-        snprintf(config->source, sizeof(config->source),
-                 "system configuration");
-        if (apply_econf_file(config, system_file, CUBICLE_CONFIG_SOURCE_SYSTEM,
-                             "system configuration", error,
-                             error_size) < 0) {
-            econf_free(system_file);
+    const char *system_paths[] = {
+        "/usr/lib/cubicle/config.cfg",
+        "/etc/cubicle/config.cfg",
+        "/run/cubicle/config.cfg",
+    };
+    for (size_t i = 0; i < sizeof(system_paths) / sizeof(system_paths[0]);
+         ++i) {
+        if (apply_config_path_with_dropins(config, system_paths[i],
+                                           CUBICLE_CONFIG_SOURCE_SYSTEM, 0,
+                                           error, error_size) < 0) {
             return -1;
         }
-        econf_free(system_file);
     }
 
     char path[CUBICLE_PATH_MAX];
     if (user_config_path(path, sizeof(path)) == 0) {
-        econf_file *user_file = NULL;
-        result = econf_readFile(&user_file, path, "=", "#");
-        if (result != ECONF_NOFILE && result != ECONF_SUCCESS) {
-            if (error != NULL && error_size > 0) {
-                snprintf(error, error_size, "%s: %s", path,
-                         econf_errString(result));
-            }
+        if (apply_config_path_with_dropins(config, path,
+                                           CUBICLE_CONFIG_SOURCE_USER, 0,
+                                           error, error_size) < 0) {
             return -1;
-        }
-        if (result == ECONF_SUCCESS) {
-            if (apply_econf_file(config, user_file, CUBICLE_CONFIG_SOURCE_USER,
-                                 path, error, error_size) < 0) {
-                econf_free(user_file);
-                return -1;
-            }
-            econf_free(user_file);
-            snprintf(config->source, sizeof(config->source), "%s", path);
         }
     } else if (errno != ENOENT) {
         if (error != NULL && error_size > 0) {

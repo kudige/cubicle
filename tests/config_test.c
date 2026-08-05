@@ -110,6 +110,18 @@ static void test_override_file(void)
                "mode=stream\n"
                "kill_cleanup=true\n");
 
+    char dropin_dir[CUBICLE_PATH_MAX];
+    int length = snprintf(dropin_dir, sizeof(dropin_dir), "%s.d", path);
+    assert(length >= 0 && (size_t)length < sizeof(dropin_dir));
+    assert(mkdir(dropin_dir, 0700) == 0);
+    char dropin_path[CUBICLE_PATH_MAX];
+    length = snprintf(dropin_path, sizeof(dropin_path),
+                      "%s/90-mode.cfg", dropin_dir);
+    assert(length >= 0 && (size_t)length < sizeof(dropin_path));
+    write_file(dropin_path,
+               "[defaults]\n"
+               "mode=term\n");
+
     assert(setenv("CUBICLE_CONFIG", path, 1) == 0);
     cubicle_config_t config;
     char error[256];
@@ -127,7 +139,7 @@ static void test_override_file(void)
     assert(config.desk_debug_library == 1);
     assert(config.desk_debug_terminal == 1);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
-    assert(config.default_mode == CUBICLE_PROCESS_STREAM);
+    assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
     assert(config.default_kill_cleanup == 1);
     const cubicle_config_origin_t *origin =
         cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_STATE_DIR);
@@ -137,6 +149,7 @@ static void test_override_file(void)
     origin = cubicle_config_origin(&config, CUBICLE_CONFIG_DEFAULTS_MODE);
     assert(origin != NULL);
     assert(origin->kind == CUBICLE_CONFIG_SOURCE_OVERRIDE);
+    assert(strcmp(origin->source_path, dropin_path) == 0);
     assert(strcmp(cubicle_config_key_name(CUBICLE_CONFIG_DEFAULTS_MODE),
                   "defaults.mode") == 0);
     assert(strcmp(cubicle_config_source_kind_name(origin->kind),

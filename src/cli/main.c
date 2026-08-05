@@ -414,7 +414,25 @@ static int command_config(const cubicle_config_t *config,
 
     if (strcmp(subcommand, "effective") == 0) {
         printf("Configuration sources:\n");
-        printf("  %s\n", config->source);
+        const char *printed[CUBICLE_CONFIG_KEY_COUNT];
+        size_t printed_count = 0;
+        for (int i = 0; i < CUBICLE_CONFIG_KEY_COUNT; ++i) {
+            const cubicle_config_origin_t *origin =
+                cubicle_config_origin(config, (cubicle_config_key_t)i);
+            const char *source =
+                origin != NULL ? origin->source_path : "unknown";
+            int seen = 0;
+            for (size_t j = 0; j < printed_count; ++j) {
+                if (strcmp(printed[j], source) == 0) {
+                    seen = 1;
+                    break;
+                }
+            }
+            if (!seen && printed_count < CUBICLE_CONFIG_KEY_COUNT) {
+                printed[printed_count++] = source;
+                printf("  %s\n", source);
+            }
+        }
         printf("\n");
         printf("Effective values:\n");
         for (int i = 0; i < CUBICLE_CONFIG_KEY_COUNT; ++i) {

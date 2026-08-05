@@ -81,7 +81,8 @@ override through system configuration handled by `libeconf`, such as
 `/etc/cubicle/config.cfg`. User configuration is read from
 `$XDG_CONFIG_HOME/cubicle/config.cfg`, or `~/.config/cubicle/config.cfg` when
 `XDG_CONFIG_HOME` is unset. Setting `CUBICLE_CONFIG=/path/to/config.cfg` makes
-`cube` load that exact file.
+`cube` load that exact file. Each loaded `config.cfg` also applies lexical
+`config.cfg.d/*.cfg` drop-ins when that directory exists.
 
 Examples:
 

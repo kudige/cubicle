@@ -39,6 +39,12 @@ launch=background
 mode=term
 EOF
 
+mkdir -p "$config_file.d"
+cat >"$config_file.d/90-cube-debug.cfg" <<EOF
+[cube]
+debug=library
+EOF
+
 CUBICLE_CONFIG="$config_file" "$CUBICLE_MANAGER" daemon --foreground --event-interval-ms 50 &
 manager_pid=$!
 
@@ -80,7 +86,10 @@ grep -q '^Configuration sources:$' "$tmpdir/config-effective.out"
 grep -q "^  $config_file$" "$tmpdir/config-effective.out"
 grep -q "^  manager.state_dir .* $state_dir$" "$tmpdir/config-effective.out"
 grep -q "^      source: $config_file (override)$" "$tmpdir/config-effective.out"
-grep -q '^  cube.debug .* none$' "$tmpdir/config-effective.out"
+grep -q "^  $config_file.d/90-cube-debug.cfg$" "$tmpdir/config-effective.out"
+grep -q '^  cube.debug .* library$' "$tmpdir/config-effective.out"
+grep -q "^      source: $config_file.d/90-cube-debug.cfg (override)$" "$tmpdir/config-effective.out"
+grep -q '^  desk.debug .* none$' "$tmpdir/config-effective.out"
 grep -q '^      source: built-in defaults (built-in)$' "$tmpdir/config-effective.out"
 
 CUBICLE_CONFIG="$config_file" XDG_STATE_HOME="$xdg_state" "$CUBE" workspace "Project A" \

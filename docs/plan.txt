@@ -465,11 +465,13 @@
   - added public config origin/key/source-name helpers
   - added cube config effective to print each value and its source
   - added config unit/runtime/help coverage for origin reporting
+  - added lexical config.cfg.d/*.cfg drop-in loading for system, user, and explicit override configs
+  - config effective now lists distinct effective sources, including drop-in files
+  - added config unit/runtime coverage for drop-in precedence and source reporting
 
 ## Next
 
 1. Continue configuration implementation from docs/configuration-spec.md.
-   - Add drop-in source tracking.
    - Add atomic cube defaults show/set/reset.
    - Harden ownership and permission policy for configured directories.
 
