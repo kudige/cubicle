@@ -341,6 +341,10 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.controller_binary=%s\n", config->controller_binary);
         printf("controller.debug=%s\n",
                config->controller_debug_input ? "input" : "none");
+        printf("cube.debug=%s\n",
+               config->cube_debug_library ? "library" : "none");
+        printf("desk.debug=%s\n",
+               config->desk_debug_library ? "library" : "none");
         return 0;
     }
 
@@ -357,6 +361,10 @@ static int command_config(const cubicle_config_t *config,
         printf("manager.socket_group=%s\n", config->manager_socket_group);
         printf("controller.debug=%s\n",
                config->controller_debug_input ? "input" : "none");
+        printf("cube.debug=%s\n",
+               config->cube_debug_library ? "library" : "none");
+        printf("desk.debug=%s\n",
+               config->desk_debug_library ? "library" : "none");
         printf("client.manager=%s\n", config->client_manager_uri);
         printf("defaults.launch=%s\n",
                cubicle_launch_default_name(config->default_launch));
@@ -368,6 +376,24 @@ static int command_config(const cubicle_config_t *config,
 
     fprintf(stderr, "cube: unknown config command '%s'\n", subcommand);
     return 2;
+}
+
+static void configure_library_debug(const cubicle_config_t *config,
+                                    const char *program)
+{
+    if (config == NULL || !config->cube_debug_library) {
+        return;
+    }
+    char log_path[CUBICLE_PATH_MAX];
+    int length = snprintf(log_path, sizeof(log_path),
+                          "%s/client-library.log", config->manager_log_dir);
+    if (length < 0 || (size_t)length >= sizeof(log_path)) {
+        return;
+    }
+    (void)cubicle_mkdir_p(config->manager_log_dir);
+    (void)setenv("CUBICLE_LIBRARY_DEBUG", "library", 1);
+    (void)setenv("CUBICLE_LIBRARY_DEBUG_PROGRAM", program, 1);
+    (void)setenv("CUBICLE_LIBRARY_DEBUG_LOG", log_path, 1);
 }
 
 static int parse_u64_arg(const char *value, uint64_t *value_out)
@@ -3327,6 +3353,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "cube: configuration error: %s\n", config_error);
         return 2;
     }
+    configure_library_debug(&config, "cube");
 
     if (!command_requires_manager(command)) {
         fprintf(stderr, "cube: unknown command '%s'\n", command);

@@ -24,6 +24,8 @@ typedef struct cubicle_config {
     char manager_socket_group[256];
     char controller_binary[CUBICLE_PATH_MAX];
     int controller_debug_input;
+    int cube_debug_library;
+    int desk_debug_library;
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char client_server_identity[256];
     cubicle_launch_default_t default_launch;

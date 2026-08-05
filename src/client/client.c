@@ -603,20 +603,30 @@ cubicle_error_code_t cubicle_client_connect(const cubicle_client_options_t *opti
     client->request_timeout_ms = options->request_timeout_ms;
     client->transport = options->transport;
     client->next_request_id = 0;
+    cubicle_library_debug_log("client.connect", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
     cubicle_error_code_t result = client->transport->vtable->connect(
         client->transport, &client->endpoint, &client->last_error);
     if (result != CUBICLE_OK) {
+        cubicle_library_debug_log("client.connect.result",
+                                  client->endpoint.uri, result, 0, 0,
+                                  &client->last_error);
         free(client);
         return result;
     }
     result = authenticate_unix_session(client);
     if (result != CUBICLE_OK) {
+        cubicle_library_debug_log("client.connect.result",
+                                  client->endpoint.uri, result, 0, 0,
+                                  &client->last_error);
         if (client->transport->vtable->close != NULL) {
             client->transport->vtable->close(client->transport);
         }
         free(client);
         return result;
     }
+    cubicle_library_debug_log("client.connect.result", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
     *client_out = client;
     return CUBICLE_OK;
 }
@@ -675,6 +685,8 @@ cubicle_error_code_t cubicle_client_connect_uri(
 void cubicle_client_disconnect(cubicle_client_t *client)
 {
     if (client == NULL) return;
+    cubicle_library_debug_log("client.disconnect", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
     if (client->transport != NULL && client->transport->vtable != NULL) {
         if (client->transport->vtable->close != NULL) client->transport->vtable->close(client->transport);
         if (client->transport->vtable->destroy != NULL) client->transport->vtable->destroy(client->transport);

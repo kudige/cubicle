@@ -443,6 +443,12 @@ controller_binary=/usr/libexec/cubicle/cubicle-controller
 [controller]
 debug=none
 
+[cube]
+debug=none
+
+[desk]
+debug=none
+
 [client]
 manager=unix:///run/cubicle/manager.sock
 server_identity=
@@ -452,6 +458,9 @@ launch=foreground
 mode=tty
 kill_cleanup=false
 ```
+
+Set `cube.debug=library` or `desk.debug=library` to write libcubicle call
+traces to `manager.log_dir/client-library.log`; payload bytes are not logged.
 
 Examples:
 

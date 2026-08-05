@@ -4,6 +4,90 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+
+static int library_debug_enabled(void)
+{
+    const char *debug = getenv("CUBICLE_LIBRARY_DEBUG");
+    return debug != NULL && strcmp(debug, "library") == 0;
+}
+
+static void library_debug_timestamp(char *buffer, size_t buffer_size)
+{
+    struct timeval now;
+    if (gettimeofday(&now, NULL) < 0) {
+        snprintf(buffer, buffer_size, "unknown-time");
+        return;
+    }
+    struct tm *tm_now = localtime(&now.tv_sec);
+    if (tm_now == NULL) {
+        snprintf(buffer, buffer_size, "unknown-time");
+        return;
+    }
+    size_t used = strftime(buffer, buffer_size, "%Y-%m-%dT%H:%M:%S",
+                           tm_now);
+    if (used == 0 || used >= buffer_size) {
+        snprintf(buffer, buffer_size, "unknown-time");
+        return;
+    }
+    snprintf(buffer + used, buffer_size - used, ".%03ld",
+             (long)(now.tv_usec / 1000));
+}
+
+void cubicle_library_debug_log(const char *event,
+                               const char *method,
+                               cubicle_error_code_t code,
+                               size_t request_bytes,
+                               size_t response_bytes,
+                               const cubicle_error_t *error)
+{
+    const char *safe_event = event != NULL ? event : "event";
+    const char *safe_method = method != NULL ? method : "-";
+    if (!library_debug_enabled()) {
+        return;
+    }
+    FILE *stream = NULL;
+    const char *path = getenv("CUBICLE_LIBRARY_DEBUG_LOG");
+    if (path != NULL && path[0] != '\0') {
+        stream = fopen(path, "a");
+    }
+    if (stream == NULL) {
+        return;
+    }
+
+    char timestamp[64];
+    library_debug_timestamp(timestamp, sizeof(timestamp));
+    const char *program = getenv("CUBICLE_LIBRARY_DEBUG_PROGRAM");
+    if (program == NULL || program[0] == '\0') {
+        program = "unknown";
+    }
+    fprintf(stream,
+            "%s program=%s pid=%ld event=%s method=%s code=%s request_bytes=%zu response_bytes=%zu",
+            timestamp, program, (long)getpid(), safe_event, safe_method,
+            cubicle_error_code_name(code), request_bytes, response_bytes);
+    if (error != NULL) {
+        if (error->system_errno != 0) {
+            fprintf(stream, " errno=%d", error->system_errno);
+        }
+        if (error->message[0] != '\0') {
+            fprintf(stream, " message=\"");
+            for (const char *cursor = error->message; *cursor != '\0';
+                 ++cursor) {
+                if (*cursor == '"' || *cursor == '\\') {
+                    fputc('\\', stream);
+                }
+                if ((unsigned char)*cursor >= 0x20) {
+                    fputc(*cursor, stream);
+                }
+            }
+            fputc('"', stream);
+        }
+    }
+    fputc('\n', stream);
+    fclose(stream);
+}
 
 cubicle_error_code_t set_error(cubicle_error_t *error,
                                       cubicle_error_code_t code,
@@ -98,11 +182,17 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
 
     void *response_data = NULL;
     size_t response_length = 0;
+    size_t request_length = strlen(request);
+    cubicle_library_debug_log("rpc.request", method, CUBICLE_OK,
+                              request_length, 0, NULL);
     cubicle_error_code_t result = client->transport->vtable->request(
-        client->transport, request, strlen(request), &response_data,
+        client->transport, request, request_length, &response_data,
         &response_length, &client->last_error);
     free(request);
     if (result != CUBICLE_OK) {
+        cubicle_library_debug_log("rpc.response", method, result,
+                                  request_length, response_length,
+                                  &client->last_error);
         return result;
     }
 
@@ -112,6 +202,8 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
             client->transport->vtable->response_free(client->transport,
                                                      response_data);
         }
+        cubicle_library_debug_log("rpc.response", method, CUBICLE_ERR_INTERNAL,
+                                  request_length, response_length, NULL);
         return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM,
                                 "failed to allocate response");
     }
@@ -126,6 +218,8 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
     cubicle_rpc_response_envelope_t envelope;
     if (cubicle_rpc_decode_response(&envelope, response, request_id) < 0) {
         free(response);
+        cubicle_library_debug_log("rpc.response", method, CUBICLE_ERR_PROTOCOL,
+                                  request_length, response_length, NULL);
         return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
                                 "malformed response envelope");
     }
@@ -136,18 +230,26 @@ cubicle_error_code_t rpc_call(cubicle_client_t *client,
                                            &decoded_error) < 0) {
             cubicle_rpc_response_envelope_cleanup(&envelope);
             free(response);
+            cubicle_library_debug_log("rpc.response", method,
+                                      CUBICLE_ERR_PROTOCOL, request_length,
+                                      response_length, NULL);
             return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
                                     "malformed response error");
         }
         client->last_error = decoded_error;
         cubicle_rpc_response_envelope_cleanup(&envelope);
         free(response);
+        cubicle_library_debug_log("rpc.response", method, decoded_error.code,
+                                  request_length, response_length,
+                                  &decoded_error);
         return decoded_error.code;
     }
 
     cubicle_rpc_response_envelope_cleanup(&envelope);
     *response_out = response;
     memset(&client->last_error, 0, sizeof(client->last_error));
+    cubicle_library_debug_log("rpc.response", method, CUBICLE_OK,
+                              request_length, response_length, NULL);
     return CUBICLE_OK;
 }
 

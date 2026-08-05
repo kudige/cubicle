@@ -499,6 +499,19 @@ def main():
         os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
         os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
         os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
+        os.makedirs(os.path.join(env["XDG_CONFIG_HOME"], "cubicle"), exist_ok=True)
+        with open(
+            os.path.join(env["XDG_CONFIG_HOME"], "cubicle", "config.cfg"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                "[manager]\n"
+                f"log_dir={log_dir}\n"
+                "\n"
+                "[desk]\n"
+                "debug=library\n"
+            )
 
         manager_proc = subprocess.Popen(
             [
@@ -566,6 +579,17 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env)
+        library_log = os.path.join(log_dir, "client-library.log")
+        if not os.path.exists(library_log):
+            raise AssertionError("desk.debug=library did not create client library log")
+        with open(library_log, "r", encoding="utf-8") as handle:
+            library_events = handle.read()
+        if "program=desk " not in library_events:
+            raise AssertionError(f"desk library log missing program marker:\n{library_events}")
+        if "event=rpc.request method=workspace.get code=ok" not in library_events:
+            raise AssertionError(f"desk library log missing workspace RPC:\n{library_events}")
+        if "event=rpc.request method=controller.read code=ok" not in library_events:
+            raise AssertionError(f"desk library log missing controller read RPC:\n{library_events}")
 
         ps_output = run_checked([cube, "ps"], env)
         if "desk-safe\ttty\trunning" not in ps_output:

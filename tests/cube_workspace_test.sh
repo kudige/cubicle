@@ -19,7 +19,15 @@ socket_path="$tmpdir/manager.sock"
 xdg_state_home="$tmpdir/xdg-state"
 xdg_runtime_dir="$tmpdir/xdg-runtime"
 xdg_config_home="$tmpdir/xdg-config"
-mkdir -p "$xdg_runtime_dir"
+client_log_dir="$tmpdir/client-log"
+mkdir -p "$xdg_runtime_dir" "$xdg_config_home/cubicle"
+cat >"$xdg_config_home/cubicle/config.cfg" <<EOF
+[manager]
+log_dir=$client_log_dir
+
+[cube]
+debug=library
+EOF
 workspace_dir="$tmpdir/workspace-dir"
 mkdir -p "$workspace_dir"
 
@@ -52,6 +60,13 @@ if [ "$output" != "Workspace Project A created and selected" ]; then
     echo "unexpected workspace create output: $output" >&2
     exit 1
 fi
+if [ ! -f "$client_log_dir/client-library.log" ]; then
+    echo "cube.debug=library did not create client library log" >&2
+    exit 1
+fi
+grep -q 'program=cube ' "$client_log_dir/client-library.log"
+grep -q 'event=rpc.request method=workspace.create code=ok' "$client_log_dir/client-library.log"
+grep -q 'event=rpc.response method=workspace.create code=ok' "$client_log_dir/client-library.log"
 
 json_dir_create_output=$(cube --json workspace create --dir "$workspace_dir" "Project Dir")
 printf "%s" "$json_dir_create_output" | grep -q '"name":"Project Dir"'

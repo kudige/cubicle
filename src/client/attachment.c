@@ -63,9 +63,14 @@ static cubicle_error_code_t create_controller_client(
     client->session.protocol_major = 0;
     client->session.protocol_minor = 1;
 
+    cubicle_library_debug_log("controller.connect", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
     code = transport->vtable->connect(transport, &client->endpoint,
                                       &client->last_error);
     if (code != CUBICLE_OK) {
+        cubicle_library_debug_log("controller.connect.result",
+                                  client->endpoint.uri, code, 0, 0,
+                                  &client->last_error);
         if (error != NULL) {
             *error = client->last_error;
         }
@@ -75,6 +80,8 @@ static cubicle_error_code_t create_controller_client(
     }
 
     *client_out = client;
+    cubicle_library_debug_log("controller.connect.result",
+                              client->endpoint.uri, CUBICLE_OK, 0, 0, NULL);
     if (error != NULL) {
         memset(error, 0, sizeof(*error));
     }
@@ -382,6 +389,9 @@ void cubicle_attachment_replay(cubicle_attachment_t *attachment,
     if (attachment == NULL) {
         return;
     }
+    cubicle_library_debug_log("attachment.replay",
+                              attachment->grant.process_id, CUBICLE_OK,
+                              (size_t)replay_bytes, 0, NULL);
     attachment->stdout_offset = attachment->stdout_offset > replay_bytes
                                     ? attachment->stdout_offset - replay_bytes
                                     : 0;
@@ -411,12 +421,18 @@ ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment,
 {
     if (attachment == NULL || buffer == NULL || length == 0) {
         errno = EINVAL;
+        cubicle_library_debug_log("attachment.read", stream_name(stream),
+                                  CUBICLE_ERR_INVALID_ARGUMENT, length, 0,
+                                  NULL);
         return -1;
     }
     if ((attachment->channels & channel_for_stream(stream)) == 0) {
         (void)attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
                                    "attachment is not readable");
         errno = EINVAL;
+        cubicle_library_debug_log("attachment.read", stream_name(stream),
+                                  CUBICLE_ERR_INVALID_STATE, length, 0,
+                                  &attachment->last_error);
         return -1;
     }
 
@@ -439,6 +455,8 @@ ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment,
                                                params, &response);
     if (code != CUBICLE_OK) {
         errno = EIO;
+        cubicle_library_debug_log("attachment.read", stream_name(stream),
+                                  code, length, 0, &attachment->last_error);
         return -1;
     }
 
@@ -485,6 +503,8 @@ ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment,
     if (end_of_stream_out != NULL) {
         *end_of_stream_out = end_of_stream;
     }
+    cubicle_library_debug_log("attachment.read", stream_name(stream),
+                              CUBICLE_OK, length, data_length, NULL);
     return (ssize_t)data_length;
 }
 
@@ -492,12 +512,18 @@ ssize_t cubicle_attachment_write(cubicle_attachment_t *attachment, const void *b
 {
     if (attachment == NULL || (buffer == NULL && length > 0)) {
         errno = EINVAL;
+        cubicle_library_debug_log("attachment.write", "stdin",
+                                  CUBICLE_ERR_INVALID_ARGUMENT, length, 0,
+                                  NULL);
         return -1;
     }
     if ((attachment->channels & CUBICLE_CHANNEL_STDIN) == 0) {
         (void)attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
                                    "attachment is not writable");
         errno = EINVAL;
+        cubicle_library_debug_log("attachment.write", "stdin",
+                                  CUBICLE_ERR_INVALID_STATE, length, 0,
+                                  &attachment->last_error);
         return -1;
     }
     if (length == 0) {
@@ -524,8 +550,12 @@ ssize_t cubicle_attachment_write(cubicle_attachment_t *attachment, const void *b
     free(response);
     if (code != CUBICLE_OK) {
         errno = EIO;
+        cubicle_library_debug_log("attachment.write", "stdin", code,
+                                  chunk_length, 0, &attachment->last_error);
         return -1;
     }
+    cubicle_library_debug_log("attachment.write", "stdin", CUBICLE_OK,
+                              chunk_length, 0, NULL);
     return (ssize_t)chunk_length;
 }
 

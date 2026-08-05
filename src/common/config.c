@@ -130,6 +130,28 @@ static int parse_bool(const char *value,
     return -1;
 }
 
+static int parse_library_debug(const char *value,
+                               int *enabled,
+                               const char *name,
+                               char *error,
+                               size_t error_size)
+{
+    if (strcmp(value, "library") == 0) {
+        *enabled = 1;
+        return 0;
+    }
+    if (strcmp(value, "none") == 0 || strcmp(value, "off") == 0 ||
+        strcmp(value, "false") == 0) {
+        *enabled = 0;
+        return 0;
+    }
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size,
+                 "%s must be library, none, off, or false", name);
+    }
+    return -1;
+}
+
 static int parse_socket_mode(const char *value,
                              unsigned int *mode,
                              char *error,
@@ -267,6 +289,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
     snprintf(config->controller_binary, sizeof(config->controller_binary),
              "/usr/libexec/cubicle/cubicle-controller");
     config->controller_debug_input = 0;
+    config->cube_debug_library = 0;
+    config->desk_debug_library = 0;
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
@@ -382,6 +406,26 @@ static int apply_econf_file(cubicle_config_t *config,
                      "controller.debug must be input, none, off, or false");
             return -1;
         }
+    }
+
+    char cube_debug[64];
+    cube_debug[0] = '\0';
+    if (get_optional_string(file, "cube", "debug", cube_debug,
+                            sizeof(cube_debug), error, error_size) < 0 ||
+        (cube_debug[0] != '\0' &&
+         parse_library_debug(cube_debug, &config->cube_debug_library,
+                             "cube.debug", error, error_size) < 0)) {
+        return -1;
+    }
+
+    char desk_debug[64];
+    desk_debug[0] = '\0';
+    if (get_optional_string(file, "desk", "debug", desk_debug,
+                            sizeof(desk_debug), error, error_size) < 0 ||
+        (desk_debug[0] != '\0' &&
+         parse_library_debug(desk_debug, &config->desk_debug_library,
+                             "desk.debug", error, error_size) < 0)) {
+        return -1;
     }
 
     char value[64];

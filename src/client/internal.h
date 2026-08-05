@@ -113,5 +113,11 @@ cubicle_error_code_t simple_string_rpc(cubicle_client_t *client,
                                        const char *key,
                                        const char *value,
                                        const cubicle_request_options_t *request_options);
+void cubicle_library_debug_log(const char *event,
+                               const char *method,
+                               cubicle_error_code_t code,
+                               size_t request_bytes,
+                               size_t response_bytes,
+                               const cubicle_error_t *error);
 
 #endif

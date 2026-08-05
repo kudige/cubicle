@@ -69,6 +69,8 @@ static void test_defaults(void)
     assert(config.manager_socket_mode == 0660);
     assert(strcmp(config.manager_socket_group, "") == 0);
     assert(config.controller_debug_input == 0);
+    assert(config.cube_debug_library == 0);
+    assert(config.desk_debug_library == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY);
     assert(config.default_kill_cleanup == 0);
@@ -91,6 +93,12 @@ static void test_override_file(void)
                "[controller]\n"
                "debug=input\n"
                "\n"
+               "[cube]\n"
+               "debug=library\n"
+               "\n"
+               "[desk]\n"
+               "debug=library\n"
+               "\n"
                "[client]\n"
                "manager=unix:///tmp/cubicle-run/manager.sock\n"
                "\n"
@@ -110,6 +118,8 @@ static void test_override_file(void)
     assert(strcmp(config.manager_socket_group, "cubicle") == 0);
     assert(strcmp(config.controller_binary, "/tmp/cubicle-controller") == 0);
     assert(config.controller_debug_input == 1);
+    assert(config.cube_debug_library == 1);
+    assert(config.desk_debug_library == 1);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_STREAM);
     assert(config.default_kill_cleanup == 1);
@@ -140,6 +150,12 @@ static void test_user_config_file(void)
                "[controller]\n"
                "debug=input\n"
                "\n"
+               "[cube]\n"
+               "debug=library\n"
+               "\n"
+               "[desk]\n"
+               "debug=none\n"
+               "\n"
                "[client]\n"
                "manager=unix:///tmp/user-cubicle-run/manager.sock\n");
 
@@ -158,6 +174,8 @@ static void test_user_config_file(void)
     assert(strcmp(config.client_manager_uri,
                   "unix:///tmp/user-cubicle-run/manager.sock") == 0);
     assert(config.controller_debug_input == 1);
+    assert(config.cube_debug_library == 1);
+    assert(config.desk_debug_library == 0);
     assert(unsetenv("XDG_CONFIG_HOME") == 0);
 }
 
@@ -203,6 +221,18 @@ static void test_invalid_values(void)
                "kill_cleanup=maybe\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "defaults.kill_cleanup") != NULL);
+
+    write_file(path,
+               "[cube]\n"
+               "debug=input\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "cube.debug") != NULL);
+
+    write_file(path,
+               "[desk]\n"
+               "debug=input\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "desk.debug") != NULL);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 

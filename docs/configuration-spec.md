@@ -243,7 +243,25 @@ Keys:
   only. `input` adds input source, hex bytes, and escaped text to controller
   input events for terminal-response and keystroke debugging.
 
-### 5.4 `[client]`
+### 5.4 `[cube]` and `[desk]`
+
+```ini
+[cube]
+debug=none
+
+[desk]
+debug=none
+```
+
+Keys:
+
+- `debug`: `none`, `off`, or `false` disables client-side library debug
+  logging. `library` logs libcubicle calls made by the program to
+  `manager.log_dir/client-library.log`, including connect/disconnect events,
+  RPC method names, request/response sizes, return codes, and error messages.
+  Payload contents are not logged.
+
+### 5.5 `[client]`
 
 ```ini
 [client]
@@ -260,7 +278,7 @@ Keys:
 
 For local Unix endpoints, `server_identity` may be empty only when trust is established through an approved local trust policy.
 
-### 5.5 `[defaults]`
+### 5.6 `[defaults]`
 
 ```ini
 [defaults]
@@ -288,7 +306,7 @@ kill_cleanup=false
 
 If TTY is not available in a development build, use `stream`.
 
-### 5.5 `[retention]`
+### 5.7 `[retention]`
 
 Deferred but reserved:
 
@@ -298,7 +316,7 @@ completed_process_seconds=86400
 event_history_seconds=604800
 ```
 
-### 5.6 `[limits]`
+### 5.8 `[limits]`
 
 Deferred but reserved:
 
@@ -322,6 +340,15 @@ listen=unix:///run/cubicle/manager.sock
 controller_binary=/usr/libexec/cubicle/cubicle-controller
 log_dir=/var/log/cubicle
 
+[controller]
+debug=none
+
+[cube]
+debug=none
+
+[desk]
+debug=none
+
 [client]
 manager=unix:///run/cubicle/manager.sock
 
@@ -335,6 +362,12 @@ mode=tty
 ```ini
 [client]
 manager=unix:///run/user/1000/cubicle/manager.sock
+
+[cube]
+debug=library
+
+[desk]
+debug=library
 
 [defaults]
 launch=background
@@ -364,6 +397,9 @@ typedef struct cubicle_config {
     char manager_listen_uri[CUBICLE_ENDPOINT_URI_MAX];
     char controller_binary[PATH_MAX];
     char manager_log_dir[PATH_MAX];
+    bool controller_debug_input;
+    bool cube_debug_library;
+    bool desk_debug_library;
 
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char client_server_identity[CUBICLE_SERVER_ID_MAX];

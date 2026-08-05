@@ -1150,6 +1150,18 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
         snprintf(error, error_size, "configuration error: %s", config_error);
         return CUBICLE_ERR_INVALID_ARGUMENT;
     }
+    if (config.desk_debug_library) {
+        char log_path[CUBICLE_PATH_MAX];
+        int length = snprintf(log_path, sizeof(log_path),
+                              "%s/client-library.log",
+                              config.manager_log_dir);
+        if (length > 0 && (size_t)length < sizeof(log_path)) {
+            (void)cubicle_mkdir_p(config.manager_log_dir);
+            (void)setenv("CUBICLE_LIBRARY_DEBUG", "library", 1);
+            (void)setenv("CUBICLE_LIBRARY_DEBUG_PROGRAM", "desk", 1);
+            (void)setenv("CUBICLE_LIBRARY_DEBUG_LOG", log_path, 1);
+        }
+    }
 
     char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
     const char *manager_uri = cubeui_resolve_manager_endpoint(
