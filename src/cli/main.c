@@ -355,8 +355,14 @@ static int command_config(const cubicle_config_t *config,
                           : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
-        printf("desk.debug=%s\n",
-               config->desk_debug_library ? "library" : "none");
+        printf("desk.debug=%s%s%s\n",
+               config->desk_debug_library ? "library" : "",
+               config->desk_debug_library && config->desk_debug_terminal
+                   ? ","
+                   : "",
+               config->desk_debug_terminal
+                   ? "terminal"
+                   : (config->desk_debug_library ? "" : "none"));
         return 0;
     }
 
@@ -387,8 +393,14 @@ static int command_config(const cubicle_config_t *config,
                           : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
-        printf("desk.debug=%s\n",
-               config->desk_debug_library ? "library" : "none");
+        printf("desk.debug=%s%s%s\n",
+               config->desk_debug_library ? "library" : "",
+               config->desk_debug_library && config->desk_debug_terminal
+                   ? ","
+                   : "",
+               config->desk_debug_terminal
+                   ? "terminal"
+                   : (config->desk_debug_library ? "" : "none"));
         printf("client.manager=%s\n", config->client_manager_uri);
         printf("defaults.launch=%s\n",
                cubicle_launch_default_name(config->default_launch));

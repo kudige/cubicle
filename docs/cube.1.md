@@ -462,8 +462,11 @@ kill_cleanup=false
 
 Set `controller.debug` to a comma-separated list of `input`, `library`, and
 `terminal` to write controller debug events to each process `events.log`.
-Set `cube.debug=library` or `desk.debug=library` to write libcubicle call
-traces to `manager.log_dir/client-library.log`; payload bytes are not logged.
+Set `cube.debug=library` or include `library` in `desk.debug` to write
+libcubicle call traces to `manager.log_dir/client-library.log`; payload bytes
+are not logged. Include `terminal` in `desk.debug`, for example
+`desk.debug=library,terminal`, to write desk attach, snapshot, read, input, and
+exit diagnostics to `manager.log_dir/desk-terminal.log`.
 
 Examples:
 

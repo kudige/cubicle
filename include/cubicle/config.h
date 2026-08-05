@@ -28,6 +28,7 @@ typedef struct cubicle_config {
     int controller_debug_terminal;
     int cube_debug_library;
     int desk_debug_library;
+    int desk_debug_terminal;
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char client_server_identity[256];
     cubicle_launch_default_t default_launch;

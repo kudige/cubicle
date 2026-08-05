@@ -152,6 +152,54 @@ static int parse_library_debug(const char *value,
     return -1;
 }
 
+static int parse_desk_debug(const char *value,
+                            cubicle_config_t *config,
+                            char *error,
+                            size_t error_size)
+{
+    if (strcmp(value, "none") == 0 || strcmp(value, "off") == 0 ||
+        strcmp(value, "false") == 0) {
+        config->desk_debug_library = 0;
+        config->desk_debug_terminal = 0;
+        return 0;
+    }
+
+    config->desk_debug_library = 0;
+    config->desk_debug_terminal = 0;
+
+    char copy[128];
+    int length = snprintf(copy, sizeof(copy), "%s", value);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        set_error(error, error_size, "desk.debug is too long");
+        return -1;
+    }
+
+    char *save = NULL;
+    for (char *part = strtok_r(copy, ",", &save); part != NULL;
+         part = strtok_r(NULL, ",", &save)) {
+        while (*part == ' ' || *part == '\t') {
+            ++part;
+        }
+        char *end = part + strlen(part);
+        while (end > part && (end[-1] == ' ' || end[-1] == '\t' ||
+                              end[-1] == '\r' || end[-1] == '\n')) {
+            *--end = '\0';
+        }
+        if (strcmp(part, "library") == 0) {
+            config->desk_debug_library = 1;
+        } else if (strcmp(part, "terminal") == 0) {
+            config->desk_debug_terminal = 1;
+        } else {
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size,
+                         "desk.debug must contain library, terminal, none, off, or false");
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int parse_controller_debug(const char *value,
                                   cubicle_config_t *config,
                                   char *error,
@@ -337,6 +385,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->controller_debug_terminal = 0;
     config->cube_debug_library = 0;
     config->desk_debug_library = 0;
+    config->desk_debug_terminal = 0;
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
@@ -460,10 +509,11 @@ static int apply_econf_file(cubicle_config_t *config,
     char desk_debug[64];
     desk_debug[0] = '\0';
     if (get_optional_string(file, "desk", "debug", desk_debug,
-                            sizeof(desk_debug), error, error_size) < 0 ||
-        (desk_debug[0] != '\0' &&
-         parse_library_debug(desk_debug, &config->desk_debug_library,
-                             "desk.debug", error, error_size) < 0)) {
+                            sizeof(desk_debug), error, error_size) < 0) {
+        return -1;
+    }
+    if (desk_debug[0] != '\0' &&
+        parse_desk_debug(desk_debug, config, error, error_size) < 0) {
         return -1;
     }
 

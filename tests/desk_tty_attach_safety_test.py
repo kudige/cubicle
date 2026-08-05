@@ -510,7 +510,7 @@ def main():
                 f"log_dir={log_dir}\n"
                 "\n"
                 "[desk]\n"
-                "debug=library\n"
+                "debug=library,terminal\n"
             )
 
         manager_proc = subprocess.Popen(
@@ -590,6 +590,15 @@ def main():
             raise AssertionError(f"desk library log missing workspace RPC:\n{library_events}")
         if "event=rpc.request method=controller.read code=ok" not in library_events:
             raise AssertionError(f"desk library log missing controller read RPC:\n{library_events}")
+        desk_terminal_log = os.path.join(log_dir, "desk-terminal.log")
+        if not os.path.exists(desk_terminal_log):
+            raise AssertionError("desk.debug=terminal did not create desk terminal log")
+        with open(desk_terminal_log, "r", encoding="utf-8") as handle:
+            desk_terminal_events = handle.read()
+        if "event=loop_start" not in desk_terminal_events:
+            raise AssertionError(
+                f"desk terminal log missing loop_start:\n{desk_terminal_events}"
+            )
 
         ps_output = run_checked([cube, "ps"], env)
         if "desk-safe\ttty\trunning" not in ps_output:

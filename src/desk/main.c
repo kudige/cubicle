@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,8 @@
 
 static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
+static int g_desk_debug_terminal = 0;
+static char g_desk_debug_log_path[CUBICLE_PATH_MAX];
 
 typedef cubeui_terminal_t desk_terminal_t;
 
@@ -193,6 +196,42 @@ static void handle_signal(int signo)
     } else {
         g_stop_requested = 1;
     }
+}
+
+static void desk_debug_timestamp(char *buffer, size_t size)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) < 0) {
+        snprintf(buffer, size, "unknown-time");
+        return;
+    }
+    struct tm tm_value;
+    localtime_r(&ts.tv_sec, &tm_value);
+    strftime(buffer, size, "%Y-%m-%dT%H:%M:%S", &tm_value);
+}
+
+static void desk_debug_log(const char *format, ...)
+{
+    if (!g_desk_debug_terminal || g_desk_debug_log_path[0] == '\0') {
+        return;
+    }
+
+    FILE *file = fopen(g_desk_debug_log_path, "a");
+    if (file == NULL) {
+        return;
+    }
+
+    char timestamp[64];
+    desk_debug_timestamp(timestamp, sizeof(timestamp));
+    fprintf(file, "%s pid=%ld ", timestamp, (long)getpid());
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+
+    fputc('\n', file);
+    fclose(file);
 }
 
 static void append_repeat(char *buffer, size_t buffer_size, size_t *used,
@@ -1162,6 +1201,21 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
             (void)setenv("CUBICLE_LIBRARY_DEBUG_LOG", log_path, 1);
         }
     }
+    g_desk_debug_terminal = config.desk_debug_terminal;
+    g_desk_debug_log_path[0] = '\0';
+    if (config.desk_debug_terminal) {
+        int length = snprintf(g_desk_debug_log_path,
+                              sizeof(g_desk_debug_log_path),
+                              "%s/desk-terminal.log",
+                              config.manager_log_dir);
+        if (length > 0 && (size_t)length < sizeof(g_desk_debug_log_path)) {
+            (void)cubicle_mkdir_p(config.manager_log_dir);
+            desk_debug_log("event=config terminal_debug=enabled log=%s",
+                           g_desk_debug_log_path);
+        } else {
+            g_desk_debug_log_path[0] = '\0';
+        }
+    }
 
     char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
     const char *manager_uri = cubeui_resolve_manager_endpoint(
@@ -1884,16 +1938,26 @@ static int refresh_pane_from_model(desk_pane_t *pane)
 
 static int reload_pane_snapshot(desk_pane_t *pane)
 {
+    desk_debug_log("event=snapshot_reload_start process=%s id=%s",
+                   pane->process.friendly_name, pane->process.id);
     cubicle_terminal_snapshot_t snapshot;
     cubicle_error_code_t code = cubicle_attachment_snapshot(pane->attachment,
                                                             &snapshot);
     if (code != CUBICLE_OK) {
+        const cubicle_error_t *last =
+            cubicle_attachment_last_error(pane->attachment);
+        desk_debug_log("event=snapshot_reload_failed process=%s code=%d message=\"%s\"",
+                       pane->process.friendly_name, (int)code,
+                       last != NULL ? last->message : "");
         return -1;
     }
 
     if (pane->terminal_model == NULL) {
         if (cubicle_terminal_model_create(snapshot.rows, snapshot.cols,
                                           &pane->terminal_model) < 0) {
+            desk_debug_log("event=snapshot_model_create_failed process=%s rows=%u cols=%u errno=%d",
+                           pane->process.friendly_name, snapshot.rows,
+                           snapshot.cols, errno);
             cubicle_terminal_snapshot_cleanup(&snapshot);
             return -1;
         }
@@ -1902,11 +1966,20 @@ static int reload_pane_snapshot(desk_pane_t *pane)
                                              &snapshot) < 0 ||
         grid_resize(&pane->grid, (int)snapshot.rows,
                     (int)snapshot.cols) < 0) {
+        desk_debug_log("event=snapshot_apply_failed process=%s rows=%u cols=%u offset=%llu errno=%d",
+                       pane->process.friendly_name, snapshot.rows,
+                       snapshot.cols,
+                       (unsigned long long)snapshot.offset, errno);
         cubicle_terminal_snapshot_cleanup(&snapshot);
         return -1;
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
+    desk_debug_log("event=snapshot_reload_ok process=%s rows=%u cols=%u offset=%llu cursor=%u,%u visible=%s",
+                   pane->process.friendly_name, snapshot.rows, snapshot.cols,
+                   (unsigned long long)snapshot.offset, snapshot.cursor_row,
+                   snapshot.cursor_col,
+                   snapshot.cursor_visible ? "true" : "false");
     cubicle_terminal_snapshot_cleanup(&snapshot);
     return 0;
 }
@@ -2909,6 +2982,9 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
                                         size_t error_size)
 {
     desk_pane_t *pane = &session->panes[pane_index];
+    desk_debug_log("event=attach_start pane=%zu process=%s id=%s rows=%u cols=%u",
+                   pane_index + 1, pane->process.friendly_name,
+                   pane->process.id, pane->rows, pane->cols);
     cubicle_attachment_request_t request;
     memset(&request, 0, sizeof(request));
     request.process_id = pane->process.id;
@@ -2923,6 +2999,9 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         session->manager, &request, &grant);
     if (code != CUBICLE_OK) {
         const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        desk_debug_log("event=attach_request_failed pane=%zu process=%s code=%d message=\"%s\"",
+                       pane_index + 1, pane->process.friendly_name,
+                       (int)code, last != NULL ? last->message : "");
         snprintf(error, error_size, "%s",
                  last != NULL && last->message[0] != '\0'
                      ? last->message
@@ -2934,15 +3013,24 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
     memset(&options, 0, sizeof(options));
     code = cubicle_attachment_connect(&grant, &options, &pane->attachment);
     if (code != CUBICLE_OK) {
+        desk_debug_log("event=attach_connect_failed pane=%zu process=%s code=%d",
+                       pane_index + 1, pane->process.friendly_name,
+                       (int)code);
         snprintf(error, error_size, "controller attachment failed");
         return code;
     }
+    desk_debug_log("event=attach_connected pane=%zu process=%s endpoint=%s",
+                   pane_index + 1, pane->process.friendly_name,
+                   grant.endpoint.uri);
     code = cubicle_attachment_resize_tracked(pane->attachment, &pane->resize,
                                              pane->rows, pane->cols, true,
                                              NULL);
     if (code != CUBICLE_OK) {
         const cubicle_error_t *last =
             cubicle_attachment_last_error(pane->attachment);
+        desk_debug_log("event=attach_resize_failed pane=%zu process=%s code=%d message=\"%s\"",
+                       pane_index + 1, pane->process.friendly_name,
+                       (int)code, last != NULL ? last->message : "");
         snprintf(error, error_size, "%s",
                  last != NULL && last->message[0] != '\0'
                      ? last->message
@@ -2954,6 +3042,8 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         snprintf(error, error_size, "terminal model initialization failed");
         return CUBICLE_ERR_INTERNAL;
     }
+    desk_debug_log("event=attach_ok pane=%zu process=%s",
+                   pane_index + 1, pane->process.friendly_name);
     return CUBICLE_OK;
 }
 
@@ -2997,18 +3087,35 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         ssize_t nread = cubicle_attachment_read(pane->attachment, output,
                                                 sizeof(output));
         if (nread < 0) {
+            const cubicle_error_t *last =
+                cubicle_attachment_last_error(pane->attachment);
+            desk_debug_log("event=read_failed pane=%zu process=%s errno=%d message=\"%s\"",
+                           pane_index + 1, pane->process.friendly_name, errno,
+                           last != NULL ? last->message : "");
             return -1;
         }
         if (nread == 0) {
             break;
         }
+        desk_debug_log("event=read_ok pane=%zu process=%s bytes=%zd burst=%d",
+                       pane_index + 1, pane->process.friendly_name, nread,
+                       burst);
         grid_feed(&pane->grid, output, (size_t)nread, pane->attachment);
         if (pane->terminal_model != NULL &&
             cubicle_terminal_model_feed(pane->terminal_model, output,
                                         (size_t)nread) < 0) {
+            int saved_errno = errno;
+            desk_debug_log("event=model_feed_failed pane=%zu process=%s bytes=%zd errno=%d action=resync",
+                           pane_index + 1, pane->process.friendly_name, nread,
+                           saved_errno);
             if (reload_pane_snapshot(pane) < 0) {
+                desk_debug_log("event=model_feed_resync_failed pane=%zu process=%s errno=%d",
+                               pane_index + 1,
+                               pane->process.friendly_name, errno);
                 return -1;
             }
+            desk_debug_log("event=model_feed_resync_ok pane=%zu process=%s",
+                           pane_index + 1, pane->process.friendly_name);
             pane_changed = true;
             if (output_seen != NULL) {
                 *output_seen = true;
@@ -3022,6 +3129,8 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
     }
 
     if (pane_changed && refresh_pane_from_model(pane) < 0) {
+        desk_debug_log("event=refresh_from_model_failed pane=%zu process=%s errno=%d",
+                       pane_index + 1, pane->process.friendly_name, errno);
         return -1;
     }
 
@@ -3231,6 +3340,8 @@ static int desk_run_workspace(const char *workspace_arg,
         fprintf(stderr, "desk: %s\n", error);
         return 2;
     }
+    desk_debug_log("event=run_start workspace_arg=%s",
+                   workspace_arg != NULL ? workspace_arg : "");
 
     int result = resolve_workspace(&session, workspace_arg, error,
                                    sizeof(error));
@@ -3241,6 +3352,8 @@ static int desk_run_workspace(const char *workspace_arg,
         result = load_or_create_layout(&session, error, sizeof(error));
     }
     if (result != 0) {
+        desk_debug_log("event=startup_failed result=%d message=\"%s\"",
+                       result, error);
         fprintf(stderr, "desk: %s\n", error);
         desk_session_cleanup(&session);
         return result;
@@ -3248,9 +3361,12 @@ static int desk_run_workspace(const char *workspace_arg,
 
     desk_terminal_t terminal;
     if (cubeui_terminal_enter_alt_raw(&terminal) < 0) {
+        desk_debug_log("event=terminal_enter_failed errno=%d", errno);
         desk_session_cleanup(&session);
         return -1;
     }
+    desk_debug_log("event=terminal_entered rows=%d cols=%d",
+                   terminal.rows, terminal.cols);
 
     struct sigaction action;
     memset(&action, 0, sizeof(action));
@@ -3262,6 +3378,7 @@ static int desk_run_workspace(const char *workspace_arg,
     bool initial_size_changed = false;
     if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
         cubeui_terminal_leave_alt_raw(&terminal);
+        desk_debug_log("event=initial_resize_failed errno=%d", errno);
         fprintf(stderr, "desk: terminal too small for desk\n");
         desk_session_cleanup(&session);
         return 2;
@@ -3269,6 +3386,8 @@ static int desk_run_workspace(const char *workspace_arg,
     result = attach_all_panes(&session, error, sizeof(error));
     if (result != 0) {
         cubeui_terminal_leave_alt_raw(&terminal);
+        desk_debug_log("event=attach_all_failed result=%d message=\"%s\"",
+                       result, error);
         fprintf(stderr, "desk: %s\n", error);
         desk_session_cleanup(&session);
         return result;
@@ -3277,6 +3396,7 @@ static int desk_run_workspace(const char *workspace_arg,
     session.manager = NULL;
 
     render_all_panes(&terminal, &session);
+    desk_debug_log("event=loop_start panes=%zu", session.pane_count);
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
@@ -3288,6 +3408,7 @@ static int desk_run_workspace(const char *workspace_arg,
             if (flush_pending_terminal_resize(&session, &terminal,
                                               &layout_changed) < 0) {
                 result = 2;
+                desk_debug_log("event=resize_flush_failed errno=%d", errno);
                 break;
             }
         }
@@ -3296,6 +3417,7 @@ static int desk_run_workspace(const char *workspace_arg,
             if (read_and_render_pane_output(&terminal, &session, i,
                                             &output_seen) < 0) {
                 result = 2;
+                desk_debug_log("event=loop_read_failed pane=%zu", i + 1);
                 break;
             }
         }
@@ -3316,6 +3438,7 @@ static int desk_run_workspace(const char *workspace_arg,
                 continue;
             }
             result = 2;
+            desk_debug_log("event=select_failed errno=%d", errno);
             break;
         }
         if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
@@ -3326,20 +3449,27 @@ static int desk_run_workspace(const char *workspace_arg,
                     continue;
                 }
                 result = 2;
+                desk_debug_log("event=input_read_failed errno=%d", errno);
                 break;
             }
             if (input_length == 0) {
+                desk_debug_log("event=input_eof action=quit");
                 quit_requested = true;
             } else {
+                desk_debug_log("event=input_read bytes=%zd", input_length);
                 if (flush_pending_terminal_resize(&session, &terminal,
                                                   &layout_changed) < 0) {
                     result = 2;
+                    desk_debug_log("event=input_resize_flush_failed errno=%d",
+                                   errno);
                     break;
                 }
                 if (handle_input(&session, &terminal, input,
                                  (size_t)input_length, &layout_changed,
                                  &quit_requested) < 0) {
                     result = 2;
+                    desk_debug_log("event=handle_input_failed errno=%d",
+                                   errno);
                     break;
                 }
                 desk_cursor_reset_blink(&session);
@@ -3355,11 +3485,14 @@ static int desk_run_workspace(const char *workspace_arg,
             }
         }
         if (quit_requested) {
+            desk_debug_log("event=quit_requested");
             break;
         }
     }
 
     cubeui_terminal_leave_alt_raw(&terminal);
+    desk_debug_log("event=run_end result=%d stop_requested=%d",
+                   result, (int)g_stop_requested);
     desk_session_cleanup(&session);
     return result;
 }
