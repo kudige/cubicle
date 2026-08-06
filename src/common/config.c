@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cubicle/config.h"
+#include "cubicle/rpc.h"
 
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libeconf.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -13,6 +15,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
+
+#define DESK_MANAGED_KEYS_BEGIN "# cubicle-desk-managed-keys: begin"
+#define DESK_MANAGED_KEYS_END "# cubicle-desk-managed-keys: end"
 
 static void set_error(char *error, size_t error_size, const char *message)
 {
@@ -185,13 +194,153 @@ static int parse_control_key_char(char ch, unsigned char *key)
     return 0;
 }
 
-static int parse_desk_key_name(const char *text,
-                               int *uses_prefix,
-                               unsigned char *key,
-                               char *normalized,
-                               size_t normalized_size,
-                               char *error,
-                               size_t error_size)
+static int append_sequence_text(unsigned char *sequence,
+                                size_t *sequence_length,
+                                const char *text)
+{
+    size_t length = strlen(text);
+    if (*sequence_length + length > CUBICLE_DESK_KEY_SEQUENCE_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(sequence + *sequence_length, text, length);
+    *sequence_length += length;
+    return 0;
+}
+
+static int format_sequence(unsigned char *sequence,
+                           size_t *sequence_length,
+                           const char *format,
+                           int number,
+                           char final)
+{
+    char buffer[32];
+    int length = snprintf(buffer, sizeof(buffer), format, number, final);
+    if (length < 0 || (size_t)length >= sizeof(buffer)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return append_sequence_text(sequence, sequence_length, buffer);
+}
+
+static int modifier_value(int shift, int alt, int control)
+{
+    return 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (control ? 4 : 0);
+}
+
+static int parse_modifier_token(const char *token,
+                                int *shift,
+                                int *alt,
+                                int *control)
+{
+    if (string_equals_case(token, "S") ||
+        string_equals_case(token, "Shift")) {
+        *shift = 1;
+        return 1;
+    }
+    if (string_equals_case(token, "M") ||
+        string_equals_case(token, "Meta") ||
+        string_equals_case(token, "Alt")) {
+        *alt = 1;
+        return 1;
+    }
+    if (string_equals_case(token, "C") ||
+        string_equals_case(token, "Ctrl") ||
+        string_equals_case(token, "Control")) {
+        *control = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int canonical_modifier_prefix(char *normalized,
+                                     size_t normalized_size,
+                                     int shift,
+                                     int alt,
+                                     int control,
+                                     const char *base)
+{
+    int length = snprintf(normalized, normalized_size, "%s%s%s%s",
+                          control ? "C-" : "", alt ? "M-" : "",
+                          shift ? "S-" : "", base);
+    return length < 0 || (size_t)length >= normalized_size ? -1 : 0;
+}
+
+static int special_key_code(const char *base,
+                            int *tilde_code,
+                            char *csi_final,
+                            char *ss3_final)
+{
+    *tilde_code = 0;
+    *csi_final = '\0';
+    *ss3_final = '\0';
+    if (string_equals_case(base, "Up")) {
+        *csi_final = 'A';
+        return 1;
+    }
+    if (string_equals_case(base, "Down")) {
+        *csi_final = 'B';
+        return 1;
+    }
+    if (string_equals_case(base, "Right")) {
+        *csi_final = 'C';
+        return 1;
+    }
+    if (string_equals_case(base, "Left")) {
+        *csi_final = 'D';
+        return 1;
+    }
+    if (string_equals_case(base, "Home")) {
+        *csi_final = 'H';
+        return 1;
+    }
+    if (string_equals_case(base, "End")) {
+        *csi_final = 'F';
+        return 1;
+    }
+    if (string_equals_case(base, "Insert") || string_equals_case(base, "Ins")) {
+        *tilde_code = 2;
+        return 1;
+    }
+    if (string_equals_case(base, "Delete") || string_equals_case(base, "Del")) {
+        *tilde_code = 3;
+        return 1;
+    }
+    if (string_equals_case(base, "PageUp") || string_equals_case(base, "PgUp")) {
+        *tilde_code = 5;
+        return 1;
+    }
+    if (string_equals_case(base, "PageDown") || string_equals_case(base, "PgDn")) {
+        *tilde_code = 6;
+        return 1;
+    }
+    if ((base[0] == 'F' || base[0] == 'f') && base[1] >= '1' &&
+        base[1] <= '9') {
+        char *end = NULL;
+        long value = strtol(base + 1, &end, 10);
+        if (end != NULL && *end == '\0' && value >= 1 && value <= 12) {
+            static const int f_codes[] = {0, 0, 0, 0, 0, 15, 17, 18, 19, 20, 21, 23, 24};
+            static const char f_ss3[] = {'\0', 'P', 'Q', 'R', 'S'};
+            if (value <= 4) {
+                *ss3_final = f_ss3[value];
+            } else {
+                *tilde_code = f_codes[value];
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int cubicle_config_parse_desk_key_name(const char *text,
+                                       int *uses_prefix,
+                                       unsigned char *key,
+                                       unsigned char *sequence,
+                                       size_t *sequence_length,
+                                       char *normalized,
+                                       size_t normalized_size,
+                                       char *error,
+                                       size_t error_size)
 {
     if (text == NULL || text[0] == '\0') {
         set_error(error, error_size, "desk key name must not be empty");
@@ -206,12 +355,44 @@ static int parse_desk_key_name(const char *text,
     }
 
     unsigned char parsed = 0;
+    unsigned char parsed_sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
+    size_t parsed_length = 0;
+    char base_name[CUBICLE_DESK_KEY_NAME_MAX];
+    int shift = 0;
+    int alt = 0;
+    int control = 0;
+
+    int name_length = snprintf(base_name, sizeof(base_name), "%s", name);
+    if (name_length < 0 || (size_t)name_length >= sizeof(base_name)) {
+        goto invalid;
+    }
+    char *base = base_name;
+    while (1) {
+        char *dash = strchr(base, '-');
+        if (dash == NULL) {
+            break;
+        }
+        *dash = '\0';
+        if (!parse_modifier_token(base, &shift, &alt, &control)) {
+            *dash = '-';
+            break;
+        }
+        base = dash + 1;
+    }
+
     if (name[0] == '^' && name[1] != '\0' && name[2] == '\0') {
         if (parse_control_key_char(name[1], &parsed) < 0) {
             goto invalid;
         }
+        parsed_sequence[parsed_length++] = parsed;
+        if (canonical_modifier_prefix(normalized, normalized_size, 0, 0, 1,
+                                      parsed == 0 ? "Space" :
+                                      (char[]){(char)(parsed + '@'), '\0'}) < 0) {
+            return -1;
+        }
     } else if ((strncmp(name, "Control-", 8) == 0 ||
-                strncmp(name, "control-", 8) == 0)) {
+                strncmp(name, "control-", 8) == 0) &&
+               strchr(name + 8, '-') == NULL) {
         const char *ch = name + 8;
         if (string_equals_case(ch, "Space")) {
             parsed = 0;
@@ -221,8 +402,15 @@ static int parse_desk_key_name(const char *text,
         } else {
             goto invalid;
         }
+        parsed_sequence[parsed_length++] = parsed;
+        if (canonical_modifier_prefix(normalized, normalized_size, 0, 0, 1,
+                                      parsed == 0 ? "Space" :
+                                      (char[]){(char)(parsed + '@'), '\0'}) < 0) {
+            return -1;
+        }
     } else if ((strncmp(name, "Ctrl-", 5) == 0 ||
-                strncmp(name, "ctrl-", 5) == 0)) {
+                strncmp(name, "ctrl-", 5) == 0) &&
+               strchr(name + 5, '-') == NULL) {
         const char *ch = name + 5;
         if (string_equals_case(ch, "Space")) {
             parsed = 0;
@@ -232,10 +420,21 @@ static int parse_desk_key_name(const char *text,
         } else {
             goto invalid;
         }
+        parsed_sequence[parsed_length++] = parsed;
+        if (canonical_modifier_prefix(normalized, normalized_size, 0, 0, 1,
+                                      parsed == 0 ? "Space" :
+                                      (char[]){(char)(parsed + '@'), '\0'}) < 0) {
+            return -1;
+        }
     } else if ((strncmp(name, "C-", 2) == 0 ||
                 strncmp(name, "c-", 2) == 0)) {
         const char *ch = name + 2;
-        if (string_equals_case(ch, "Space")) {
+        int tilde_code = 0;
+        char csi_final = '\0';
+        char ss3_final = '\0';
+        if (special_key_code(base, &tilde_code, &csi_final, &ss3_final)) {
+            /* handled below */
+        } else if (string_equals_case(ch, "Space")) {
             parsed = 0;
         } else if (ch[0] != '\0' && ch[1] == '\0' &&
                    parse_control_key_char(ch[0], &parsed) == 0) {
@@ -243,28 +442,158 @@ static int parse_desk_key_name(const char *text,
         } else {
             goto invalid;
         }
+        if (special_key_code(base, &tilde_code, &csi_final, &ss3_final)) {
+            int mod = modifier_value(shift, alt, control);
+            if (canonical_modifier_prefix(normalized, normalized_size, shift,
+                                          alt, control, base) < 0) {
+                return -1;
+            }
+            if (tilde_code != 0) {
+                int length = snprintf((char *)parsed_sequence,
+                                      sizeof(parsed_sequence), "\x1b[%d;%d~",
+                                      tilde_code, mod);
+                if (length < 0 ||
+                    (size_t)length >= sizeof(parsed_sequence)) {
+                    return -1;
+                }
+                parsed_length = (size_t)length;
+            } else {
+                if (format_sequence(parsed_sequence, &parsed_length,
+                                    "\x1b[1;%d%c", mod,
+                                    csi_final != '\0' ? csi_final : ss3_final) < 0) {
+                    return -1;
+                }
+            }
+        } else {
+            parsed_sequence[parsed_length++] = parsed;
+            if (canonical_modifier_prefix(normalized, normalized_size, 0, 0, 1,
+                                          parsed == 0 ? "Space" :
+                                          (char[]){(char)(parsed + '@'), '\0'}) < 0) {
+                return -1;
+            }
+        }
     } else if (string_equals_case(name, "Space")) {
         parsed = ' ';
+        parsed_sequence[parsed_length++] = parsed;
+        snprintf(normalized, normalized_size, "Space");
     } else if (string_equals_case(name, "Enter") ||
                string_equals_case(name, "Return")) {
         parsed = '\r';
+        parsed_sequence[parsed_length++] = parsed;
+        snprintf(normalized, normalized_size, "Enter");
     } else if (string_equals_case(name, "Escape") ||
                string_equals_case(name, "Esc")) {
         parsed = 0x1b;
+        parsed_sequence[parsed_length++] = parsed;
+        snprintf(normalized, normalized_size, "Escape");
     } else if (string_equals_case(name, "Backspace")) {
         parsed = 0x7f;
+        parsed_sequence[parsed_length++] = parsed;
+        snprintf(normalized, normalized_size, "Backspace");
     } else if (string_equals_case(name, "Tab")) {
         parsed = '\t';
-    } else if (name[0] != '\0' && name[1] == '\0') {
-        parsed = (unsigned char)name[0];
+        parsed_sequence[parsed_length++] = parsed;
+        snprintf(normalized, normalized_size, "Tab");
+    } else if (shift || alt || control) {
+        int tilde_code = 0;
+        char csi_final = '\0';
+        char ss3_final = '\0';
+        if (!special_key_code(base, &tilde_code, &csi_final, &ss3_final)) {
+            if (alt && !shift && base[0] != '\0' && base[1] == '\0') {
+                parsed = control ? 0 : (unsigned char)base[0];
+                if (control && parse_control_key_char(base[0], &parsed) < 0) {
+                    goto invalid;
+                }
+                parsed_sequence[parsed_length++] = 0x1b;
+                parsed_sequence[parsed_length++] = parsed;
+                if (canonical_modifier_prefix(normalized, normalized_size, 0,
+                                              1, control, base) < 0) {
+                    return -1;
+                }
+            } else {
+                goto invalid;
+            }
+        } else {
+            int mod = modifier_value(shift, alt, control);
+            if (canonical_modifier_prefix(normalized, normalized_size, shift,
+                                          alt, control, base) < 0) {
+                return -1;
+            }
+            if (tilde_code != 0) {
+                int length = snprintf((char *)parsed_sequence,
+                                      sizeof(parsed_sequence), "\x1b[%d;%d~",
+                                      tilde_code, mod);
+                if (length < 0 ||
+                    (size_t)length >= sizeof(parsed_sequence)) {
+                    return -1;
+                }
+                parsed_length = (size_t)length;
+            } else if (ss3_final != '\0' && mod == 1) {
+                parsed_sequence[parsed_length++] = 0x1b;
+                parsed_sequence[parsed_length++] = 'O';
+                parsed_sequence[parsed_length++] = (unsigned char)ss3_final;
+            } else {
+                if (format_sequence(parsed_sequence, &parsed_length,
+                                    "\x1b[1;%d%c", mod,
+                                    csi_final != '\0' ? csi_final : ss3_final) < 0) {
+                    return -1;
+                }
+            }
+        }
     } else {
-        goto invalid;
+        int tilde_code = 0;
+        char csi_final = '\0';
+        char ss3_final = '\0';
+        if (special_key_code(name, &tilde_code, &csi_final, &ss3_final)) {
+            int length = snprintf(normalized, normalized_size, "%s", name);
+            if (length < 0 || (size_t)length >= normalized_size) {
+                return -1;
+            }
+            if (tilde_code != 0) {
+                length = snprintf((char *)parsed_sequence,
+                                  sizeof(parsed_sequence), "\x1b[%d~",
+                                  tilde_code);
+                if (length < 0 ||
+                    (size_t)length >= sizeof(parsed_sequence)) {
+                    return -1;
+                }
+                parsed_length = (size_t)length;
+            } else if (ss3_final != '\0') {
+                parsed_sequence[parsed_length++] = 0x1b;
+                parsed_sequence[parsed_length++] = 'O';
+                parsed_sequence[parsed_length++] = (unsigned char)ss3_final;
+            } else {
+                parsed_sequence[parsed_length++] = 0x1b;
+                parsed_sequence[parsed_length++] = '[';
+                parsed_sequence[parsed_length++] = (unsigned char)csi_final;
+            }
+            parsed = parsed_sequence[0];
+        } else if (name[0] != '\0' && name[1] == '\0') {
+            parsed = (unsigned char)name[0];
+            parsed_sequence[parsed_length++] = parsed;
+            snprintf(normalized, normalized_size, "%c", (char)parsed);
+        } else {
+            goto invalid;
+        }
     }
 
+    if (parsed_length == 0 || parsed_length > CUBICLE_DESK_KEY_SEQUENCE_MAX) {
+        goto invalid;
+    }
+    if (*uses_prefix) {
+        char with_prefix[CUBICLE_DESK_KEY_NAME_MAX];
+        int length = snprintf(with_prefix, sizeof(with_prefix), "Prefix-%s",
+                              normalized);
+        if (length < 0 || (size_t)length >= sizeof(with_prefix)) {
+            return -1;
+        }
+        snprintf(normalized, normalized_size, "%s", with_prefix);
+    }
+    parsed = parsed_sequence[0];
     *key = parsed;
-    int length = snprintf(normalized, normalized_size, "%s%s",
-                          *uses_prefix ? "Prefix-" : "", name);
-    return length < 0 || (size_t)length >= normalized_size ? -1 : 0;
+    memcpy(sequence, parsed_sequence, parsed_length);
+    *sequence_length = parsed_length;
+    return 0;
 
 invalid:
     if (error != NULL && error_size > 0) {
@@ -300,9 +629,10 @@ static int add_desk_key_binding(cubicle_config_t *config,
     }
     cubicle_desk_key_binding_t binding;
     memset(&binding, 0, sizeof(binding));
-    if (parse_desk_key_name(key_name, &binding.uses_prefix, &binding.key,
-                            binding.key_name, sizeof(binding.key_name),
-                            error, error_size) < 0) {
+    if (cubicle_config_parse_desk_key_name(
+            key_name, &binding.uses_prefix, &binding.key, binding.sequence,
+            &binding.sequence_length, binding.key_name,
+            sizeof(binding.key_name), error, error_size) < 0) {
         return -1;
     }
     binding.unbind = strcmp(command, "none") == 0;
@@ -324,7 +654,9 @@ static int add_desk_key_binding(cubicle_config_t *config,
         cubicle_desk_key_binding_t *existing =
             &config->desk_key_bindings[i];
         if (existing->uses_prefix == binding.uses_prefix &&
-            existing->key == binding.key) {
+            existing->sequence_length == binding.sequence_length &&
+            memcmp(existing->sequence, binding.sequence,
+                   binding.sequence_length) == 0) {
             if (binding.unbind) {
                 memmove(existing, existing + 1,
                         (config->desk_key_binding_count - i - 1) *
@@ -410,7 +742,9 @@ static int validate_desk_key_conflicts(const cubicle_config_t *config,
                 continue;
             }
             if (left->uses_prefix == right->uses_prefix &&
-                left->key == right->key) {
+                left->sequence_length == right->sequence_length &&
+                memcmp(left->sequence, right->sequence,
+                       left->sequence_length) == 0) {
                 if (error != NULL && error_size > 0) {
                     snprintf(error, error_size,
                              "duplicate desk.keys binding for %s",
@@ -632,7 +966,7 @@ static int set_user_defaults(cubicle_config_t *config)
     return 0;
 }
 
-static int user_config_path(char *path, size_t path_size)
+int cubicle_config_user_path(char *path, size_t path_size)
 {
     const char *config_home = getenv("XDG_CONFIG_HOME");
     int length;
@@ -680,6 +1014,10 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->desk_debug_library = 0;
     config->desk_debug_terminal = 0;
     config->desk_prefix_key = 0x18;
+    config->desk_prefix_sequence[0] = 0x18;
+    config->desk_prefix_sequence_length = 1;
+    snprintf(config->desk_prefix_key_name, sizeof(config->desk_prefix_key_name),
+             "C-X");
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
@@ -916,9 +1254,11 @@ static int apply_econf_file(cubicle_config_t *config,
     if (desk_prefix[0] != '\0') {
         int prefixed = 0;
         char normalized[CUBICLE_DESK_KEY_NAME_MAX];
-        if (parse_desk_key_name(desk_prefix, &prefixed,
-                                &config->desk_prefix_key, normalized,
-                                sizeof(normalized), error, error_size) < 0 ||
+        if (cubicle_config_parse_desk_key_name(
+                desk_prefix, &prefixed, &config->desk_prefix_key,
+                config->desk_prefix_sequence,
+                &config->desk_prefix_sequence_length, normalized,
+                sizeof(normalized), error, error_size) < 0 ||
             prefixed) {
             if (prefixed) {
                 set_error(error, error_size,
@@ -926,6 +1266,8 @@ static int apply_econf_file(cubicle_config_t *config,
             }
             return -1;
         }
+        snprintf(config->desk_prefix_key_name,
+                 sizeof(config->desk_prefix_key_name), "%s", normalized);
         set_origin(config, CUBICLE_CONFIG_DESK_PREFIX, source_kind, source);
     }
 
@@ -1323,7 +1665,7 @@ static int cubicle_config_load_with_user_policy(cubicle_config_t *config,
     }
 
     char path[CUBICLE_PATH_MAX];
-    if (user_config_path(path, sizeof(path)) == 0) {
+    if (cubicle_config_user_path(path, sizeof(path)) == 0) {
         if (apply_config_path_with_dropins(config, path,
                                            CUBICLE_CONFIG_SOURCE_USER, 0,
                                            user_manager_control_keys,
@@ -1352,6 +1694,261 @@ int cubicle_config_load_client(cubicle_config_t *config,
                                size_t error_size)
 {
     return cubicle_config_load_with_user_policy(config, 0, error, error_size);
+}
+
+static int config_parent_directory(const char *path,
+                                   char parent[CUBICLE_PATH_MAX])
+{
+    int length = snprintf(parent, CUBICLE_PATH_MAX, "%s", path);
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char *slash = strrchr(parent, '/');
+    if (slash == NULL || slash == parent) {
+        errno = EINVAL;
+        return -1;
+    }
+    *slash = '\0';
+    return 0;
+}
+
+static char *config_read_optional_file(const char *path)
+{
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            char *empty = calloc(1, 1);
+            if (empty == NULL) {
+                errno = ENOMEM;
+            }
+            return empty;
+        }
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) < 0) {
+        fclose(file);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0) {
+        fclose(file);
+        return NULL;
+    }
+    rewind(file);
+    char *buffer = malloc((size_t)length + 1);
+    if (buffer == NULL) {
+        fclose(file);
+        errno = ENOMEM;
+        return NULL;
+    }
+    size_t read_count = fread(buffer, 1, (size_t)length, file);
+    int read_error = ferror(file);
+    fclose(file);
+    if (read_error || read_count != (size_t)length) {
+        free(buffer);
+        errno = EIO;
+        return NULL;
+    }
+    buffer[length] = '\0';
+    return buffer;
+}
+
+static int config_atomic_write_file(const char *path, const char *content)
+{
+    char parent[CUBICLE_PATH_MAX];
+    if (config_parent_directory(path, parent) < 0 ||
+        cubicle_mkdir_p(parent) < 0) {
+        return -1;
+    }
+    char temporary[CUBICLE_PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
+                          (long)getpid());
+    if (length < 0 || (size_t)length >= sizeof(temporary)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+    int result = cubicle_write_all(fd, content, strlen(content)) == 0 &&
+                         fsync(fd) == 0
+                     ? 0
+                     : -1;
+    int saved_errno = errno;
+    if (close(fd) < 0 && result == 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result == 0 && chmod(temporary, 0600) < 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result == 0 && rename(temporary, path) < 0) {
+        result = -1;
+        saved_errno = errno;
+    }
+    if (result == 0) {
+        int dir_fd = open(parent, O_RDONLY | O_DIRECTORY);
+        if (dir_fd >= 0) {
+            (void)fsync(dir_fd);
+            (void)close(dir_fd);
+        }
+        return 0;
+    }
+    (void)unlink(temporary);
+    errno = saved_errno;
+    return -1;
+}
+
+static int append_desk_managed_keys_block(
+    cubicle_json_builder_t *output,
+    const cubicle_desk_key_binding_t *bindings,
+    size_t binding_count,
+    const cubicle_desk_key_binding_t *previous_bindings,
+    size_t previous_binding_count)
+{
+    if (output->length > 0 && output->data[output->length - 1] != '\n' &&
+        cubicle_json_builder_append(output, "\n") < 0) {
+        return -1;
+    }
+    if (output->length > 0 &&
+        cubicle_json_builder_append(output, "\n") < 0) {
+        return -1;
+    }
+    if (cubicle_json_builder_append(output, DESK_MANAGED_KEYS_BEGIN "\n"
+                                            "[desk.keys]\n") < 0) {
+        return -1;
+    }
+    size_t index = 9000;
+    for (size_t i = 0; i < previous_binding_count; ++i) {
+        const cubicle_desk_key_binding_t *binding = &previous_bindings[i];
+        if (binding->unbind || binding->key_name[0] == '\0') {
+            continue;
+        }
+        if (cubicle_json_builder_appendf(output, "bind.%zu=%s none\n",
+                                         index++, binding->key_name) < 0) {
+            return -1;
+        }
+    }
+    for (size_t i = 0; i < binding_count; ++i) {
+        const cubicle_desk_key_binding_t *binding = &bindings[i];
+        if (binding->unbind || binding->key_name[0] == '\0' ||
+            binding->command[0] == '\0') {
+            continue;
+        }
+        if (cubicle_json_builder_appendf(output, "bind.%zu=%s %s\n",
+                                         index++, binding->key_name,
+                                         binding->command) < 0) {
+            return -1;
+        }
+    }
+    return cubicle_json_builder_append(output, DESK_MANAGED_KEYS_END "\n");
+}
+
+static int render_desk_managed_config(
+    const char *existing,
+    const cubicle_desk_key_binding_t *bindings,
+    size_t binding_count,
+    const cubicle_desk_key_binding_t *previous_bindings,
+    size_t previous_binding_count,
+    char **rendered_out)
+{
+    cubicle_json_builder_t output = {0};
+    const char *cursor = existing;
+    int skipping = 0;
+    while (*cursor != '\0') {
+        const char *line_start = cursor;
+        const char *line_end = strchr(cursor, '\n');
+        size_t line_length;
+        if (line_end == NULL) {
+            line_length = strlen(cursor);
+            cursor += line_length;
+        } else {
+            line_length = (size_t)(line_end - line_start) + 1;
+            cursor = line_end + 1;
+        }
+        char line[256];
+        size_t copy_length =
+            line_length < sizeof(line) - 1 ? line_length : sizeof(line) - 1;
+        memcpy(line, line_start, copy_length);
+        line[copy_length] = '\0';
+        if (strncmp(line, DESK_MANAGED_KEYS_BEGIN,
+                    strlen(DESK_MANAGED_KEYS_BEGIN)) == 0) {
+            skipping = 1;
+            continue;
+        }
+        if (skipping) {
+            if (strncmp(line, DESK_MANAGED_KEYS_END,
+                        strlen(DESK_MANAGED_KEYS_END)) == 0) {
+                skipping = 0;
+            }
+            continue;
+        }
+        if (cubicle_json_builder_reserve(&output, line_length) < 0) {
+            cubicle_json_builder_cleanup(&output);
+            return -1;
+        }
+        memcpy(output.data + output.length, line_start, line_length);
+        output.length += line_length;
+        output.data[output.length] = '\0';
+    }
+    if (append_desk_managed_keys_block(&output, bindings, binding_count,
+                                       previous_bindings,
+                                       previous_binding_count) < 0) {
+        cubicle_json_builder_cleanup(&output);
+        return -1;
+    }
+    *rendered_out = output.data;
+    output.data = NULL;
+    cubicle_json_builder_cleanup(&output);
+    return 0;
+}
+
+int cubicle_config_write_user_desk_key_bindings(
+    const cubicle_desk_key_binding_t *bindings,
+    size_t binding_count,
+    const cubicle_desk_key_binding_t *previous_bindings,
+    size_t previous_binding_count,
+    char *error,
+    size_t error_size)
+{
+    char path[CUBICLE_PATH_MAX];
+    if (cubicle_config_user_path(path, sizeof(path)) < 0) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "failed to resolve user config path: %s",
+                     strerror(errno));
+        }
+        return -1;
+    }
+    char *existing = config_read_optional_file(path);
+    if (existing == NULL) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "failed to read %s: %s", path,
+                     strerror(errno));
+        }
+        return -1;
+    }
+    char *rendered = NULL;
+    if (render_desk_managed_config(existing, bindings, binding_count,
+                                   previous_bindings, previous_binding_count,
+                                   &rendered) < 0) {
+        free(existing);
+        set_error(error, error_size, "failed to render desk key bindings");
+        return -1;
+    }
+    free(existing);
+    if (config_atomic_write_file(path, rendered) < 0) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "failed to write %s: %s", path,
+                     strerror(errno));
+        }
+        free(rendered);
+        return -1;
+    }
+    free(rendered);
+    return 0;
 }
 
 const char *cubicle_launch_default_name(cubicle_launch_default_t launch)

@@ -273,9 +273,13 @@ Keys:
   Payload contents are not logged.
 - `prefix`: Desk escape prefix key. It accepts tmux-style key names such as
   `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
-  `Escape`, `Backspace`, `Tab`, or a single printable character.
+  `Escape`, `Backspace`, `Tab`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
+  `Insert`, `Delete`, `F1` through `F12`, modifier forms such as
+  `C-S-Right`, `M-PageUp`, `S-F5`, or a single printable character.
 - `[desk.keys] bind.N`: Desk key binding in the form `KEY COMMAND`.
   `KEY` may be prefixed with `Prefix-` or may be a direct non-prefix shortcut.
+  Aliases `Shift-`, `Control-`, `Ctrl-`, `Alt-`, and `Meta-` are accepted and
+  displayed in canonical `S-`, `C-`, and `M-` form.
   `COMMAND` is one of `pane.next`, `pane.previous`, `layout.zoom`,
   `layout.resize.toggle`, `layout.save`, `layout.load`, `bindings.show`,
   `menu.open`, `mouse.toggle`, or `quit`. Use `none` as the command to unbind a

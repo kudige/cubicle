@@ -342,27 +342,6 @@ static int command_requires_manager(const char *command)
            strcmp(command, "events") == 0;
 }
 
-static void format_desk_key(unsigned char key, char *buffer, size_t size)
-{
-    if (key == 0) {
-        snprintf(buffer, size, "Control-Space");
-    } else if (key > 0 && key < 32) {
-        snprintf(buffer, size, "Control-%c", (char)(key + '@'));
-    } else if (key == ' ') {
-        snprintf(buffer, size, "Space");
-    } else if (key == '\r') {
-        snprintf(buffer, size, "Enter");
-    } else if (key == 0x1b) {
-        snprintf(buffer, size, "Escape");
-    } else if (key == 0x7f) {
-        snprintf(buffer, size, "Backspace");
-    } else if (key == '\t') {
-        snprintf(buffer, size, "Tab");
-    } else {
-        snprintf(buffer, size, "%c", (char)key);
-    }
-}
-
 static int command_config(const cubicle_config_t *config,
                           const char *config_error,
                           int argc,
@@ -422,10 +401,7 @@ static int command_config(const cubicle_config_t *config,
                config->desk_debug_terminal
                    ? "terminal"
                    : (config->desk_debug_library ? "" : "none"));
-        char desk_prefix[32];
-        format_desk_key(config->desk_prefix_key, desk_prefix,
-                        sizeof(desk_prefix));
-        printf("desk.prefix=%s\n", desk_prefix);
+        printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         return 0;
     }
 
@@ -464,10 +440,7 @@ static int command_config(const cubicle_config_t *config,
                config->desk_debug_terminal
                    ? "terminal"
                    : (config->desk_debug_library ? "" : "none"));
-        char desk_prefix[32];
-        format_desk_key(config->desk_prefix_key, desk_prefix,
-                        sizeof(desk_prefix));
-        printf("desk.prefix=%s\n", desk_prefix);
+        printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         printf("desk.keys=%zu bindings\n", config->desk_key_binding_count);
         printf("client.manager=%s\n", config->client_manager_uri);
         printf("defaults.launch=%s\n",
@@ -571,8 +544,8 @@ static int command_config(const cubicle_config_t *config,
                 value = formatted;
                 break;
             case CUBICLE_CONFIG_DESK_PREFIX:
-                format_desk_key(config->desk_prefix_key, formatted,
-                                sizeof(formatted));
+                snprintf(formatted, sizeof(formatted), "%s",
+                         config->desk_prefix_key_name);
                 value = formatted;
                 break;
             case CUBICLE_CONFIG_DESK_KEYS:

@@ -449,7 +449,7 @@ def run_desk_configurable_keys(desk, cube, env):
                     saw_unbound = True
 
             if saw_unbound and not sent_direct_quit:
-                os.write(master_fd, b"\x07")
+                os.write(master_fd, b"\x1b[1;6C")
                 sent_direct_quit = True
 
             if proc.poll() is not None:
@@ -460,7 +460,7 @@ def run_desk_configurable_keys(desk, cube, env):
         if not saw_unbound:
             raise AssertionError(f"unbound Prefix-m was not forwarded: {captured!r}")
         if not sent_direct_quit:
-            raise AssertionError("direct quit shortcut was not sent")
+            raise AssertionError("modified direct quit shortcut was not sent")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
@@ -547,8 +547,8 @@ def run_desk_bindings_overlay(desk, env):
                 if (
                     b"Key bindings" in captured
                     and b"[bindings.show]" in captured
-                    and b"Control-G" in captured
-                    and b"now uses Control-G" in captured
+                    and b"C-G" in captured
+                    and b"now uses C-G" in captured
                 ):
                     saw_edited_binding = True
 
@@ -596,6 +596,17 @@ def run_desk_bindings_overlay(desk, env):
             raise AssertionError(
                 f"desk bindings overlay exited with {proc.returncode}; output={captured!r}"
             )
+        config_path = os.path.join(
+            env["XDG_CONFIG_HOME"], "cubicle", "config.cfg"
+        )
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config_text = handle.read()
+        if "cubicle-desk-managed-keys: begin" not in config_text:
+            raise AssertionError(f"desk did not persist managed bindings: {config_text}")
+        if "C-G bindings.show" not in config_text:
+            raise AssertionError(f"desk did not persist edited binding: {config_text}")
+        if "Prefix-? none" not in config_text:
+            raise AssertionError(f"desk did not persist old binding unbind: {config_text}")
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -1771,7 +1782,7 @@ def main():
                 "\n"
                 "[desk.keys]\n"
                 "bind.1=Prefix-m none\n"
-                "bind.2=Control-G quit\n"
+                "bind.2=C-S-Right quit\n"
             ),
         )
         run_desk_configurable_keys(desk, cube, env)

@@ -508,13 +508,18 @@ assignments under a name. Press `Prefix-;` to open a centered searchable layout
 picker; type to filter, use the arrow keys to move through long lists, and press
 Enter to load the selected layout. Press `Prefix-?` to show a centered overlay
 with command names, descriptions, and configured key bindings. From that overlay,
-press `e` to edit the selected command's binding for the current Desk session.
+press `e` to edit the selected command's binding. Desk applies the edit
+immediately and persists it in a managed block in the per-user config file.
 
 Desk key bindings can be configured with `[desk] prefix=KEY` and
 `[desk.keys] bind.N=KEY COMMAND`. Key names follow tmux-style forms such as
 `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
-`Escape`, `Backspace`, `Tab`, or a single printable character. Prefix shortcuts
-use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Supported command names are
+`Escape`, `Backspace`, `Tab`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
+`Insert`, `Delete`, `F1` through `F12`, modified keys such as `C-S-Right`,
+`M-PageUp`, `S-F5`, or a single printable character. Prefix shortcuts
+use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
+`Control-Shift-Right` are accepted and displayed as canonical tmux-style names.
+Supported command names are
 `pane.next`, `pane.previous`, `layout.zoom`, `layout.resize.toggle`,
 `layout.save`, `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, and
 `quit`. Use `none` to unbind a default shortcut.

@@ -229,6 +229,8 @@ typedef struct desk_session {
     desk_pane_layout_t layout;
     char layout_path[PATH_MAX];
     unsigned char prefix_key;
+    unsigned char prefix_sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
+    size_t prefix_sequence_length;
     bool mouse_titles;
     long long mouse_suspended_until_ms;
     bool prefix_pending;
@@ -245,6 +247,8 @@ typedef struct desk_session {
     desk_open_menu_t open_menu;
     cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t key_binding_count;
+    cubicle_desk_key_binding_t startup_key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
+    size_t startup_key_binding_count;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -256,6 +260,11 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
 static long long desk_monotonic_ms(void);
 static bool desk_string_equals_case(const char *left, const char *right);
 static int parse_prefix_key(const char *text, unsigned char *key);
+static bool desk_execute_command(desk_session_t *session,
+                                 desk_terminal_t *terminal,
+                                 const char *command,
+                                 bool *layout_changed,
+                                 bool *quit_requested);
 
 static void handle_signal(int signo)
 {
@@ -3324,38 +3333,11 @@ static const char *desk_command_description(const char *command)
     return "Unknown command";
 }
 
-static void desk_format_key(unsigned char key, char *buffer, size_t size)
-{
-    if (key == 0) {
-        snprintf(buffer, size, "Control-Space");
-    } else if (key > 0 && key < 32) {
-        snprintf(buffer, size, "Control-%c", (char)(key + '@'));
-    } else if (key == ' ') {
-        snprintf(buffer, size, "Space");
-    } else if (key == '\r') {
-        snprintf(buffer, size, "Enter");
-    } else if (key == 0x1b) {
-        snprintf(buffer, size, "Escape");
-    } else if (key == 0x7f) {
-        snprintf(buffer, size, "Backspace");
-    } else if (key == '\t') {
-        snprintf(buffer, size, "Tab");
-    } else {
-        snprintf(buffer, size, "%c", (char)key);
-    }
-}
-
 static void desk_format_binding_key(const cubicle_desk_key_binding_t *binding,
                                     char *buffer,
                                     size_t size)
 {
-    char key[32];
-    desk_format_key(binding->key, key, sizeof(key));
-    if (binding->uses_prefix) {
-        snprintf(buffer, size, "Prefix-%s", key);
-    } else {
-        snprintf(buffer, size, "%s", key);
-    }
+    snprintf(buffer, size, "%s", binding->key_name);
 }
 
 static void desk_append_binding_text(char *destination,
@@ -3452,20 +3434,15 @@ static void desk_begin_binding_edit_prompt(desk_session_t *session,
 }
 
 static int desk_parse_binding_key_text(const char *text,
-                                       bool *uses_prefix,
-                                       unsigned char *key)
+                                       cubicle_desk_key_binding_t *binding,
+                                       char *error,
+                                       size_t error_size)
 {
-    if (text == NULL || text[0] == '\0') {
-        return -1;
-    }
-    const char *key_text = text;
-    *uses_prefix = false;
-    if (strncmp(text, "Prefix-", 7) == 0 ||
-        strncmp(text, "prefix-", 7) == 0) {
-        *uses_prefix = true;
-        key_text = text + 7;
-    }
-    return parse_prefix_key(key_text, key);
+    memset(binding, 0, sizeof(*binding));
+    return cubicle_config_parse_desk_key_name(
+        text, &binding->uses_prefix, &binding->key, binding->sequence,
+        &binding->sequence_length, binding->key_name,
+        sizeof(binding->key_name), error, error_size);
 }
 
 static void desk_remove_bindings_for_command(desk_session_t *session,
@@ -3485,15 +3462,16 @@ static void desk_remove_bindings_for_command(desk_session_t *session,
 
 static const char *desk_find_binding_conflict(const desk_session_t *session,
                                              const char *command,
-                                             bool uses_prefix,
-                                             unsigned char key)
+                                             const cubicle_desk_key_binding_t *candidate)
 {
     for (size_t i = 0; i < session->key_binding_count; ++i) {
         const cubicle_desk_key_binding_t *binding = &session->key_bindings[i];
         if (binding->unbind ||
             strcmp(binding->command, command) == 0 ||
-            binding->uses_prefix != (uses_prefix ? 1 : 0) ||
-            binding->key != key) {
+            binding->uses_prefix != candidate->uses_prefix ||
+            binding->sequence_length != candidate->sequence_length ||
+            memcmp(binding->sequence, candidate->sequence,
+                   candidate->sequence_length) != 0) {
             continue;
         }
         return binding->command;
@@ -3509,32 +3487,41 @@ static int desk_apply_binding_edit(desk_session_t *session)
 
     if (desk_string_equals_case(menu->command, "none")) {
         desk_remove_bindings_for_command(session, command);
+        char persist_error[256] = "";
+        int persisted = cubicle_config_write_user_desk_key_bindings(
+            session->key_bindings, session->key_binding_count,
+            session->startup_key_bindings, session->startup_key_binding_count,
+            persist_error, sizeof(persist_error));
         desk_begin_bindings_overlay(session);
         desk_select_binding_command(session, command);
-        snprintf(session->open_menu.status, sizeof(session->open_menu.status),
-                 "[%s] is unbound", command);
+        if (persisted == 0) {
+            snprintf(session->open_menu.status,
+                     sizeof(session->open_menu.status), "[%s] is unbound",
+                     command);
+        } else {
+            snprintf(session->open_menu.status,
+                     sizeof(session->open_menu.status),
+                     "[%s] is unbound; config write failed", command);
+        }
         return 0;
     }
 
-    bool uses_prefix = false;
-    unsigned char key = 0;
-    if (desk_parse_binding_key_text(menu->command, &uses_prefix, &key) < 0) {
+    cubicle_desk_key_binding_t parsed;
+    char parse_error[128] = "";
+    if (desk_parse_binding_key_text(menu->command, &parsed, parse_error,
+                                    sizeof(parse_error)) < 0) {
         snprintf(menu->status, sizeof(menu->status),
-                 "Invalid key. Try Prefix-?, Control-G, Space, or Tab.");
+                 "%s", parse_error[0] != '\0'
+                          ? parse_error
+                          : "Invalid key. Try Prefix-?, C-G, or C-S-Right.");
         return 0;
     }
 
     const char *conflict =
-        desk_find_binding_conflict(session, command, uses_prefix, key);
+        desk_find_binding_conflict(session, command, &parsed);
     if (conflict != NULL) {
-        char key_text[64];
-        cubicle_desk_key_binding_t formatted = {
-            .uses_prefix = uses_prefix ? 1 : 0,
-            .key = key,
-        };
-        desk_format_binding_key(&formatted, key_text, sizeof(key_text));
         snprintf(menu->status, sizeof(menu->status),
-                 "%s is already bound to [%s]", key_text, conflict);
+                 "%s is already bound to [%s]", parsed.key_name, conflict);
         return 0;
     }
 
@@ -3548,17 +3535,24 @@ static int desk_apply_binding_edit(desk_session_t *session)
     cubicle_desk_key_binding_t *binding =
         &session->key_bindings[session->key_binding_count++];
     memset(binding, 0, sizeof(*binding));
-    binding->uses_prefix = uses_prefix ? 1 : 0;
-    binding->key = key;
-    desk_format_key(key, binding->key_name, sizeof(binding->key_name));
+    *binding = parsed;
     snprintf(binding->command, sizeof(binding->command), "%s", command);
 
-    char key_text[64];
-    desk_format_binding_key(binding, key_text, sizeof(key_text));
+    char persist_error[256] = "";
+    int persisted = cubicle_config_write_user_desk_key_bindings(
+        session->key_bindings, session->key_binding_count,
+        session->startup_key_bindings, session->startup_key_binding_count,
+        persist_error, sizeof(persist_error));
     desk_begin_bindings_overlay(session);
     desk_select_binding_command(session, command);
-    snprintf(session->open_menu.status, sizeof(session->open_menu.status),
-             "[%s] now uses %s", command, key_text);
+    if (persisted == 0) {
+        snprintf(session->open_menu.status, sizeof(session->open_menu.status),
+                 "[%s] now uses %s", command, binding->key_name);
+    } else {
+        snprintf(session->open_menu.status, sizeof(session->open_menu.status),
+                 "[%s] now uses %s; config write failed", command,
+                 binding->key_name);
+    }
     return 0;
 }
 
@@ -4946,16 +4940,193 @@ static int handle_open_menu_input(desk_session_t *session,
 static const cubicle_desk_key_binding_t *desk_find_key_binding(
     const desk_session_t *session,
     bool uses_prefix,
-    unsigned char key)
+    const unsigned char *input,
+    size_t length,
+    size_t *consumed,
+    bool *partial)
 {
+    *partial = false;
     for (size_t i = 0; i < session->key_binding_count; ++i) {
         const cubicle_desk_key_binding_t *binding = &session->key_bindings[i];
-        if (!binding->unbind && binding->uses_prefix == (uses_prefix ? 1 : 0) &&
-            binding->key == key) {
-            return binding;
+        if (binding->unbind ||
+            binding->uses_prefix != (uses_prefix ? 1 : 0)) {
+            continue;
+        }
+        size_t compare_length = binding->sequence_length < length
+                                    ? binding->sequence_length
+                                    : length;
+        if (compare_length > 0 &&
+            memcmp(binding->sequence, input, compare_length) == 0) {
+            if (binding->sequence_length <= length) {
+                *consumed = binding->sequence_length;
+                return binding;
+            }
+            *partial = true;
         }
     }
     return NULL;
+}
+
+static bool desk_sequence_matches(const unsigned char *expected,
+                                  size_t expected_length,
+                                  const unsigned char *input,
+                                  size_t length,
+                                  size_t *consumed,
+                                  bool *partial)
+{
+    *partial = false;
+    if (expected_length == 0) {
+        return false;
+    }
+    size_t compare_length = expected_length < length ? expected_length : length;
+    if (memcmp(expected, input, compare_length) != 0) {
+        return false;
+    }
+    if (expected_length <= length) {
+        *consumed = expected_length;
+        return true;
+    }
+    *partial = true;
+    return false;
+}
+
+static bool desk_escape_sequence_incomplete(const unsigned char *input,
+                                            size_t length,
+                                            size_t offset)
+{
+    if (offset >= length || input[offset] != 0x1b) {
+        return false;
+    }
+    if (offset + 1 >= length) {
+        return false;
+    }
+    if (input[offset + 1] == 'O') {
+        return offset + 2 >= length;
+    }
+    if (input[offset + 1] != '[') {
+        return false;
+    }
+    for (size_t i = offset + 2; i < length; ++i) {
+        if (input[i] >= 0x40 && input[i] <= 0x7e) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void desk_save_pending_from(desk_session_t *session,
+                                   const unsigned char *input,
+                                   size_t length,
+                                   size_t offset)
+{
+    if (offset >= length) {
+        session->pending_input_length = 0;
+        return;
+    }
+    size_t remaining = length - offset;
+    if (remaining > sizeof(session->pending_input)) {
+        remaining = sizeof(session->pending_input);
+    }
+    memcpy(session->pending_input, input + offset, remaining);
+    session->pending_input_length = remaining;
+}
+
+static int desk_write_prefix_sequence(desk_session_t *session)
+{
+    return write_active_pane(session, session->prefix_sequence,
+                             session->prefix_sequence_length);
+}
+
+static int desk_write_input_sequence(desk_session_t *session,
+                                     const unsigned char *input,
+                                     size_t length)
+{
+    return write_active_pane(session, input, length);
+}
+
+static int desk_handle_prefixed_sequence(desk_session_t *session,
+                                         desk_terminal_t *terminal,
+                                         const unsigned char *input,
+                                         size_t length,
+                                         size_t offset,
+                                         size_t *consumed,
+                                         bool *layout_changed,
+                                         bool *quit_requested,
+                                         bool *need_more)
+{
+    *need_more = false;
+    bool partial = false;
+    const cubicle_desk_key_binding_t *binding =
+        desk_find_key_binding(session, true, input + offset, length - offset,
+                              consumed, &partial);
+    if (binding != NULL) {
+        session->prefix_pending = false;
+        (void)desk_execute_command(session, terminal, binding->command,
+                                   layout_changed, quit_requested);
+        return 0;
+    }
+    if (partial || desk_escape_sequence_incomplete(input, length, offset)) {
+        desk_save_pending_from(session, input, length, offset);
+        *need_more = true;
+        return 0;
+    }
+
+    if (desk_write_prefix_sequence(session) < 0) {
+        return -1;
+    }
+    session->prefix_pending = false;
+    if (desk_write_input_sequence(session, input + offset, 1) < 0) {
+        return -1;
+    }
+    *consumed = 1;
+    return 0;
+}
+
+static int desk_handle_direct_sequence(desk_session_t *session,
+                                       desk_terminal_t *terminal,
+                                       const unsigned char *input,
+                                       size_t length,
+                                       size_t offset,
+                                       size_t *consumed,
+                                       bool *layout_changed,
+                                       bool *quit_requested,
+                                       bool *need_more,
+                                       bool *handled)
+{
+    *need_more = false;
+    *handled = false;
+    bool partial = false;
+    if (desk_sequence_matches(session->prefix_sequence,
+                              session->prefix_sequence_length,
+                              input + offset, length - offset, consumed,
+                              &partial)) {
+        session->prefix_pending = true;
+        *handled = true;
+        return 0;
+    }
+    if (partial) {
+        desk_save_pending_from(session, input, length, offset);
+        *need_more = true;
+        *handled = true;
+        return 0;
+    }
+
+    const cubicle_desk_key_binding_t *binding =
+        desk_find_key_binding(session, false, input + offset, length - offset,
+                              consumed, &partial);
+    if (binding != NULL) {
+        (void)desk_execute_command(session, terminal, binding->command,
+                                   layout_changed, quit_requested);
+        *handled = true;
+        return 0;
+    }
+    if (partial || desk_escape_sequence_incomplete(input, length, offset)) {
+        desk_save_pending_from(session, input, length, offset);
+        *need_more = true;
+        *handled = true;
+        return 0;
+    }
+    return 0;
 }
 
 static bool desk_execute_command(desk_session_t *session,
@@ -5155,38 +5326,38 @@ static int handle_input(desk_session_t *session,
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
             }
-            session->prefix_pending = false;
-            const cubicle_desk_key_binding_t *binding =
-                desk_find_key_binding(session, true, input[i]);
-            if (binding != NULL) {
-                (void)desk_execute_command(session, terminal, binding->command,
-                                           layout_changed, quit_requested);
-            } else if (input[i] == session->prefix_key) {
-                (void)write_active_pane(session, &session->prefix_key, 1);
-            } else {
-                (void)write_active_pane(session, &session->prefix_key, 1);
-                (void)write_active_pane(session, &input[i], 1);
+            bool need_more = false;
+            if (desk_handle_prefixed_sequence(session, terminal, input, length,
+                                             i, &consumed, layout_changed,
+                                             quit_requested, &need_more) < 0) {
+                return -1;
             }
+            if (need_more) {
+                return 0;
+            }
+            i += consumed - 1;
             start = i + 1;
             continue;
         }
-        if (input[i] == session->prefix_key) {
-            if (flush_active_input(session, input, start, i) < 0) {
-                return -1;
-            }
-            session->prefix_pending = true;
-            start = i + 1;
-            continue;
+        bool need_more = false;
+        bool handled = false;
+        if (desk_handle_direct_sequence(session, terminal, input, length, i,
+                                        &consumed, layout_changed,
+                                        quit_requested, &need_more,
+                                        &handled) < 0) {
+            return -1;
         }
-        const cubicle_desk_key_binding_t *direct_binding =
-            desk_find_key_binding(session, false, input[i]);
-        if (direct_binding != NULL) {
+        if (need_more) {
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
             }
-            (void)desk_execute_command(session, terminal,
-                                       direct_binding->command,
-                                       layout_changed, quit_requested);
+            return 0;
+        }
+        if (handled) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            i += consumed - 1;
             start = i + 1;
             continue;
         }
@@ -5246,9 +5417,21 @@ static int desk_run_workspace(const char *workspace_arg,
         return 2;
     }
     session.prefix_key = prefix_override ? prefix_key : config.desk_prefix_key;
+    if (prefix_override) {
+        session.prefix_sequence[0] = prefix_key;
+        session.prefix_sequence_length = 1;
+    } else {
+        memcpy(session.prefix_sequence, config.desk_prefix_sequence,
+               config.desk_prefix_sequence_length);
+        session.prefix_sequence_length = config.desk_prefix_sequence_length;
+    }
     session.key_binding_count = config.desk_key_binding_count;
     memcpy(session.key_bindings, config.desk_key_bindings,
            session.key_binding_count * sizeof(session.key_bindings[0]));
+    session.startup_key_binding_count = session.key_binding_count;
+    memcpy(session.startup_key_bindings, session.key_bindings,
+           session.startup_key_binding_count *
+               sizeof(session.startup_key_bindings[0]));
     desk_debug_log("event=run_start workspace_arg=%s",
                    workspace_arg != NULL ? workspace_arg : "");
 

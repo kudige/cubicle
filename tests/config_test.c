@@ -84,6 +84,49 @@ static void test_defaults(void)
     assert(config.default_kill_cleanup == 0);
 }
 
+static void test_desk_key_parser(void)
+{
+    int uses_prefix = 0;
+    unsigned char key = 0;
+    unsigned char sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
+    size_t sequence_length = 0;
+    char normalized[CUBICLE_DESK_KEY_NAME_MAX];
+    char error[256];
+
+    assert(cubicle_config_parse_desk_key_name(
+               "Control-G", &uses_prefix, &key, sequence, &sequence_length,
+               normalized, sizeof(normalized), error, sizeof(error)) == 0);
+    assert(!uses_prefix);
+    assert(key == 7);
+    assert(sequence_length == 1 && sequence[0] == 7);
+    assert(strcmp(normalized, "C-G") == 0);
+
+    assert(cubicle_config_parse_desk_key_name(
+               "Prefix-Control-Shift-Right", &uses_prefix, &key, sequence,
+               &sequence_length, normalized, sizeof(normalized), error,
+               sizeof(error)) == 0);
+    assert(uses_prefix);
+    assert(sequence_length == 6);
+    assert(memcmp(sequence, "\x1b[1;6C", sequence_length) == 0);
+    assert(strcmp(normalized, "Prefix-C-S-Right") == 0);
+
+    assert(cubicle_config_parse_desk_key_name(
+               "M-PageUp", &uses_prefix, &key, sequence, &sequence_length,
+               normalized, sizeof(normalized), error, sizeof(error)) == 0);
+    assert(!uses_prefix);
+    assert(sequence_length == 6);
+    assert(memcmp(sequence, "\x1b[5;3~", sequence_length) == 0);
+    assert(strcmp(normalized, "M-PageUp") == 0);
+
+    assert(cubicle_config_parse_desk_key_name(
+               "S-F5", &uses_prefix, &key, sequence, &sequence_length,
+               normalized, sizeof(normalized), error, sizeof(error)) == 0);
+    assert(!uses_prefix);
+    assert(sequence_length == 7);
+    assert(memcmp(sequence, "\x1b[15;2~", sequence_length) == 0);
+    assert(strcmp(normalized, "S-F5") == 0);
+}
+
 static void test_override_file(void)
 {
     char path[CUBICLE_PATH_MAX];
@@ -454,6 +497,7 @@ static void test_unix_uri_path(void)
 int main(void)
 {
     test_defaults();
+    test_desk_key_parser();
     assert(strcmp(cubicle_launch_default_name(CUBICLE_LAUNCH_FOREGROUND),
                   "foreground") == 0);
     assert(strcmp(cubicle_launch_default_name(CUBICLE_LAUNCH_BACKGROUND),

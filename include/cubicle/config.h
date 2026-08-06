@@ -46,10 +46,13 @@ typedef enum cubicle_config_key {
 #define CUBICLE_DESK_KEY_BINDING_MAX 64
 #define CUBICLE_DESK_KEY_NAME_MAX 64
 #define CUBICLE_DESK_COMMAND_NAME_MAX 64
+#define CUBICLE_DESK_KEY_SEQUENCE_MAX 16
 
 typedef struct cubicle_desk_key_binding {
     int uses_prefix;
     unsigned char key;
+    unsigned char sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
+    size_t sequence_length;
     char key_name[CUBICLE_DESK_KEY_NAME_MAX];
     char command[CUBICLE_DESK_COMMAND_NAME_MAX];
     int unbind;
@@ -79,6 +82,9 @@ typedef struct cubicle_config {
     int desk_debug_library;
     int desk_debug_terminal;
     unsigned char desk_prefix_key;
+    unsigned char desk_prefix_sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
+    size_t desk_prefix_sequence_length;
+    char desk_prefix_key_name[CUBICLE_DESK_KEY_NAME_MAX];
     cubicle_desk_key_binding_t desk_key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t desk_key_binding_count;
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
@@ -101,6 +107,23 @@ int cubicle_config_validate(const cubicle_config_t *config,
 int cubicle_config_unix_uri_path(const char *uri,
                                  char *path,
                                  size_t path_size);
+int cubicle_config_parse_desk_key_name(const char *text,
+                                       int *uses_prefix,
+                                       unsigned char *key,
+                                       unsigned char *sequence,
+                                       size_t *sequence_length,
+                                       char *normalized,
+                                       size_t normalized_size,
+                                       char *error,
+                                       size_t error_size);
+int cubicle_config_user_path(char *path, size_t path_size);
+int cubicle_config_write_user_desk_key_bindings(
+    const cubicle_desk_key_binding_t *bindings,
+    size_t binding_count,
+    const cubicle_desk_key_binding_t *previous_bindings,
+    size_t previous_binding_count,
+    char *error,
+    size_t error_size);
 const char *cubicle_launch_default_name(cubicle_launch_default_t launch);
 const char *cubicle_config_key_name(cubicle_config_key_t key);
 const cubicle_config_origin_t *cubicle_config_origin(
