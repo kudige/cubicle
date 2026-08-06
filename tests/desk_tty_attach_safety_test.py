@@ -51,6 +51,21 @@ def read_controller_events(log_dir):
     return "\n".join(events)
 
 
+def write_test_config(config_path, log_dir, extra=""):
+    with open(config_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "[manager]\n"
+            f"log_dir={log_dir}\n"
+            "\n"
+            "[controller]\n"
+            "debug=input\n"
+            "\n"
+            "[desk]\n"
+            "debug=library,terminal\n"
+            f"{extra}"
+        )
+
+
 def run_desk_and_ctrl_c(desk, cube, env, log_dir):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -375,6 +390,82 @@ def run_desk_save_and_load_layout(desk, env):
         if proc.returncode != 0:
             raise AssertionError(
                 f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
+def run_desk_configurable_keys(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_unbound = False
+    saw_unbound = False
+    sent_direct_quit = False
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_unbound and b"desk-safe" in captured:
+                os.write(master_fd, b"\x01m")
+                sent_unbound = True
+
+            if sent_unbound and not saw_unbound:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_PREFIX_M" in logs.stdout:
+                    saw_unbound = True
+
+            if saw_unbound and not sent_direct_quit:
+                os.write(master_fd, b"\x07")
+                sent_direct_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_unbound:
+            raise AssertionError(f"desk did not render configurable-key pane: {captured!r}")
+        if not saw_unbound:
+            raise AssertionError(f"unbound Prefix-m was not forwarded: {captured!r}")
+        if not sent_direct_quit:
+            raise AssertionError("direct quit shortcut was not sent")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk direct quit exited with {proc.returncode}; output={captured!r}"
             )
     finally:
         if proc.poll() is None:
@@ -1456,21 +1547,10 @@ def main():
         os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
         os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
         os.makedirs(os.path.join(env["XDG_CONFIG_HOME"], "cubicle"), exist_ok=True)
-        with open(
-            os.path.join(env["XDG_CONFIG_HOME"], "cubicle", "config.cfg"),
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            handle.write(
-                "[manager]\n"
-                f"log_dir={log_dir}\n"
-                "\n"
-                "[controller]\n"
-                "debug=input\n"
-                "\n"
-                "[desk]\n"
-                "debug=library,terminal\n"
-            )
+        config_path = os.path.join(
+            env["XDG_CONFIG_HOME"], "cubicle", "config.cfg"
+        )
+        write_test_config(config_path, log_dir)
 
         manager_proc = subprocess.Popen(
             [
@@ -1528,6 +1608,7 @@ def main():
                     "data=b''\n"
                     "saw_ctrl_c=False\n"
                     "saw_ping=False\n"
+                    "saw_prefix_m=False\n"
                     "while time.time()<deadline:\n"
                     "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
                     "    if r:\n"
@@ -1540,7 +1621,11 @@ def main():
                     "        sys.stdout.write('GOT_PING\\n')\n"
                     "        sys.stdout.flush()\n"
                     "        saw_ping=True\n"
-                    "    if saw_ctrl_c and saw_ping:\n"
+                    "    if not saw_prefix_m and b'\\x01m' in data:\n"
+                    "        sys.stdout.write('GOT_PREFIX_M\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_prefix_m=True\n"
+                    "    if saw_ctrl_c and saw_ping and saw_prefix_m:\n"
                     "        break\n"
                     "time.sleep(10)\n"
                 ),
@@ -1549,6 +1634,19 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+        write_test_config(
+            config_path,
+            log_dir,
+            (
+                "prefix=Control-A\n"
+                "\n"
+                "[desk.keys]\n"
+                "bind.1=Prefix-m none\n"
+                "bind.2=Control-G quit\n"
+            ),
+        )
+        run_desk_configurable_keys(desk, cube, env)
+        write_test_config(config_path, log_dir)
         run_desk_save_and_load_layout(desk, env)
 
         run_checked(

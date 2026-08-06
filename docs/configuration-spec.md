@@ -255,6 +255,13 @@ debug=none
 
 [desk]
 debug=none
+prefix=Control-X
+
+[desk.keys]
+bind.1=Prefix-n pane.next
+bind.2=Prefix-p pane.previous
+bind.3=Prefix-Space layout.zoom
+bind.4=Control-G quit
 ```
 
 Keys:
@@ -264,6 +271,15 @@ Keys:
   `manager.log_dir/client-library.log`, including connect/disconnect events,
   RPC method names, request/response sizes, return codes, and error messages.
   Payload contents are not logged.
+- `prefix`: Desk escape prefix key. It accepts tmux-style key names such as
+  `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
+  `Escape`, `Backspace`, `Tab`, or a single printable character.
+- `[desk.keys] bind.N`: Desk key binding in the form `KEY COMMAND`.
+  `KEY` may be prefixed with `Prefix-` or may be a direct non-prefix shortcut.
+  `COMMAND` is one of `pane.next`, `pane.previous`, `layout.zoom`,
+  `layout.resize.toggle`, `layout.save`, `layout.load`, `menu.open`,
+  `mouse.toggle`, or `quit`. Use `none` as the command to unbind a default key.
+  Duplicate active shortcuts are invalid.
 
 ### 5.5 `[client]`
 

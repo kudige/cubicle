@@ -472,6 +472,12 @@ debug=none
 
 [desk]
 debug=none
+prefix=Control-X
+
+[desk.keys]
+bind.1=Prefix-n pane.next
+bind.2=Prefix-p pane.previous
+bind.3=Prefix-Space layout.zoom
 
 [client]
 manager=unix:///run/cubicle/manager.sock
@@ -501,6 +507,15 @@ is disabled. Press `Prefix-:` to save the current pane layout and cube
 assignments under a name. Press `Prefix-;` to open a centered searchable layout
 picker; type to filter, use the arrow keys to move through long lists, and press
 Enter to load the selected layout.
+
+Desk key bindings can be configured with `[desk] prefix=KEY` and
+`[desk.keys] bind.N=KEY COMMAND`. Key names follow tmux-style forms such as
+`Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
+`Escape`, `Backspace`, `Tab`, or a single printable character. Prefix shortcuts
+use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Supported command names are
+`pane.next`, `pane.previous`, `layout.zoom`, `layout.resize.toggle`,
+`layout.save`, `layout.load`, `menu.open`, `mouse.toggle`, and `quit`. Use
+`none` to unbind a default shortcut.
 
 Examples:
 

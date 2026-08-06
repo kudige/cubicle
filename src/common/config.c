@@ -3,6 +3,7 @@
 #include "cubicle/config.h"
 
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <libeconf.h>
 #include <pwd.h>
@@ -153,6 +154,272 @@ static int parse_bool(const char *value,
                  "%s must be true or false", name);
     }
     return -1;
+}
+
+static int string_equals_case(const char *left, const char *right)
+{
+    while (*left != '\0' && *right != '\0') {
+        if (tolower((unsigned char)*left) !=
+            tolower((unsigned char)*right)) {
+            return 0;
+        }
+        ++left;
+        ++right;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static int parse_control_key_char(char ch, unsigned char *key)
+{
+    if (ch >= 'a' && ch <= 'z') {
+        ch = (char)(ch - 'a' + 'A');
+    }
+    if (ch == ' ' || ch == '@') {
+        *key = 0;
+        return 0;
+    }
+    if (ch < 'A' || ch > '_') {
+        return -1;
+    }
+    *key = (unsigned char)(ch - '@');
+    return 0;
+}
+
+static int parse_desk_key_name(const char *text,
+                               int *uses_prefix,
+                               unsigned char *key,
+                               char *normalized,
+                               size_t normalized_size,
+                               char *error,
+                               size_t error_size)
+{
+    if (text == NULL || text[0] == '\0') {
+        set_error(error, error_size, "desk key name must not be empty");
+        return -1;
+    }
+    *uses_prefix = 0;
+    const char *name = text;
+    if (strncmp(name, "Prefix-", 7) == 0 ||
+        strncmp(name, "prefix-", 7) == 0) {
+        *uses_prefix = 1;
+        name += 7;
+    }
+
+    unsigned char parsed = 0;
+    if (name[0] == '^' && name[1] != '\0' && name[2] == '\0') {
+        if (parse_control_key_char(name[1], &parsed) < 0) {
+            goto invalid;
+        }
+    } else if ((strncmp(name, "Control-", 8) == 0 ||
+                strncmp(name, "control-", 8) == 0)) {
+        const char *ch = name + 8;
+        if (string_equals_case(ch, "Space")) {
+            parsed = 0;
+        } else if (ch[0] != '\0' && ch[1] == '\0' &&
+                   parse_control_key_char(ch[0], &parsed) == 0) {
+            /* parsed */
+        } else {
+            goto invalid;
+        }
+    } else if ((strncmp(name, "Ctrl-", 5) == 0 ||
+                strncmp(name, "ctrl-", 5) == 0)) {
+        const char *ch = name + 5;
+        if (string_equals_case(ch, "Space")) {
+            parsed = 0;
+        } else if (ch[0] != '\0' && ch[1] == '\0' &&
+                   parse_control_key_char(ch[0], &parsed) == 0) {
+            /* parsed */
+        } else {
+            goto invalid;
+        }
+    } else if ((strncmp(name, "C-", 2) == 0 ||
+                strncmp(name, "c-", 2) == 0)) {
+        const char *ch = name + 2;
+        if (string_equals_case(ch, "Space")) {
+            parsed = 0;
+        } else if (ch[0] != '\0' && ch[1] == '\0' &&
+                   parse_control_key_char(ch[0], &parsed) == 0) {
+            /* parsed */
+        } else {
+            goto invalid;
+        }
+    } else if (string_equals_case(name, "Space")) {
+        parsed = ' ';
+    } else if (string_equals_case(name, "Enter") ||
+               string_equals_case(name, "Return")) {
+        parsed = '\r';
+    } else if (string_equals_case(name, "Escape") ||
+               string_equals_case(name, "Esc")) {
+        parsed = 0x1b;
+    } else if (string_equals_case(name, "Backspace")) {
+        parsed = 0x7f;
+    } else if (string_equals_case(name, "Tab")) {
+        parsed = '\t';
+    } else if (name[0] != '\0' && name[1] == '\0') {
+        parsed = (unsigned char)name[0];
+    } else {
+        goto invalid;
+    }
+
+    *key = parsed;
+    int length = snprintf(normalized, normalized_size, "%s%s",
+                          *uses_prefix ? "Prefix-" : "", name);
+    return length < 0 || (size_t)length >= normalized_size ? -1 : 0;
+
+invalid:
+    if (error != NULL && error_size > 0) {
+        snprintf(error, error_size, "invalid desk key name '%s'", text);
+    }
+    return -1;
+}
+
+static int desk_command_is_known(const char *command)
+{
+    return strcmp(command, "pane.next") == 0 ||
+           strcmp(command, "pane.previous") == 0 ||
+           strcmp(command, "layout.zoom") == 0 ||
+           strcmp(command, "layout.resize.toggle") == 0 ||
+           strcmp(command, "layout.save") == 0 ||
+           strcmp(command, "layout.load") == 0 ||
+           strcmp(command, "menu.open") == 0 ||
+           strcmp(command, "mouse.toggle") == 0 ||
+           strcmp(command, "quit") == 0;
+}
+
+static int add_desk_key_binding(cubicle_config_t *config,
+                                const char *key_name,
+                                const char *command,
+                                int builtin,
+                                char *error,
+                                size_t error_size)
+{
+    if (config->desk_key_binding_count >= CUBICLE_DESK_KEY_BINDING_MAX) {
+        set_error(error, error_size, "desk.keys has too many bindings");
+        return -1;
+    }
+    cubicle_desk_key_binding_t binding;
+    memset(&binding, 0, sizeof(binding));
+    if (parse_desk_key_name(key_name, &binding.uses_prefix, &binding.key,
+                            binding.key_name, sizeof(binding.key_name),
+                            error, error_size) < 0) {
+        return -1;
+    }
+    binding.unbind = strcmp(command, "none") == 0;
+    binding.builtin = builtin;
+    if (!binding.unbind && !desk_command_is_known(command)) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size,
+                     "unknown desk command '%s' in desk.keys", command);
+        }
+        return -1;
+    }
+    int length = snprintf(binding.command, sizeof(binding.command), "%s",
+                          command);
+    if (length < 0 || (size_t)length >= sizeof(binding.command)) {
+        set_error(error, error_size, "desk command name is too long");
+        return -1;
+    }
+    for (size_t i = 0; i < config->desk_key_binding_count; ++i) {
+        cubicle_desk_key_binding_t *existing =
+            &config->desk_key_bindings[i];
+        if (existing->uses_prefix == binding.uses_prefix &&
+            existing->key == binding.key) {
+            if (binding.unbind) {
+                memmove(existing, existing + 1,
+                        (config->desk_key_binding_count - i - 1) *
+                            sizeof(*existing));
+                config->desk_key_binding_count--;
+                return 0;
+            }
+            if (existing->builtin) {
+                *existing = binding;
+                return 0;
+            }
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size,
+                         "duplicate desk.keys binding for %s",
+                         binding.key_name);
+            }
+            return -1;
+        }
+    }
+    if (binding.unbind) {
+        return 0;
+    }
+    config->desk_key_bindings[config->desk_key_binding_count++] = binding;
+    return 0;
+}
+
+static int parse_desk_binding_value(cubicle_config_t *config,
+                                    const char *value,
+                                    char *error,
+                                    size_t error_size)
+{
+    char copy[160];
+    int length = snprintf(copy, sizeof(copy), "%s", value);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        set_error(error, error_size, "desk.keys binding is too long");
+        return -1;
+    }
+    char *cursor = copy;
+    while (*cursor == ' ' || *cursor == '\t') {
+        ++cursor;
+    }
+    char *key = cursor;
+    while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t') {
+        ++cursor;
+    }
+    if (*cursor == '\0') {
+        set_error(error, error_size,
+                  "desk.keys binding must be KEY COMMAND");
+        return -1;
+    }
+    *cursor++ = '\0';
+    while (*cursor == ' ' || *cursor == '\t') {
+        ++cursor;
+    }
+    char *command = cursor;
+    char *end = command + strlen(command);
+    while (end > command && (end[-1] == ' ' || end[-1] == '\t' ||
+                             end[-1] == '\r' || end[-1] == '\n')) {
+        *--end = '\0';
+    }
+    if (key[0] == '\0' || command[0] == '\0') {
+        set_error(error, error_size,
+                  "desk.keys binding must be KEY COMMAND");
+        return -1;
+    }
+    return add_desk_key_binding(config, key, command, 0, error, error_size);
+}
+
+static int validate_desk_key_conflicts(const cubicle_config_t *config,
+                                       char *error,
+                                       size_t error_size)
+{
+    for (size_t i = 0; i < config->desk_key_binding_count; ++i) {
+        const cubicle_desk_key_binding_t *left =
+            &config->desk_key_bindings[i];
+        if (left->unbind) {
+            continue;
+        }
+        for (size_t j = i + 1; j < config->desk_key_binding_count; ++j) {
+            const cubicle_desk_key_binding_t *right =
+                &config->desk_key_bindings[j];
+            if (right->unbind) {
+                continue;
+            }
+            if (left->uses_prefix == right->uses_prefix &&
+                left->key == right->key) {
+                if (error != NULL && error_size > 0) {
+                    snprintf(error, error_size,
+                             "duplicate desk.keys binding for %s",
+                             left->key_name);
+                }
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
 static int parse_library_debug(const char *value,
@@ -411,6 +678,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->cube_debug_library = 0;
     config->desk_debug_library = 0;
     config->desk_debug_terminal = 0;
+    config->desk_prefix_key = 0x18;
     snprintf(config->client_manager_uri, sizeof(config->client_manager_uri),
              "unix:///run/cubicle/manager.sock");
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
@@ -432,6 +700,16 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->default_launch = CUBICLE_LAUNCH_FOREGROUND;
     config->default_mode = CUBICLE_PROCESS_TTY;
     config->default_kill_cleanup = 0;
+    (void)add_desk_key_binding(config, "Prefix-n", "pane.next", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-p", "pane.previous", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-Space", "layout.zoom", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-s", "layout.resize.toggle",
+                               1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-m", "mouse.toggle", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-o", "menu.open", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-:", "layout.save", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-;", "layout.load", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-q", "quit", 1, NULL, 0);
     snprintf(config->source, sizeof(config->source), "built-in defaults");
     set_all_origins(config, CUBICLE_CONFIG_SOURCE_BUILTIN,
                     "built-in defaults");
@@ -624,6 +902,65 @@ static int apply_econf_file(cubicle_config_t *config,
     }
     if (desk_debug[0] != '\0') {
         set_origin(config, CUBICLE_CONFIG_DESK_DEBUG, source_kind, source);
+    }
+
+    char desk_prefix[64];
+    desk_prefix[0] = '\0';
+    if (get_optional_string(file, "desk", "prefix", desk_prefix,
+                            sizeof(desk_prefix), &present, error,
+                            error_size) < 0) {
+        return -1;
+    }
+    if (desk_prefix[0] != '\0') {
+        int prefixed = 0;
+        char normalized[CUBICLE_DESK_KEY_NAME_MAX];
+        if (parse_desk_key_name(desk_prefix, &prefixed,
+                                &config->desk_prefix_key, normalized,
+                                sizeof(normalized), error, error_size) < 0 ||
+            prefixed) {
+            if (prefixed) {
+                set_error(error, error_size,
+                          "desk.prefix must not include Prefix-");
+            }
+            return -1;
+        }
+        set_origin(config, CUBICLE_CONFIG_DESK_PREFIX, source_kind, source);
+    }
+
+    size_t desk_key_count = 0;
+    char **desk_keys = NULL;
+    econf_err keys_result = econf_getKeys(file, "desk.keys",
+                                          &desk_key_count, &desk_keys);
+    if (keys_result != ECONF_SUCCESS && keys_result != ECONF_NOGROUP &&
+        keys_result != ECONF_NOKEY) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "desk.keys: %s",
+                     econf_errString(keys_result));
+        }
+        return -1;
+    }
+    for (size_t i = 0; keys_result == ECONF_SUCCESS && i < desk_key_count;
+         ++i) {
+        if (strncmp(desk_keys[i], "bind.", 5) != 0) {
+            continue;
+        }
+        char binding_value[160];
+        binding_value[0] = '\0';
+        if (get_optional_string(file, "desk.keys", desk_keys[i],
+                                binding_value, sizeof(binding_value),
+                                &present, error, error_size) < 0 ||
+            (binding_value[0] != '\0' &&
+             parse_desk_binding_value(config, binding_value, error,
+                                      error_size) < 0)) {
+            econf_free(desk_keys);
+            return -1;
+        }
+        if (binding_value[0] != '\0') {
+            set_origin(config, CUBICLE_CONFIG_DESK_KEYS, source_kind, source);
+        }
+    }
+    if (desk_keys != NULL) {
+        econf_free(desk_keys);
     }
 
     char value[64];
@@ -942,6 +1279,10 @@ int cubicle_config_validate(const cubicle_config_t *config,
         return -1;
     }
 
+    if (validate_desk_key_conflicts(config, error, error_size) < 0) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1068,6 +1409,10 @@ const char *cubicle_config_key_name(cubicle_config_key_t key)
         return "defaults.mode";
     case CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP:
         return "defaults.kill_cleanup";
+    case CUBICLE_CONFIG_DESK_PREFIX:
+        return "desk.prefix";
+    case CUBICLE_CONFIG_DESK_KEYS:
+        return "desk.keys";
     case CUBICLE_CONFIG_KEY_COUNT:
     default:
         return "unknown";

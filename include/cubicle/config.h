@@ -38,8 +38,23 @@ typedef enum cubicle_config_key {
     CUBICLE_CONFIG_DEFAULTS_LAUNCH,
     CUBICLE_CONFIG_DEFAULTS_MODE,
     CUBICLE_CONFIG_DEFAULTS_KILL_CLEANUP,
+    CUBICLE_CONFIG_DESK_PREFIX,
+    CUBICLE_CONFIG_DESK_KEYS,
     CUBICLE_CONFIG_KEY_COUNT
 } cubicle_config_key_t;
+
+#define CUBICLE_DESK_KEY_BINDING_MAX 64
+#define CUBICLE_DESK_KEY_NAME_MAX 64
+#define CUBICLE_DESK_COMMAND_NAME_MAX 64
+
+typedef struct cubicle_desk_key_binding {
+    int uses_prefix;
+    unsigned char key;
+    char key_name[CUBICLE_DESK_KEY_NAME_MAX];
+    char command[CUBICLE_DESK_COMMAND_NAME_MAX];
+    int unbind;
+    int builtin;
+} cubicle_desk_key_binding_t;
 
 typedef struct cubicle_config_origin {
     cubicle_config_source_kind_t kind;
@@ -63,6 +78,9 @@ typedef struct cubicle_config {
     int cube_debug_library;
     int desk_debug_library;
     int desk_debug_terminal;
+    unsigned char desk_prefix_key;
+    cubicle_desk_key_binding_t desk_key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
+    size_t desk_key_binding_count;
     char client_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char client_server_identity[256];
     cubicle_launch_default_t default_launch;

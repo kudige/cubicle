@@ -74,6 +74,11 @@ static void test_defaults(void)
     assert(config.cube_debug_library == 0);
     assert(config.desk_debug_library == 0);
     assert(config.desk_debug_terminal == 0);
+    assert(config.desk_prefix_key == 0x18);
+    assert(config.desk_key_binding_count == 9);
+    assert(config.desk_key_bindings[0].uses_prefix == 1);
+    assert(config.desk_key_bindings[0].key == 'n');
+    assert(strcmp(config.desk_key_bindings[0].command, "pane.next") == 0);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY);
     assert(config.default_kill_cleanup == 0);
@@ -101,6 +106,12 @@ static void test_override_file(void)
                "\n"
                "[desk]\n"
                "debug=library,terminal\n"
+               "prefix=Control-Space\n"
+               "\n"
+               "[desk.keys]\n"
+               "bind.1=Prefix-n pane.previous\n"
+               "bind.2=Control-G quit\n"
+               "bind.3=Prefix-m none\n"
                "\n"
                "[client]\n"
                "manager=unix:///tmp/cubicle-run/manager.sock\n"
@@ -138,6 +149,31 @@ static void test_override_file(void)
     assert(config.cube_debug_library == 1);
     assert(config.desk_debug_library == 1);
     assert(config.desk_debug_terminal == 1);
+    assert(config.desk_prefix_key == 0);
+    assert(config.desk_key_binding_count == 9);
+    int saw_rebound_prefix_n = 0;
+    int saw_direct_quit = 0;
+    int saw_prefix_m = 0;
+    for (size_t i = 0; i < config.desk_key_binding_count; ++i) {
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'n' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "pane.previous") == 0) {
+            saw_rebound_prefix_n = 1;
+        }
+        if (!config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 7 &&
+            strcmp(config.desk_key_bindings[i].command, "quit") == 0) {
+            saw_direct_quit = 1;
+        }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'm') {
+            saw_prefix_m = 1;
+        }
+    }
+    assert(saw_rebound_prefix_n);
+    assert(saw_direct_quit);
+    assert(!saw_prefix_m);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
     assert(config.default_kill_cleanup == 1);
@@ -355,6 +391,31 @@ static void test_invalid_values(void)
                "debug=input\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "desk.debug") != NULL);
+
+    write_file(path,
+               "[desk]\n"
+               "prefix=Prefix-x\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "desk.prefix") != NULL);
+
+    write_file(path,
+               "[desk.keys]\n"
+               "bind.1=Control-NotAKey quit\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "desk key") != NULL);
+
+    write_file(path,
+               "[desk.keys]\n"
+               "bind.1=Control-G missing.command\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "desk command") != NULL);
+
+    write_file(path,
+               "[desk.keys]\n"
+               "bind.1=Control-G quit\n"
+               "bind.2=Control-G layout.zoom\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "duplicate desk.keys") != NULL);
     assert(unsetenv("CUBICLE_CONFIG") == 0);
 }
 

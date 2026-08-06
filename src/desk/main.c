@@ -236,6 +236,8 @@ typedef struct desk_session {
     unsigned char pending_input[64];
     size_t pending_input_length;
     desk_open_menu_t open_menu;
+    cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
+    size_t key_binding_count;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -1418,6 +1420,7 @@ static int desk_load_named_layout_file(const char *path,
 }
 
 static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
+                                           cubicle_config_t *config_out,
                                            char *error,
                                            size_t error_size)
 {
@@ -1464,6 +1467,8 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
                                                            client_out);
     if (code != CUBICLE_OK) {
         snprintf(error, error_size, "failed to connect to manager");
+    } else if (config_out != NULL) {
+        *config_out = config;
     }
     return code;
 }
@@ -1481,7 +1486,7 @@ static cubicle_error_code_t DESK_UNUSED resolve_attachment_target(
         return CUBICLE_ERR_NOT_FOUND;
     }
 
-    cubicle_error_code_t code = connect_client(&target->manager, error,
+    cubicle_error_code_t code = connect_client(&target->manager, NULL, error,
                                                error_size);
     if (code != CUBICLE_OK) {
         return code;
@@ -4568,35 +4573,53 @@ static int handle_open_menu_input(desk_session_t *session,
     return 0;
 }
 
-static bool handle_prefix_command(desk_session_t *session,
-                                  desk_terminal_t *terminal,
-                                  unsigned char key,
-                                  bool *layout_changed,
-                                  bool *quit_requested)
+static const cubicle_desk_key_binding_t *desk_find_key_binding(
+    const desk_session_t *session,
+    bool uses_prefix,
+    unsigned char key)
+{
+    for (size_t i = 0; i < session->key_binding_count; ++i) {
+        const cubicle_desk_key_binding_t *binding = &session->key_bindings[i];
+        if (!binding->unbind && binding->uses_prefix == (uses_prefix ? 1 : 0) &&
+            binding->key == key) {
+            return binding;
+        }
+    }
+    return NULL;
+}
+
+static bool desk_execute_command(desk_session_t *session,
+                                 desk_terminal_t *terminal,
+                                 const char *command,
+                                 bool *layout_changed,
+                                 bool *quit_requested)
 {
     bool keep_zoom = session->zoomed;
-    switch (key) {
-    case 'n':
+    if (strcmp(command, "pane.next") == 0) {
         pane_layout_next(&session->layout);
         session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
         *layout_changed = true;
         return true;
-    case 'p':
+    }
+    if (strcmp(command, "pane.previous") == 0) {
         pane_layout_previous(&session->layout);
         session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
         *layout_changed = true;
         return true;
-    case ' ':
+    }
+    if (strcmp(command, "layout.zoom") == 0) {
         session->zoomed = !session->zoomed;
         session->layout.zoom = session->zoomed ? DESK_ZOOM_FULL
                                                : DESK_ZOOM_NONE;
         *layout_changed = true;
         return true;
-    case 's':
+    }
+    if (strcmp(command, "layout.resize.toggle") == 0) {
         session->layout.resize_mode = !session->layout.resize_mode;
         *layout_changed = true;
         return true;
-    case 'm':
+    }
+    if (strcmp(command, "mouse.toggle") == 0) {
         session->mouse_titles = !session->mouse_titles;
         session->mouse_suspended_until_ms = 0;
         if (session->mouse_titles) {
@@ -4608,37 +4631,33 @@ static bool handle_prefix_command(desk_session_t *session,
                        session->mouse_titles ? 1 : 0);
         *layout_changed = true;
         return true;
-    case 'o':
+    }
+    if (strcmp(command, "menu.open") == 0) {
         (void)desk_open_root_menu(session);
         desk_menu_enable_mouse();
         desk_cursor_erase(terminal, session);
         desk_render_open_menu(terminal, session);
         return true;
-    case ':':
+    }
+    if (strcmp(command, "layout.save") == 0) {
         desk_begin_save_layout_prompt(session);
         desk_menu_enable_mouse();
         desk_cursor_erase(terminal, session);
         desk_render_open_menu(terminal, session);
         return true;
-    case ';':
+    }
+    if (strcmp(command, "layout.load") == 0) {
         desk_begin_layout_picker(session);
         desk_menu_enable_mouse();
         desk_cursor_erase(terminal, session);
         desk_render_open_menu(terminal, session);
         return true;
-    case 'q':
+    }
+    if (strcmp(command, "quit") == 0) {
         *quit_requested = true;
         return true;
-    default:
-        if (key == session->prefix_key) {
-            (void)write_active_pane(session, &session->prefix_key, 1);
-            return true;
-        }
-        (void)write_active_pane(session, &session->prefix_key, 1);
-        (void)write_active_pane(session, &key, 1);
-        (void)terminal;
-        return true;
     }
+    return false;
 }
 
 static bool is_terminal_csi_response(const unsigned char *input,
@@ -4760,8 +4779,17 @@ static int handle_input(desk_session_t *session,
                 return -1;
             }
             session->prefix_pending = false;
-            (void)handle_prefix_command(session, terminal, input[i],
-                                        layout_changed, quit_requested);
+            const cubicle_desk_key_binding_t *binding =
+                desk_find_key_binding(session, true, input[i]);
+            if (binding != NULL) {
+                (void)desk_execute_command(session, terminal, binding->command,
+                                           layout_changed, quit_requested);
+            } else if (input[i] == session->prefix_key) {
+                (void)write_active_pane(session, &session->prefix_key, 1);
+            } else {
+                (void)write_active_pane(session, &session->prefix_key, 1);
+                (void)write_active_pane(session, &input[i], 1);
+            }
             start = i + 1;
             continue;
         }
@@ -4770,6 +4798,18 @@ static int handle_input(desk_session_t *session,
                 return -1;
             }
             session->prefix_pending = true;
+            start = i + 1;
+            continue;
+        }
+        const cubicle_desk_key_binding_t *direct_binding =
+            desk_find_key_binding(session, false, input[i]);
+        if (direct_binding != NULL) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            (void)desk_execute_command(session, terminal,
+                                       direct_binding->command,
+                                       layout_changed, quit_requested);
             start = i + 1;
             continue;
         }
@@ -4812,21 +4852,26 @@ static void desk_session_cleanup(desk_session_t *session)
 
 static int desk_run_workspace(const char *workspace_arg,
                               unsigned char prefix_key,
+                              bool prefix_override,
                               bool mouse_titles)
 {
     char error[512];
     desk_session_t session;
     memset(&session, 0, sizeof(session));
-    session.prefix_key = prefix_key;
     session.mouse_titles = mouse_titles;
     session.terminal_size_dirty = true;
 
-    cubicle_error_code_t code = connect_client(&session.manager, error,
-                                               sizeof(error));
+    cubicle_config_t config;
+    cubicle_error_code_t code = connect_client(&session.manager, &config,
+                                               error, sizeof(error));
     if (code != CUBICLE_OK) {
         fprintf(stderr, "desk: %s\n", error);
         return 2;
     }
+    session.prefix_key = prefix_override ? prefix_key : config.desk_prefix_key;
+    session.key_binding_count = config.desk_key_binding_count;
+    memcpy(session.key_bindings, config.desk_key_bindings,
+           session.key_binding_count * sizeof(session.key_bindings[0]));
     desk_debug_log("event=run_start workspace_arg=%s",
                    workspace_arg != NULL ? workspace_arg : "");
 
@@ -5043,37 +5088,83 @@ static void print_usage(FILE *stream, const char *program)
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
 }
 
+static bool desk_string_equals_case(const char *left, const char *right)
+{
+    while (*left != '\0' && *right != '\0') {
+        if (tolower((unsigned char)*left) !=
+            tolower((unsigned char)*right)) {
+            return false;
+        }
+        ++left;
+        ++right;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static int parse_control_key_char(char ch, unsigned char *key)
+{
+    if (ch >= 'a' && ch <= 'z') {
+        ch = (char)(ch - 'a' + 'A');
+    }
+    if (ch == ' ' || ch == '@') {
+        *key = 0;
+        return 0;
+    }
+    if (ch < 'A' || ch > '_') {
+        return -1;
+    }
+    *key = (unsigned char)(ch - '@');
+    return 0;
+}
+
 static int parse_prefix_key(const char *text, unsigned char *key)
 {
     if (text == NULL || text[0] == '\0') {
         return -1;
     }
     if (text[0] == '^' && text[1] != '\0') {
-        char ch = text[1];
-        if (text[2] != '\0') {
-            return -1;
+        return text[2] == '\0' ? parse_control_key_char(text[1], key) : -1;
+    }
+    const char *control = NULL;
+    if (strncmp(text, "Control-", 8) == 0 ||
+        strncmp(text, "control-", 8) == 0) {
+        control = text + 8;
+    } else if (strncmp(text, "Ctrl-", 5) == 0 ||
+               strncmp(text, "ctrl-", 5) == 0) {
+        control = text + 5;
+    } else if (strncmp(text, "C-", 2) == 0 ||
+               strncmp(text, "c-", 2) == 0) {
+        control = text + 2;
+    }
+    if (control != NULL) {
+        if (desk_string_equals_case(control, "Space")) {
+            *key = 0;
+            return 0;
         }
-        if (ch >= 'a' && ch <= 'z') {
-            ch = (char)(ch - 'a' + 'A');
-        }
-        if (ch < '@' || ch > '_') {
-            return -1;
-        }
-        *key = (unsigned char)(ch - '@');
+        return control[0] != '\0' && control[1] == '\0'
+                   ? parse_control_key_char(control[0], key)
+                   : -1;
+    }
+    if (desk_string_equals_case(text, "Space")) {
+        *key = ' ';
         return 0;
     }
-    if (text[0] == 'C' && text[1] == '-' && text[2] != '\0') {
-        char ch = text[2];
-        if (text[3] != '\0') {
-            return -1;
-        }
-        if (ch >= 'a' && ch <= 'z') {
-            ch = (char)(ch - 'a' + 'A');
-        }
-        if (ch < '@' || ch > '_') {
-            return -1;
-        }
-        *key = (unsigned char)(ch - '@');
+    if (desk_string_equals_case(text, "Enter") ||
+        desk_string_equals_case(text, "Return")) {
+        *key = '\r';
+        return 0;
+    }
+    if (desk_string_equals_case(text, "Escape") ||
+        desk_string_equals_case(text, "Esc")) {
+        *key = 0x1b;
+        return 0;
+    }
+    if (desk_string_equals_case(text, "Backspace")) {
+        *key = 0x7f;
+        return 0;
+    }
+    if (desk_string_equals_case(text, "Tab")) {
+        *key = '\t';
         return 0;
     }
     if (text[1] == '\0') {
@@ -5087,6 +5178,7 @@ int main(int argc, char **argv)
 {
     const char *workspace = NULL;
     unsigned char prefix_key = 0x18;
+    bool prefix_override = false;
     bool mouse_titles = true;
 
     for (int i = 1; i < argc; ++i) {
@@ -5108,6 +5200,7 @@ int main(int argc, char **argv)
                 print_usage(stderr, argv[0]);
                 return 2;
             }
+            prefix_override = true;
             continue;
         }
         if (strcmp(argv[i], "--mouse") == 0) {
@@ -5122,7 +5215,8 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int result = desk_run_workspace(workspace, prefix_key, mouse_titles);
+    int result = desk_run_workspace(workspace, prefix_key, prefix_override,
+                                    mouse_titles);
     if (result < 0) {
         fprintf(stderr, "desk: %s\n", strerror(errno));
         return 1;
