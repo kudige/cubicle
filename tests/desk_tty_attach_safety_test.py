@@ -257,6 +257,136 @@ def run_desk_survives_dead_pane(desk, cube, env):
         os.close(master_fd)
 
 
+def find_saved_layout_file(env, name):
+    root = os.path.join(env["XDG_STATE_HOME"], "cubicle", "desk-layouts")
+    wanted = f"{name}.layout"
+    for dirpath, _, filenames in os.walk(root):
+        if wanted in filenames:
+            return os.path.join(dirpath, wanted)
+    return None
+
+
+def run_desk_save_and_load_layout(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_save = False
+    saw_save_prompt = False
+    sent_save_name = False
+    saved_file = None
+    sent_picker = False
+    saw_picker = False
+    sent_filter = False
+    sent_load = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_save and b"desk-safe" in captured:
+                os.write(master_fd, b"\x18:")
+                sent_save = True
+
+            if sent_save and not saw_save_prompt and b"Save layout" in captured:
+                saw_save_prompt = True
+
+            if saw_save_prompt and not sent_save_name:
+                os.write(master_fd, b"saved-alpha\r")
+                sent_save_name = True
+
+            if sent_save_name and saved_file is None:
+                saved_file = find_saved_layout_file(env, "saved-alpha")
+
+            if saved_file is not None and not sent_picker:
+                with open(saved_file, "r", encoding="utf-8") as handle:
+                    saved_content = handle.read()
+                if "desk-named-layout-v1" not in saved_content:
+                    raise AssertionError(
+                        f"saved layout missing header:\n{saved_content}"
+                    )
+                if "pane 1 " not in saved_content:
+                    raise AssertionError(
+                        f"saved layout missing pane mapping:\n{saved_content}"
+                    )
+                captured.clear()
+                os.write(master_fd, b"\x18;")
+                sent_picker = True
+
+            if sent_picker and not sent_filter and b"Load layout" in captured:
+                os.write(master_fd, b"alpha")
+                sent_filter = True
+
+            if sent_picker and not saw_picker:
+                if b"Load layout" in captured and b"Search: alpha" in captured:
+                    saw_picker = True
+
+            if saw_picker and not sent_load and b"saved-alpha" in captured:
+                os.write(master_fd, b"\r")
+                sent_load = True
+
+            if sent_load and not sent_quit:
+                time.sleep(0.2)
+                if proc.poll() is not None:
+                    break
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_save:
+            raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if not saw_save_prompt:
+            raise AssertionError(f"desk did not show save prompt: {captured!r}")
+        if not sent_save_name:
+            raise AssertionError("desk was not sent a layout name")
+        if saved_file is None:
+            raise AssertionError("desk did not save named layout")
+        if not sent_filter:
+            raise AssertionError(f"desk did not show layout picker: {captured!r}")
+        if not saw_picker:
+            raise AssertionError(f"desk did not show filtered layout picker: {captured!r}")
+        if not sent_load:
+            raise AssertionError(f"desk did not show saved layout entry: {captured!r}")
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit after loading layout")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_click_inactive_title(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1419,6 +1549,7 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+        run_desk_save_and_load_layout(desk, env)
 
         run_checked(
             [

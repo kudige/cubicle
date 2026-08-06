@@ -497,7 +497,10 @@ reporting so the outer terminal may handle a text-selection drag. Use
 `desk --no-mouse` to start with title mouse selection disabled. Press
 `Prefix-m` inside Desk to toggle mouse title selection. Inactive pane titles are
 shown as `[name]` while mouse title selection is enabled and as `name` while it
-is disabled.
+is disabled. Press `Prefix-:` to save the current pane layout and cube
+assignments under a name. Press `Prefix-;` to open a centered searchable layout
+picker; type to filter, use the arrow keys to move through long lists, and press
+Enter to load the selected layout.
 
 Examples:
 
