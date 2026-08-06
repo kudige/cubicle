@@ -481,7 +481,14 @@ def run_desk_new_process_from_menu(desk, cube, env, command, expected_name):
 
 
 def run_desk_new_process_from_workspace_menu(
-    desk, cube, env, workspace, command, expected_name
+    desk,
+    cube,
+    env,
+    workspace,
+    command,
+    expected_name,
+    open_from_empty_pane=False,
+    workspace_steps_before_open=0,
 ):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -495,6 +502,7 @@ def run_desk_new_process_from_workspace_menu(
     os.close(slave_fd)
     captured = bytearray()
     opened_menu = False
+    selected_empty_pane = False
     opened_workspace = False
     selected_new = False
     entered_command = False
@@ -518,12 +526,25 @@ def run_desk_new_process_from_workspace_menu(
                 elif proc.stderr is not None:
                     os.read(proc.stderr.fileno(), 4096)
 
-            if not opened_menu and b"desk-safe" in captured:
+            if (
+                open_from_empty_pane
+                and not selected_empty_pane
+                and b"empty-left" in captured
+                and b"empty-middle" in captured
+                and b"empty-right" in captured
+            ):
+                os.write(master_fd, b"\x18n\x18n\x18n")
+                selected_empty_pane = True
+
+            if not opened_menu and (
+                (not open_from_empty_pane and b"desk-safe" in captured)
+                or (open_from_empty_pane and selected_empty_pane and b"[4]" in captured)
+            ):
                 os.write(master_fd, b"\x18o")
                 opened_menu = True
 
             if opened_menu and not opened_workspace and workspace_marker in captured:
-                os.write(master_fd, b"\x1b[C")
+                os.write(master_fd, b"j" * workspace_steps_before_open + b"\x1b[C")
                 opened_workspace = True
                 captured.clear()
 
@@ -558,6 +579,8 @@ def run_desk_new_process_from_workspace_menu(
 
         if not opened_menu:
             raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if open_from_empty_pane and not selected_empty_pane:
+            raise AssertionError(f"desk did not select empty pane: {captured!r}")
         if not opened_workspace:
             raise AssertionError(
                 f"desk open menu did not expose workspace {workspace}: {captured!r}"
@@ -1313,6 +1336,54 @@ def main():
         )
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskWorkspaceNew"], env)
+
+        run_checked([cube, "workspace", "create", "DeskEmptyPane"], env)
+        for name in ("empty-left", "empty-middle", "empty-right"):
+            run_checked(
+                [
+                    cube,
+                    "--workspace",
+                    "DeskEmptyPane",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    name,
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time,tty\n"
+                        "tty.setraw(0)\n"
+                        f"sys.stdout.write('READY {name}\\n')\n"
+                        "sys.stdout.flush()\n"
+                        "time.sleep(10)\n"
+                    ),
+                ],
+                env,
+            )
+        run_checked([cube, "workspace", "create", "DeskEmptyTarget"], env)
+        run_checked([cube, "workspace", "DeskEmptyPane"], env)
+        run_desk_new_process_from_workspace_menu(
+            desk,
+            cube,
+            env,
+            "DeskEmptyTarget",
+            "bash -lc 'echo READY_WORKSPACE_NEW; sleep 10'",
+            "bash",
+            open_from_empty_pane=True,
+            workspace_steps_before_open=1,
+        )
+        run_checked(
+            [cube, "--workspace", "DeskEmptyTarget", "kill", "--all", "--cleanup"],
+            env,
+        )
+        run_checked(
+            [cube, "--workspace", "DeskEmptyPane", "kill", "--all", "--cleanup"],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskEmptyTarget"], env)
+        run_checked([cube, "workspace", "delete", "DeskEmptyPane"], env)
 
         run_checked([cube, "workspace", "create", "DeskEnter"], env)
         run_checked(

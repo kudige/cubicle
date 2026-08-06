@@ -3108,11 +3108,18 @@ static int desk_replace_active_pane_process(desk_session_t *session,
                                             size_t error_size)
 {
     int active = session->layout.active_pane_id;
-    if (active <= 0 || (size_t)active > session->pane_count) {
+    if (active <= 0 ||
+        (size_t)active > sizeof(session->panes) / sizeof(session->panes[0]) ||
+        (size_t)active > session->pane_count + 1) {
         snprintf(error, error_size, "no active pane");
         return -1;
     }
     size_t pane_index = (size_t)active - 1;
+    if (pane_index == session->pane_count) {
+        memset(&session->panes[pane_index], 0,
+               sizeof(session->panes[pane_index]));
+        session->pane_count++;
+    }
     desk_pane_t *pane = &session->panes[pane_index];
     cubicle_attachment_disconnect(pane->attachment);
     pane->attachment = NULL;
