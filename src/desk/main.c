@@ -189,6 +189,7 @@ typedef struct desk_menu_item {
 
 typedef struct desk_open_menu {
     desk_menu_level_t level;
+    desk_menu_level_t prompt_return_level;
     cubicle_workspace_info_t workspace;
     desk_menu_item_t items[DESK_MENU_MAX_ITEMS];
     size_t item_count;
@@ -2914,8 +2915,9 @@ static int desk_load_process_menu(desk_session_t *session,
     cubicle_process_list_free(processes);
     if (menu->item_count == 0) {
         snprintf(menu->status, sizeof(menu->status),
-                 "workspace has no running TTY cubes");
+                 "workspace has no running cubes");
     }
+    (void)desk_menu_add_new_process(session);
     desk_menu_select_first_enabled(menu);
     return 0;
 }
@@ -3456,15 +3458,19 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
                                          const cubicle_workspace_info_t *workspace,
                                          bool *menu_closed);
 
-static void desk_begin_new_process_prompt(desk_session_t *session)
+static void desk_begin_new_process_prompt(desk_session_t *session,
+                                          const cubicle_workspace_info_t *workspace,
+                                          desk_menu_level_t return_level)
 {
     desk_open_menu_t *menu = &session->open_menu;
+    cubicle_workspace_info_t target_workspace = *workspace;
     memset(menu->command, 0, sizeof(menu->command));
     menu->command_length = 0;
     menu->item_count = 0;
     menu->selected = 0;
     menu->level = DESK_MENU_NEW_COMMAND;
-    menu->workspace = session->workspace;
+    menu->prompt_return_level = return_level;
+    menu->workspace = target_workspace;
     menu->status[0] = '\0';
 }
 
@@ -3575,12 +3581,12 @@ static int desk_start_new_process_from_prompt(desk_session_t *session,
 
         cubicle_process_start_options_t options;
         memset(&options, 0, sizeof(options));
-        options.workspace_id = session->workspace.id;
+        options.workspace_id = menu->workspace.id;
         options.friendly_name = candidate_name;
         options.mode = CUBICLE_PROCESS_TTY;
         options.stdin_policy = CUBICLE_STDIN_OPEN;
-        options.cwd = session->workspace.directory[0] != '\0'
-                          ? session->workspace.directory
+        options.cwd = menu->workspace.directory[0] != '\0'
+                          ? menu->workspace.directory
                           : NULL;
         options.argv = argv;
         options.argc = sizeof(argv) / sizeof(argv[0]);
@@ -3647,7 +3653,7 @@ static int desk_open_menu_select(desk_session_t *session,
                                              menu_closed);
     }
     if (selected.kind == DESK_MENU_ITEM_NEW) {
-        desk_begin_new_process_prompt(session);
+        desk_begin_new_process_prompt(session, &menu->workspace, menu->level);
         return 0;
     }
 
@@ -3844,7 +3850,14 @@ static int handle_open_menu_input(desk_session_t *session,
                 continue;
             }
             if (ch == 0x1b) {
-                (void)desk_open_root_menu(session);
+                if (session->open_menu.prompt_return_level ==
+                    DESK_MENU_WORKSPACE) {
+                    cubicle_workspace_info_t workspace =
+                        session->open_menu.workspace;
+                    (void)desk_load_process_menu(session, &workspace);
+                } else {
+                    (void)desk_open_root_menu(session);
+                }
                 continue;
             }
             if (ch == 0x08 || ch == 0x7f) {

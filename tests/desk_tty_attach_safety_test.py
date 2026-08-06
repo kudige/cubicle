@@ -480,6 +480,108 @@ def run_desk_new_process_from_menu(desk, cube, env, command, expected_name):
         os.close(master_fd)
 
 
+def run_desk_new_process_from_workspace_menu(
+    desk, cube, env, workspace, command, expected_name
+):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    opened_menu = False
+    opened_workspace = False
+    selected_new = False
+    entered_command = False
+    saw_new_process = False
+    sent_quit = False
+    workspace_marker = f"workspace: {workspace}".encode("utf-8")
+    submenu_marker = f"Workspace: {workspace}".encode("utf-8")
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not opened_menu and b"desk-safe" in captured:
+                os.write(master_fd, b"\x18o")
+                opened_menu = True
+
+            if opened_menu and not opened_workspace and workspace_marker in captured:
+                os.write(master_fd, b"\x1b[C")
+                opened_workspace = True
+                captured.clear()
+
+            if (
+                opened_workspace
+                and not selected_new
+                and submenu_marker in captured
+                and b"workspace has no running cubes" in captured
+                and b"New" in captured
+            ):
+                os.write(master_fd, b"\r")
+                selected_new = True
+
+            if selected_new and not entered_command and b"Command:" in captured:
+                os.write(master_fd, command.encode("utf-8") + b"\r")
+                entered_command = True
+
+            if entered_command and not saw_new_process and b"READY_WORKSPACE_NEW" in captured:
+                ps_output = run_checked([cube, "--workspace", workspace, "ps"], env)
+                if f"{expected_name}\ttty\trunning" not in ps_output:
+                    raise AssertionError(
+                        f"new workspace menu process was not running:\n{ps_output}"
+                    )
+                saw_new_process = True
+
+            if saw_new_process and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not opened_menu:
+            raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if not opened_workspace:
+            raise AssertionError(
+                f"desk open menu did not expose workspace {workspace}: {captured!r}"
+            )
+        if not selected_new:
+            raise AssertionError(
+                f"workspace menu did not expose New with no-running message: {captured!r}"
+            )
+        if not entered_command:
+            raise AssertionError(f"desk did not render command prompt: {captured!r}")
+        if not saw_new_process:
+            raise AssertionError(
+                f"new workspace menu process did not render: {captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        os.close(master_fd)
+
+
 def run_desk_enter_workspace_switch(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1191,6 +1293,26 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+
+        run_checked([cube, "workspace", "create", "DeskWorkspaceNew"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_desk_new_process_from_workspace_menu(
+            desk,
+            cube,
+            env,
+            "DeskWorkspaceNew",
+            (
+                f"{sys.executable} -c \"import sys,time;"
+                "print('READY_WORKSPACE_NEW', flush=True);time.sleep(10)\""
+            ),
+            os.path.basename(sys.executable),
+        )
+        run_checked(
+            [cube, "--workspace", "DeskWorkspaceNew", "kill", "--all", "--cleanup"],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskWorkspaceNew"], env)
 
         run_checked([cube, "workspace", "create", "DeskEnter"], env)
         run_checked(
