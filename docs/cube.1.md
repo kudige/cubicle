@@ -507,7 +507,8 @@ is disabled. Press `Prefix-:` to save the current pane layout and cube
 assignments under a name. Press `Prefix-;` to open a centered searchable layout
 picker; type to filter, use the arrow keys to move through long lists, and press
 Enter to load the selected layout. Press `Prefix-?` to show a centered overlay
-with command names, descriptions, and configured key bindings.
+with command names, descriptions, and configured key bindings. From that overlay,
+press `e` to edit the selected command's binding for the current Desk session.
 
 Desk key bindings can be configured with `[desk] prefix=KEY` and
 `[desk.keys] bind.N=KEY COMMAND`. Key names follow tmux-style forms such as

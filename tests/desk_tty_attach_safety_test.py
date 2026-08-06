@@ -492,7 +492,15 @@ def run_desk_bindings_overlay(desk, env):
     captured = bytearray()
     sent_overlay = False
     saw_overlay = False
+    sent_edit = False
+    saw_edit_prompt = False
+    sent_new_key = False
+    saw_edited_binding = False
     sent_close = False
+    sent_reopen = False
+    saw_reopened_overlay = False
+    overlay_count_before_reopen = 0
+    closed_at = 0.0
     deadline = time.time() + 5
     try:
         while time.time() < deadline:
@@ -523,9 +531,42 @@ def run_desk_bindings_overlay(desk, env):
                 ):
                     saw_overlay = True
 
-            if saw_overlay and not sent_close:
+            if saw_overlay and not sent_edit:
+                os.write(master_fd, b"jjjjjje")
+                sent_edit = True
+
+            if sent_edit and not saw_edit_prompt:
+                if b"Edit binding" in captured and b"Key:" in captured:
+                    saw_edit_prompt = True
+
+            if saw_edit_prompt and not sent_new_key:
+                os.write(master_fd, b"\x15Control-G\r")
+                sent_new_key = True
+
+            if sent_new_key and not saw_edited_binding:
+                if (
+                    b"Key bindings" in captured
+                    and b"[bindings.show]" in captured
+                    and b"Control-G" in captured
+                    and b"now uses Control-G" in captured
+                ):
+                    saw_edited_binding = True
+
+            if saw_edited_binding and not sent_close:
+                overlay_count_before_reopen = captured.count(b"Key bindings")
                 os.write(master_fd, b"q")
                 sent_close = True
+                closed_at = time.time()
+
+            if sent_close and not sent_reopen and time.time() - closed_at > 0.1:
+                os.write(master_fd, b"\x07")
+                sent_reopen = True
+
+            if sent_reopen and not saw_reopened_overlay:
+                key_bindings_count = captured.count(b"Key bindings")
+                if key_bindings_count > overlay_count_before_reopen:
+                    saw_reopened_overlay = True
+                    os.write(master_fd, b"q")
 
             if proc.poll() is not None:
                 break
@@ -534,8 +575,20 @@ def run_desk_bindings_overlay(desk, env):
             raise AssertionError(f"desk did not render bindings pane: {captured!r}")
         if not saw_overlay:
             raise AssertionError(f"desk did not show bindings overlay: {captured!r}")
+        if not sent_edit:
+            raise AssertionError("desk binding edit was not requested")
+        if not saw_edit_prompt:
+            raise AssertionError(f"desk did not show binding edit prompt: {captured!r}")
+        if not sent_new_key:
+            raise AssertionError("desk edited binding was not submitted")
+        if not saw_edited_binding:
+            raise AssertionError(f"desk did not show edited binding: {captured!r}")
         if not sent_close:
             raise AssertionError("desk was not asked to close bindings overlay")
+        if not sent_reopen:
+            raise AssertionError("desk edited binding was not exercised")
+        if not saw_reopened_overlay:
+            raise AssertionError(f"desk edited binding did not reopen overlay: {captured!r}")
         if proc.poll() is None:
             proc.terminate()
             proc.wait(timeout=2)
