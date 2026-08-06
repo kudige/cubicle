@@ -478,6 +478,82 @@ def run_desk_configurable_keys(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_bindings_overlay(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_overlay = False
+    saw_overlay = False
+    sent_close = False
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_overlay and b"desk-safe" in captured:
+                os.write(master_fd, b"\x18?")
+                sent_overlay = True
+
+            if sent_overlay and not saw_overlay:
+                if (
+                    b"Key bindings" in captured
+                    and b"[bindings.show]" in captured
+                    and b"Prefix-?" in captured
+                    and b"[layout.save]" in captured
+                    and b"Prefix-:" in captured
+                ):
+                    saw_overlay = True
+
+            if saw_overlay and not sent_close:
+                os.write(master_fd, b"q")
+                sent_close = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_overlay:
+            raise AssertionError(f"desk did not render bindings pane: {captured!r}")
+        if not saw_overlay:
+            raise AssertionError(f"desk did not show bindings overlay: {captured!r}")
+        if not sent_close:
+            raise AssertionError("desk was not asked to close bindings overlay")
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=2)
+        if proc.returncode not in (0, -signal.SIGTERM):
+            raise AssertionError(
+                f"desk bindings overlay exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_click_inactive_title(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1647,6 +1723,7 @@ def main():
         )
         run_desk_configurable_keys(desk, cube, env)
         write_test_config(config_path, log_dir)
+        run_desk_bindings_overlay(desk, env)
         run_desk_save_and_load_layout(desk, env)
 
         run_checked(
@@ -1767,7 +1844,7 @@ def main():
                     "            sys.stdout.write('GOT_ENTER\\n')\n"
                     "            sys.stdout.flush()\n"
                     "            break\n"
-                    "time.sleep(5)\n"
+                    "time.sleep(10)\n"
                 ),
             ],
             env,
@@ -1804,7 +1881,7 @@ def main():
                     "            sys.stdout.write('GOT_OPEN\\n')\n"
                     "            sys.stdout.flush()\n"
                     "            break\n"
-                    "time.sleep(5)\n"
+                    "time.sleep(10)\n"
                 ),
             ],
             env,
@@ -1966,7 +2043,7 @@ def main():
                     "            sys.stdout.write('GOT_CLICK\\n')\n"
                     "            sys.stdout.flush()\n"
                     "            break\n"
-                    "time.sleep(5)\n"
+                    "time.sleep(10)\n"
                 ),
             ],
             env,

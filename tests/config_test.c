@@ -75,7 +75,7 @@ static void test_defaults(void)
     assert(config.desk_debug_library == 0);
     assert(config.desk_debug_terminal == 0);
     assert(config.desk_prefix_key == 0x18);
-    assert(config.desk_key_binding_count == 9);
+    assert(config.desk_key_binding_count == 10);
     assert(config.desk_key_bindings[0].uses_prefix == 1);
     assert(config.desk_key_bindings[0].key == 'n');
     assert(strcmp(config.desk_key_bindings[0].command, "pane.next") == 0);
@@ -150,7 +150,7 @@ static void test_override_file(void)
     assert(config.desk_debug_library == 1);
     assert(config.desk_debug_terminal == 1);
     assert(config.desk_prefix_key == 0);
-    assert(config.desk_key_binding_count == 9);
+    assert(config.desk_key_binding_count == 10);
     int saw_rebound_prefix_n = 0;
     int saw_direct_quit = 0;
     int saw_prefix_m = 0;

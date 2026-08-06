@@ -174,14 +174,16 @@ typedef enum desk_menu_level {
     DESK_MENU_WORKSPACE,
     DESK_MENU_NEW_COMMAND,
     DESK_MENU_SAVE_LAYOUT,
-    DESK_MENU_LAYOUT_PICKER
+    DESK_MENU_LAYOUT_PICKER,
+    DESK_MENU_BINDINGS
 } desk_menu_level_t;
 
 typedef enum desk_menu_item_kind {
     DESK_MENU_ITEM_PROCESS = 1,
     DESK_MENU_ITEM_WORKSPACE,
     DESK_MENU_ITEM_NEW,
-    DESK_MENU_ITEM_LAYOUT
+    DESK_MENU_ITEM_LAYOUT,
+    DESK_MENU_ITEM_BINDING
 } desk_menu_item_kind_t;
 
 typedef struct desk_menu_item {
@@ -190,6 +192,9 @@ typedef struct desk_menu_item {
     cubicle_workspace_info_t workspace;
     cubicle_process_info_t process;
     char layout_name[CUBICLE_NAME_MAX];
+    char command_name[CUBICLE_DESK_COMMAND_NAME_MAX];
+    char description[96];
+    char key_text[128];
 } desk_menu_item_t;
 
 typedef struct desk_open_menu {
@@ -3280,6 +3285,132 @@ static void desk_begin_layout_picker(desk_session_t *session)
     (void)desk_load_layout_picker_items(session);
 }
 
+static const char *desk_command_description(const char *command)
+{
+    if (strcmp(command, "pane.next") == 0) {
+        return "Select next pane";
+    }
+    if (strcmp(command, "pane.previous") == 0) {
+        return "Select previous pane";
+    }
+    if (strcmp(command, "layout.zoom") == 0) {
+        return "Toggle active pane zoom";
+    }
+    if (strcmp(command, "layout.resize.toggle") == 0) {
+        return "Toggle resize mode";
+    }
+    if (strcmp(command, "layout.save") == 0) {
+        return "Save current layout";
+    }
+    if (strcmp(command, "layout.load") == 0) {
+        return "Load saved layout";
+    }
+    if (strcmp(command, "bindings.show") == 0) {
+        return "Show key bindings";
+    }
+    if (strcmp(command, "menu.open") == 0) {
+        return "Open cube menu";
+    }
+    if (strcmp(command, "mouse.toggle") == 0) {
+        return "Toggle mouse title selection";
+    }
+    if (strcmp(command, "quit") == 0) {
+        return "Quit Desk";
+    }
+    return "Unknown command";
+}
+
+static void desk_format_key(unsigned char key, char *buffer, size_t size)
+{
+    if (key == 0) {
+        snprintf(buffer, size, "Control-Space");
+    } else if (key > 0 && key < 32) {
+        snprintf(buffer, size, "Control-%c", (char)(key + '@'));
+    } else if (key == ' ') {
+        snprintf(buffer, size, "Space");
+    } else if (key == '\r') {
+        snprintf(buffer, size, "Enter");
+    } else if (key == 0x1b) {
+        snprintf(buffer, size, "Escape");
+    } else if (key == 0x7f) {
+        snprintf(buffer, size, "Backspace");
+    } else if (key == '\t') {
+        snprintf(buffer, size, "Tab");
+    } else {
+        snprintf(buffer, size, "%c", (char)key);
+    }
+}
+
+static void desk_format_binding_key(const cubicle_desk_key_binding_t *binding,
+                                    char *buffer,
+                                    size_t size)
+{
+    char key[32];
+    desk_format_key(binding->key, key, sizeof(key));
+    if (binding->uses_prefix) {
+        snprintf(buffer, size, "Prefix-%s", key);
+    } else {
+        snprintf(buffer, size, "%s", key);
+    }
+}
+
+static void desk_append_binding_text(char *destination,
+                                     size_t destination_size,
+                                     const char *binding)
+{
+    if (destination[0] != '\0') {
+        strncat(destination, ", ",
+                destination_size - strlen(destination) - 1);
+    }
+    strncat(destination, binding,
+            destination_size - strlen(destination) - 1);
+}
+
+static void desk_add_bindings_item(desk_session_t *session,
+                                   const char *command)
+{
+    if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
+        return;
+    }
+    desk_menu_item_t *item =
+        &session->open_menu.items[session->open_menu.item_count++];
+    memset(item, 0, sizeof(*item));
+    item->kind = DESK_MENU_ITEM_BINDING;
+    snprintf(item->command_name, sizeof(item->command_name), "%s", command);
+    snprintf(item->description, sizeof(item->description), "%s",
+             desk_command_description(command));
+    for (size_t i = 0; i < session->key_binding_count; ++i) {
+        const cubicle_desk_key_binding_t *binding = &session->key_bindings[i];
+        if (binding->unbind || strcmp(binding->command, command) != 0) {
+            continue;
+        }
+        char key[48];
+        desk_format_binding_key(binding, key, sizeof(key));
+        desk_append_binding_text(item->key_text, sizeof(item->key_text), key);
+    }
+    if (item->key_text[0] == '\0') {
+        snprintf(item->key_text, sizeof(item->key_text), "unbound");
+    }
+}
+
+static void desk_begin_bindings_overlay(desk_session_t *session)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    memset(menu, 0, sizeof(*menu));
+    menu->level = DESK_MENU_BINDINGS;
+    menu->workspace = session->workspace;
+    desk_add_bindings_item(session, "pane.next");
+    desk_add_bindings_item(session, "pane.previous");
+    desk_add_bindings_item(session, "layout.zoom");
+    desk_add_bindings_item(session, "layout.resize.toggle");
+    desk_add_bindings_item(session, "layout.save");
+    desk_add_bindings_item(session, "layout.load");
+    desk_add_bindings_item(session, "bindings.show");
+    desk_add_bindings_item(session, "menu.open");
+    desk_add_bindings_item(session, "mouse.toggle");
+    desk_add_bindings_item(session, "quit");
+}
+
 static void desk_menu_enable_mouse(void)
 {
     (void)cubeui_write_all(STDOUT_FILENO, "\x1b[?1000h\x1b[?1006h", 16);
@@ -3556,7 +3687,8 @@ static bool desk_menu_geometry(const desk_terminal_t *terminal,
     const desk_open_menu_t *menu = &session->open_menu;
     desk_rect_t pane_rect;
     if (menu->level == DESK_MENU_SAVE_LAYOUT ||
-        menu->level == DESK_MENU_LAYOUT_PICKER) {
+        menu->level == DESK_MENU_LAYOUT_PICKER ||
+        menu->level == DESK_MENU_BINDINGS) {
         pane_rect.row = 0;
         pane_rect.col = 0;
         pane_rect.rows = terminal->rows;
@@ -3633,6 +3765,8 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         heading = "Save layout";
     } else if (menu->level == DESK_MENU_LAYOUT_PICKER) {
         heading = "Load layout";
+    } else if (menu->level == DESK_MENU_BINDINGS) {
+        heading = "Key bindings";
     }
 
     for (int row = 0; row < box_rows; ++row) {
@@ -3666,7 +3800,9 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
     length = snprintf(line, sizeof(line),
                       "\x1b[%d;%dH\x1b[48;5;236m\x1b[2m%.*s\x1b[0m",
                       box_row + 4, box_col + 3, inner_cols,
-                      menu->level == DESK_MENU_LAYOUT_PICKER
+                      menu->level == DESK_MENU_BINDINGS
+                          ? "j/k or arrows scroll. q closes."
+                          : menu->level == DESK_MENU_LAYOUT_PICKER
                           ? "Type to filter. Enter loads. q closes."
                           : "Enter selects. q closes. Esc goes back.");
     if (length > 0 && (size_t)length < sizeof(line)) {
@@ -3769,6 +3905,52 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                               "\x1b[%d;%dH%s%.*s\x1b[0m",
                               row, box_col + 5, style, name_cols,
                               item->layout_name);
+        } else if (item->kind == DESK_MENU_ITEM_BINDING) {
+            int command_cols = inner_cols / 3;
+            if (command_cols < 18) {
+                command_cols = 18;
+            }
+            if (command_cols > inner_cols - 18) {
+                command_cols = inner_cols > 18 ? inner_cols - 18 : inner_cols;
+            }
+            int remaining_cols = inner_cols - command_cols - 3;
+            int description_cols = remaining_cols / 2;
+            int key_cols = remaining_cols - description_cols;
+            if (description_cols < 0) {
+                description_cols = 0;
+            }
+            if (key_cols < 0) {
+                key_cols = 0;
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols,
+                              marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            char command_text[96];
+            snprintf(command_text, sizeof(command_text), "[%s]",
+                     item->command_name);
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 5, style, command_cols,
+                              command_text);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 6 + command_cols, style,
+                              description_cols, item->description);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 7 + command_cols +
+                                       description_cols,
+                              style, key_cols, item->key_text);
         } else {
             int name_cols = inner_cols > 13 ? inner_cols - 13 : 0;
             length = snprintf(line, sizeof(line),
@@ -4129,6 +4311,9 @@ static int desk_open_menu_select(desk_session_t *session,
         return 0;
     }
     desk_menu_item_t selected = menu->items[menu->selected];
+    if (selected.kind == DESK_MENU_ITEM_BINDING) {
+        return 0;
+    }
     if (selected.kind == DESK_MENU_ITEM_LAYOUT) {
         char error[256];
         if (desk_apply_named_layout(session, terminal, selected.layout_name,
@@ -4653,6 +4838,13 @@ static bool desk_execute_command(desk_session_t *session,
         desk_render_open_menu(terminal, session);
         return true;
     }
+    if (strcmp(command, "bindings.show") == 0) {
+        desk_begin_bindings_overlay(session);
+        desk_menu_enable_mouse();
+        desk_cursor_erase(terminal, session);
+        desk_render_open_menu(terminal, session);
+        return true;
+    }
     if (strcmp(command, "quit") == 0) {
         *quit_requested = true;
         return true;
@@ -5086,6 +5278,7 @@ static void print_usage(FILE *stream, const char *program)
             "  Prefix-m      Toggle mouse pane title selection while running.\n");
     fprintf(stream, "  Prefix-:      Save the current layout by name.\n");
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
+    fprintf(stream, "  Prefix-?      Show configured key bindings.\n");
 }
 
 static bool desk_string_equals_case(const char *left, const char *right)

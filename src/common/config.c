@@ -281,6 +281,7 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "layout.resize.toggle") == 0 ||
            strcmp(command, "layout.save") == 0 ||
            strcmp(command, "layout.load") == 0 ||
+           strcmp(command, "bindings.show") == 0 ||
            strcmp(command, "menu.open") == 0 ||
            strcmp(command, "mouse.toggle") == 0 ||
            strcmp(command, "quit") == 0;
@@ -709,6 +710,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
     (void)add_desk_key_binding(config, "Prefix-o", "menu.open", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-:", "layout.save", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-;", "layout.load", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-?", "bindings.show", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-q", "quit", 1, NULL, 0);
     snprintf(config->source, sizeof(config->source), "built-in defaults");
     set_all_origins(config, CUBICLE_CONFIG_SOURCE_BUILTIN,

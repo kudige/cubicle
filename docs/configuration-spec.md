@@ -277,9 +277,9 @@ Keys:
 - `[desk.keys] bind.N`: Desk key binding in the form `KEY COMMAND`.
   `KEY` may be prefixed with `Prefix-` or may be a direct non-prefix shortcut.
   `COMMAND` is one of `pane.next`, `pane.previous`, `layout.zoom`,
-  `layout.resize.toggle`, `layout.save`, `layout.load`, `menu.open`,
-  `mouse.toggle`, or `quit`. Use `none` as the command to unbind a default key.
-  Duplicate active shortcuts are invalid.
+  `layout.resize.toggle`, `layout.save`, `layout.load`, `bindings.show`,
+  `menu.open`, `mouse.toggle`, or `quit`. Use `none` as the command to unbind a
+  default key. Duplicate active shortcuts are invalid.
 
 ### 5.5 `[client]`
 

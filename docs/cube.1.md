@@ -506,7 +506,8 @@ shown as `[name]` while mouse title selection is enabled and as `name` while it
 is disabled. Press `Prefix-:` to save the current pane layout and cube
 assignments under a name. Press `Prefix-;` to open a centered searchable layout
 picker; type to filter, use the arrow keys to move through long lists, and press
-Enter to load the selected layout.
+Enter to load the selected layout. Press `Prefix-?` to show a centered overlay
+with command names, descriptions, and configured key bindings.
 
 Desk key bindings can be configured with `[desk] prefix=KEY` and
 `[desk.keys] bind.N=KEY COMMAND`. Key names follow tmux-style forms such as
@@ -514,8 +515,8 @@ Desk key bindings can be configured with `[desk] prefix=KEY` and
 `Escape`, `Backspace`, `Tab`, or a single printable character. Prefix shortcuts
 use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Supported command names are
 `pane.next`, `pane.previous`, `layout.zoom`, `layout.resize.toggle`,
-`layout.save`, `layout.load`, `menu.open`, `mouse.toggle`, and `quit`. Use
-`none` to unbind a default shortcut.
+`layout.save`, `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, and
+`quit`. Use `none` to unbind a default shortcut.
 
 Examples:
 
