@@ -165,6 +165,98 @@ def run_desk_and_ctrl_c(desk, cube, env, log_dir):
         os.close(master_fd)
 
 
+def run_desk_survives_dead_pane(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    saw_dying_pane = False
+    saw_surviving_pane = False
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if b"desk-dies" in captured or b"READY_DIES" in captured:
+                saw_dying_pane = True
+            if b"desk-safe" in captured:
+                saw_surviving_pane = True
+
+            if saw_dying_pane and saw_surviving_pane and not sent_payload:
+                time.sleep(0.8)
+                if proc.poll() is not None:
+                    break
+                os.write(master_fd, b"PING")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_PING" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not saw_dying_pane:
+            raise AssertionError(f"desk did not render dying pane: {captured!r}")
+        if not saw_surviving_pane:
+            raise AssertionError(f"desk did not render surviving pane: {captured!r}")
+        if not sent_payload:
+            raise AssertionError("desk exited before testing surviving pane input")
+        if not saw_payload:
+            raise AssertionError(
+                f"desk did not keep surviving pane attached: {captured!r}"
+            )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_click_inactive_title(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1303,11 +1395,22 @@ def main():
                     "sys.stdout.write('READY\\n')\n"
                     "sys.stdout.flush()\n"
                     "deadline=time.time()+10\n"
+                    "data=b''\n"
+                    "saw_ctrl_c=False\n"
+                    "saw_ping=False\n"
                     "while time.time()<deadline:\n"
                     "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
-                    "    if r and b'\\x03' in os.read(0,64):\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "    if not saw_ctrl_c and b'\\x03' in data:\n"
                     "        sys.stdout.write('GOT_CTRL_C\\n')\n"
                     "        sys.stdout.flush()\n"
+                    "        saw_ctrl_c=True\n"
+                    "    if not saw_ping and b'PING' in data:\n"
+                    "        sys.stdout.write('GOT_PING\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_ping=True\n"
+                    "    if saw_ctrl_c and saw_ping:\n"
                     "        break\n"
                     "time.sleep(10)\n"
                 ),
@@ -1316,6 +1419,28 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "desk-dies",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time\n"
+                    "sys.stdout.write('READY_DIES\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(1.0)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_survives_dead_pane(desk, cube, env)
+        run_checked([cube, "cleanup"], env)
 
         run_checked([cube, "workspace", "create", "DeskWorkspaceNew"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)

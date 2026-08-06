@@ -2739,6 +2739,25 @@ static int attach_all_panes(desk_session_t *session,
     return 0;
 }
 
+static void desk_detach_pane_after_read_failure(desk_session_t *session,
+                                                size_t pane_index)
+{
+    desk_pane_t *pane = &session->panes[pane_index];
+    cubicle_attachment_disconnect(pane->attachment);
+    pane->attachment = NULL;
+
+    cubicle_process_info_t updated;
+    cubicle_error_code_t code = cubicle_process_get(
+        session->manager, pane->process.id,
+        pane->process.workspace_id[0] == '\0' ? NULL
+                                              : pane->process.workspace_id,
+        &updated);
+    if (code == CUBICLE_OK) {
+        pane->process = updated;
+        desk_apply_pane_labels(session);
+    }
+}
+
 static void desk_disconnect_all_panes(desk_session_t *session)
 {
     for (size_t i = 0; i < session->pane_count; ++i) {
@@ -2821,7 +2840,8 @@ static bool desk_process_is_open(const desk_session_t *session,
                                  const char *process_id)
 {
     for (size_t i = 0; i < session->pane_count; ++i) {
-        if (strcmp(session->panes[i].process.id, process_id) == 0) {
+        if (session->panes[i].attachment != NULL &&
+            strcmp(session->panes[i].process.id, process_id) == 0) {
             return true;
         }
     }
@@ -3369,6 +3389,10 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
     desk_pane_t *pane = &session->panes[pane_index];
     bool pane_changed = false;
 
+    if (pane->attachment == NULL) {
+        return 0;
+    }
+
     for (int burst = 0; burst < DESK_OUTPUT_READ_BURST; ++burst) {
         unsigned char output[4096];
         ssize_t nread = cubicle_attachment_read(pane->attachment, output,
@@ -3379,7 +3403,10 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
             desk_debug_log("event=read_failed pane=%zu process=%s errno=%d message=\"%s\"",
                            pane_index + 1, pane->process.friendly_name, errno,
                            last != NULL ? last->message : "");
-            return -1;
+            desk_detach_pane_after_read_failure(session, pane_index);
+            desk_debug_log("event=pane_detached pane=%zu process=%s reason=read_failed",
+                           pane_index + 1, pane->process.friendly_name);
+            return 0;
         }
         if (nread == 0) {
             break;
@@ -3443,10 +3470,14 @@ static int write_active_pane(desk_session_t *session,
     if (active <= 0 || (size_t)active > session->pane_count) {
         return -1;
     }
-    return cubicle_attachment_write(session->panes[(size_t)active - 1].attachment,
-                                    buffer, length) < 0
-               ? -1
-               : 0;
+    desk_pane_t *pane = &session->panes[(size_t)active - 1];
+    if (pane->attachment == NULL) {
+        desk_debug_log("event=write_skipped pane=%d process=%s reason=detached",
+                       active, pane->process.friendly_name);
+        return 0;
+    }
+    return cubicle_attachment_write(pane->attachment, buffer, length) < 0 ? -1
+                                                                         : 0;
 }
 
 static int flush_active_input(desk_session_t *session,
