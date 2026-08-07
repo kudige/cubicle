@@ -1302,29 +1302,25 @@ static int desk_layout_path_for_workspace(const char *workspace_id,
     return length < 0 || length >= PATH_MAX ? -1 : 0;
 }
 
-static int desk_named_layout_dir_for_workspace(const char *workspace_id,
-                                               char path[PATH_MAX])
+static int desk_named_layout_dir(char path[PATH_MAX])
 {
     char state_dir[PATH_MAX];
     if (cubeui_state_dir(state_dir) < 0) {
         return -1;
     }
-    int length = snprintf(path, PATH_MAX, "%s/desk-layouts/%s.named",
-                          state_dir, workspace_id);
+    int length = snprintf(path, PATH_MAX, "%s/desk-layouts/named",
+                          state_dir);
     if (length < 0 || length >= PATH_MAX) {
         return -1;
     }
     return cubicle_mkdir_p(path);
 }
 
-static int desk_named_layout_path_for_workspace(const char *workspace_id,
-                                                const char *name,
-                                                char path[PATH_MAX])
+static int desk_named_layout_path(const char *name, char path[PATH_MAX])
 {
     char dir[PATH_MAX];
     char file_name[PATH_MAX];
-    if (desk_named_layout_dir_for_workspace(workspace_id, dir) < 0 ||
-        layout_path_from_name(name, file_name) < 0) {
+    if (desk_named_layout_dir(dir) < 0 || layout_path_from_name(name, file_name) < 0) {
         return -1;
     }
     int length = snprintf(path, PATH_MAX, "%s/%s", dir, file_name);
@@ -1358,8 +1354,7 @@ static void desk_layout_collect_leaf_panes(const desk_pane_layout_t *layout,
 static int desk_save_named_layout(desk_session_t *session, const char *name)
 {
     char path[PATH_MAX];
-    if (desk_named_layout_path_for_workspace(session->workspace.id, name,
-                                             path) < 0) {
+    if (desk_named_layout_path(name, path) < 0) {
         return -1;
     }
     FILE *file = fopen(path, "w");
@@ -1381,7 +1376,6 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
 }
 
 static int desk_load_named_layout_file(const char *path,
-                                       const char *workspace_id,
                                        desk_pane_layout_t *layout,
                                        char process_ids[32][CUBICLE_ID_STRING_LENGTH])
 {
@@ -1405,11 +1399,6 @@ static int desk_load_named_layout_file(const char *path,
     while (fgets(line, sizeof(line), file) != NULL) {
         char value[CUBICLE_ID_STRING_LENGTH] = "";
         if (sscanf(line, "workspace %32s", value) == 1) {
-            if (strcmp(value, workspace_id) != 0) {
-                fclose(file);
-                errno = EINVAL;
-                return -1;
-            }
             workspace_seen = true;
             continue;
         }
@@ -3097,7 +3086,7 @@ static int desk_load_layout_picker_items(desk_session_t *session)
     menu->status[0] = '\0';
 
     char dir[PATH_MAX];
-    if (desk_named_layout_dir_for_workspace(session->workspace.id, dir) < 0) {
+    if (desk_named_layout_dir(dir) < 0) {
         snprintf(menu->status, sizeof(menu->status),
                  "failed to open layout directory");
         return -1;
@@ -3738,16 +3727,14 @@ static int desk_apply_named_layout(desk_session_t *session,
                                    size_t error_size)
 {
     char path[PATH_MAX];
-    if (desk_named_layout_path_for_workspace(session->workspace.id, layout_name,
-                                             path) < 0) {
+    if (desk_named_layout_path(layout_name, path) < 0) {
         snprintf(error, error_size, "invalid layout name");
         return -1;
     }
 
     desk_pane_layout_t loaded_layout;
     char process_ids[32][CUBICLE_ID_STRING_LENGTH];
-    if (desk_load_named_layout_file(path, session->workspace.id,
-                                    &loaded_layout, process_ids) < 0) {
+    if (desk_load_named_layout_file(path, &loaded_layout, process_ids) < 0) {
         snprintf(error, error_size, "failed to load layout");
         return -1;
     }

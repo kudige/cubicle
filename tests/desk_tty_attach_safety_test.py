@@ -273,12 +273,10 @@ def run_desk_survives_dead_pane(desk, cube, env):
 
 
 def find_saved_layout_file(env, name):
-    root = os.path.join(env["XDG_STATE_HOME"], "cubicle", "desk-layouts")
-    wanted = f"{name}.layout"
-    for dirpath, _, filenames in os.walk(root):
-        if wanted in filenames:
-            return os.path.join(dirpath, wanted)
-    return None
+    return os.path.join(
+        env["XDG_STATE_HOME"], "cubicle", "desk-layouts", "named",
+        f"{name}.layout",
+    )
 
 
 def run_desk_save_and_load_layout(desk, env):
@@ -330,7 +328,9 @@ def run_desk_save_and_load_layout(desk, env):
                 sent_save_name = True
 
             if sent_save_name and saved_file is None:
-                saved_file = find_saved_layout_file(env, "saved-alpha")
+                candidate = find_saved_layout_file(env, "saved-alpha")
+                if os.path.exists(candidate):
+                    saved_file = candidate
 
             if saved_file is not None and not sent_picker:
                 with open(saved_file, "r", encoding="utf-8") as handle:

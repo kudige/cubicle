@@ -504,9 +504,10 @@ reporting so the outer terminal may handle a text-selection drag. Use
 `Prefix-m` inside Desk to toggle mouse title selection. Inactive pane titles are
 shown as `[name]` while mouse title selection is enabled and as `name` while it
 is disabled. Press `Prefix-:` to save the current pane layout and cube
-assignments under a name. Press `Prefix-;` to open a centered searchable layout
-picker; type to filter, use the arrow keys to move through long lists, and press
-Enter to load the selected layout. Press `Prefix-?` to show a centered overlay
+assignments under a user-global name. Press `Prefix-;` to open a centered
+searchable layout picker for all saved layouts owned by the user; type to
+filter, use the arrow keys to move through long lists, and press
+Enter to load the selected layout into the current workspace. Press `Prefix-?` to show a centered overlay
 with command names, descriptions, and configured key bindings. From that overlay,
 press `e` to edit the selected command's binding. Desk applies the edit
 immediately and persists it in a managed block in the per-user config file.
