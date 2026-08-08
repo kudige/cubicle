@@ -507,10 +507,16 @@ is disabled. Press `Prefix-:` to save the current pane layout and cube
 assignments under a user-global name. Press `Prefix-;` to open a centered
 searchable layout picker for all saved layouts owned by the user; type to
 filter, use the arrow keys to move through long lists, and press
-Enter to load the selected layout into the current workspace. Press `Prefix-?` to show a centered overlay
-with command names, descriptions, and configured key bindings. From that overlay,
-press `e` to edit the selected command's binding. Desk applies the edit
-immediately and persists it in a managed block in the per-user config file.
+Enter to load the selected layout into the current workspace. Press `Prefix-s`
+to enter layout mode. In layout mode, arrows resize the active pane side,
+Shift-arrows resize the opposite side, `H`/`V` split the active pane and open
+the cube picker for the new pane, `D` deletes the active pane, `t` transposes
+eligible panes on their axis, `r` resets the automatic layout, `h`/`v` apply
+horizontal or vertical zoom, and `s`, `q`, or Escape exits layout mode. Press
+`Prefix-?` to show a centered overlay with command names, descriptions, and
+configured key bindings. From that overlay, press `e` to edit the selected
+command's binding. Desk applies the edit immediately and persists it in a
+managed block in the per-user config file.
 
 Desk key bindings can be configured with `[desk] prefix=KEY` and
 `[desk.keys] bind.N=KEY COMMAND`. Key names follow tmux-style forms such as
@@ -522,8 +528,11 @@ use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
 `Control-Shift-Right` are accepted and displayed as canonical tmux-style names.
 Supported command names are
 `pane.next`, `pane.previous`, `layout.zoom`, `layout.resize.toggle`,
-`layout.save`, `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, and
-`quit`. Use `none` to unbind a default shortcut.
+`layout.transpose`, `layout.split.horizontal`, `layout.split.vertical`,
+`layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
+`layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,
+`menu.open`, `mouse.toggle`, and `quit`. Use `none` to unbind a default
+shortcut.
 
 Examples:
 

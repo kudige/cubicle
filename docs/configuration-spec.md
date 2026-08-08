@@ -281,9 +281,12 @@ Keys:
   Aliases `Shift-`, `Control-`, `Ctrl-`, `Alt-`, and `Meta-` are accepted and
   displayed in canonical `S-`, `C-`, and `M-` form.
   `COMMAND` is one of `pane.next`, `pane.previous`, `layout.zoom`,
-  `layout.resize.toggle`, `layout.save`, `layout.load`, `bindings.show`,
-  `menu.open`, `mouse.toggle`, or `quit`. Use `none` as the command to unbind a
-  default key. Duplicate active shortcuts are invalid.
+  `layout.resize.toggle`, `layout.transpose`, `layout.split.horizontal`,
+  `layout.split.vertical`, `layout.delete`, `layout.reset`,
+  `layout.zoom.horizontal`, `layout.zoom.vertical`, `layout.save`,
+  `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, or `quit`.
+  Use `none` as the command to unbind a default key. Duplicate active shortcuts
+  are invalid.
 
 ### 5.5 `[client]`
 

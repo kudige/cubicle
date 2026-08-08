@@ -98,6 +98,12 @@ typedef enum desk_resize_side {
     DESK_RESIZE_BOTTOM
 } desk_resize_side_t;
 
+typedef enum desk_pending_split {
+    DESK_PENDING_SPLIT_NONE = 0,
+    DESK_PENDING_SPLIT_HORIZONTAL,
+    DESK_PENDING_SPLIT_VERTICAL
+} desk_pending_split_t;
+
 typedef struct desk_rect {
     int row;
     int col;
@@ -235,6 +241,7 @@ typedef struct desk_session {
     long long mouse_suspended_until_ms;
     bool prefix_pending;
     bool zoomed;
+    desk_pending_split_t pending_split;
     bool terminal_size_dirty;
     bool cursor_drawn;
     bool cursor_blink_visible;
@@ -504,6 +511,8 @@ static void pane_layout_previous(desk_pane_layout_t *panes)
     panes->zoom = DESK_ZOOM_NONE;
 }
 
+static int pane_layout_next_id(const desk_pane_layout_t *panes);
+
 static size_t pane_layout_leaf_count(const desk_pane_layout_t *panes)
 {
     size_t count = 0;
@@ -517,8 +526,7 @@ static size_t pane_layout_leaf_count(const desk_pane_layout_t *panes)
     return count;
 }
 
-static int DESK_UNUSED pane_layout_split(desk_pane_layout_t *panes,
-                                         desk_split_t split)
+static int pane_layout_split(desk_pane_layout_t *panes, desk_split_t split)
 {
     int leaf = pane_find_leaf_node(panes, panes->root, panes->active_pane_id);
     if (leaf < 0) {
@@ -555,7 +563,7 @@ static int DESK_UNUSED pane_layout_split(desk_pane_layout_t *panes,
     return 0;
 }
 
-static int DESK_UNUSED pane_layout_delete_active(desk_pane_layout_t *panes)
+static int pane_layout_delete_active(desk_pane_layout_t *panes)
 {
     int leaf = pane_find_leaf_node(panes, panes->root, panes->active_pane_id);
     if (leaf < 0 || leaf == panes->root) {
@@ -574,6 +582,25 @@ static int DESK_UNUSED pane_layout_delete_active(desk_pane_layout_t *panes)
     panes->nodes[sibling].used = false;
     panes->zoom = DESK_ZOOM_NONE;
     return 0;
+}
+
+static void pane_layout_compact_after_delete(desk_pane_layout_t *panes,
+                                             int removed_pane_id)
+{
+    for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
+         ++i) {
+        if (!panes->nodes[i].used ||
+            panes->nodes[i].split != DESK_SPLIT_NONE) {
+            continue;
+        }
+        if (panes->nodes[i].pane_id > removed_pane_id) {
+            panes->nodes[i].pane_id--;
+        }
+    }
+    if (panes->active_pane_id > removed_pane_id) {
+        panes->active_pane_id--;
+    }
+    panes->next_pane_id = pane_layout_next_id(panes);
 }
 
 static void pane_layout_status(desk_pane_layout_t *panes,
@@ -835,8 +862,8 @@ static bool pane_dividers_align(const desk_rect_t *first,
            first->col == second->col;
 }
 
-static int DESK_UNUSED pane_layout_transpose(desk_pane_layout_t *panes,
-                                             const desk_terminal_t *terminal)
+static int pane_layout_transpose(desk_pane_layout_t *panes,
+                                 const desk_terminal_t *terminal)
 {
     int child = pane_find_leaf_node(panes, panes->root,
                                     panes->active_pane_id);
@@ -2920,6 +2947,16 @@ static int attach_all_panes(desk_session_t *session,
     return 0;
 }
 
+static void desk_cleanup_pane(desk_pane_t *pane)
+{
+    cubicle_attachment_disconnect(pane->attachment);
+    pane->attachment = NULL;
+    cubicle_terminal_model_destroy(pane->terminal_model);
+    pane->terminal_model = NULL;
+    grid_cleanup(&pane->grid);
+    memset(pane, 0, sizeof(*pane));
+}
+
 static void desk_detach_pane_after_read_failure(desk_session_t *session,
                                                 size_t pane_index)
 {
@@ -2942,11 +2979,7 @@ static void desk_detach_pane_after_read_failure(desk_session_t *session,
 static void desk_disconnect_all_panes(desk_session_t *session)
 {
     for (size_t i = 0; i < session->pane_count; ++i) {
-        cubicle_attachment_disconnect(session->panes[i].attachment);
-        session->panes[i].attachment = NULL;
-        cubicle_terminal_model_destroy(session->panes[i].terminal_model);
-        session->panes[i].terminal_model = NULL;
-        grid_cleanup(&session->panes[i].grid);
+        desk_cleanup_pane(&session->panes[i]);
     }
     memset(session->panes, 0, sizeof(session->panes));
     session->pane_count = 0;
@@ -3268,6 +3301,7 @@ static int desk_open_root_menu(desk_session_t *session)
 static void desk_close_open_menu(desk_session_t *session)
 {
     memset(&session->open_menu, 0, sizeof(session->open_menu));
+    session->pending_split = DESK_PENDING_SPLIT_NONE;
 }
 
 static void desk_begin_save_layout_prompt(desk_session_t *session)
@@ -3299,7 +3333,28 @@ static const char *desk_command_description(const char *command)
         return "Toggle active pane zoom";
     }
     if (strcmp(command, "layout.resize.toggle") == 0) {
-        return "Toggle resize mode";
+        return "Toggle layout mode";
+    }
+    if (strcmp(command, "layout.transpose") == 0) {
+        return "Transpose panes on axis";
+    }
+    if (strcmp(command, "layout.split.horizontal") == 0) {
+        return "Split pane horizontally";
+    }
+    if (strcmp(command, "layout.split.vertical") == 0) {
+        return "Split pane vertically";
+    }
+    if (strcmp(command, "layout.delete") == 0) {
+        return "Delete active pane";
+    }
+    if (strcmp(command, "layout.reset") == 0) {
+        return "Reset automatic layout";
+    }
+    if (strcmp(command, "layout.zoom.horizontal") == 0) {
+        return "Zoom active split horizontally";
+    }
+    if (strcmp(command, "layout.zoom.vertical") == 0) {
+        return "Zoom active split vertically";
     }
     if (strcmp(command, "layout.save") == 0) {
         return "Save current layout";
@@ -3378,6 +3433,13 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "pane.previous");
     desk_add_bindings_item(session, "layout.zoom");
     desk_add_bindings_item(session, "layout.resize.toggle");
+    desk_add_bindings_item(session, "layout.transpose");
+    desk_add_bindings_item(session, "layout.split.horizontal");
+    desk_add_bindings_item(session, "layout.split.vertical");
+    desk_add_bindings_item(session, "layout.delete");
+    desk_add_bindings_item(session, "layout.reset");
+    desk_add_bindings_item(session, "layout.zoom.horizontal");
+    desk_add_bindings_item(session, "layout.zoom.vertical");
     desk_add_bindings_item(session, "layout.save");
     desk_add_bindings_item(session, "layout.load");
     desk_add_bindings_item(session, "bindings.show");
@@ -3717,6 +3779,110 @@ static int desk_replace_active_pane_process(desk_session_t *session,
         return -1;
     }
     desk_apply_pane_labels(session);
+    return 0;
+}
+
+static int desk_commit_pending_split_process(desk_session_t *session,
+                                             const desk_terminal_t *terminal,
+                                             const cubicle_process_info_t *process,
+                                             char *error,
+                                             size_t error_size)
+{
+    if (session->pending_split == DESK_PENDING_SPLIT_NONE) {
+        return desk_replace_active_pane_process(session, terminal, process,
+                                                error, error_size);
+    }
+    if (session->pane_count >= sizeof(session->panes) / sizeof(session->panes[0])) {
+        snprintf(error, error_size, "maximum pane count reached");
+        session->pending_split = DESK_PENDING_SPLIT_NONE;
+        return -1;
+    }
+
+    desk_pane_layout_t saved_layout = session->layout;
+    size_t saved_pane_count = session->pane_count;
+    desk_split_t split = session->pending_split ==
+                                 DESK_PENDING_SPLIT_HORIZONTAL
+                             ? DESK_SPLIT_HORIZONTAL
+                             : DESK_SPLIT_VERTICAL;
+    session->pending_split = DESK_PENDING_SPLIT_NONE;
+    if (pane_layout_split(&session->layout, split) < 0) {
+        snprintf(error, error_size, "failed to split pane");
+        return -1;
+    }
+    session->zoomed = false;
+    bool resized = false;
+    if (resize_all_panes(session, terminal, &resized) < 0 ||
+        desk_replace_active_pane_process(session, terminal, process, error,
+                                         error_size) < 0) {
+        if (session->pane_count > saved_pane_count) {
+            desk_cleanup_pane(&session->panes[saved_pane_count]);
+            session->pane_count = saved_pane_count;
+        }
+        session->layout = saved_layout;
+        bool rollback_resized = false;
+        (void)resize_all_panes(session, terminal, &rollback_resized);
+        return -1;
+    }
+    desk_apply_pane_labels(session);
+    (void)desk_save_layout(session);
+    return 0;
+}
+
+static int desk_begin_split_process_menu(desk_session_t *session,
+                                         desk_pending_split_t split,
+                                         char *error,
+                                         size_t error_size)
+{
+    if (session->pane_count >= sizeof(session->panes) / sizeof(session->panes[0])) {
+        snprintf(error, error_size, "maximum pane count reached");
+        return -1;
+    }
+    session->pending_split = split;
+    if (desk_load_process_menu(session, &session->workspace) < 0) {
+        session->pending_split = DESK_PENDING_SPLIT_NONE;
+        snprintf(error, error_size, "%s", session->open_menu.status);
+        return -1;
+    }
+    snprintf(session->open_menu.status, sizeof(session->open_menu.status),
+             "select a cube for the new pane");
+    return 0;
+}
+
+static int desk_delete_active_pane(desk_session_t *session,
+                                   const desk_terminal_t *terminal,
+                                   char *error,
+                                   size_t error_size)
+{
+    if (session->pane_count <= 1) {
+        snprintf(error, error_size, "cannot delete the only pane");
+        return -1;
+    }
+    int removed_pane_id = session->layout.active_pane_id;
+    if (removed_pane_id <= 0 || (size_t)removed_pane_id > session->pane_count) {
+        snprintf(error, error_size, "no active pane");
+        return -1;
+    }
+    if (pane_layout_delete_active(&session->layout) < 0) {
+        snprintf(error, error_size, "failed to delete pane");
+        return -1;
+    }
+    pane_layout_compact_after_delete(&session->layout, removed_pane_id);
+    desk_cleanup_pane(&session->panes[(size_t)removed_pane_id - 1]);
+    for (size_t i = (size_t)removed_pane_id; i < session->pane_count; ++i) {
+        session->panes[i - 1] = session->panes[i];
+    }
+    memset(&session->panes[session->pane_count - 1], 0,
+           sizeof(session->panes[session->pane_count - 1]));
+    session->pane_count--;
+    session->zoomed = false;
+    session->layout.zoom = DESK_ZOOM_NONE;
+    desk_apply_pane_labels(session);
+    bool resized = false;
+    if (resize_all_panes(session, terminal, &resized) < 0) {
+        snprintf(error, error_size, "failed to resize panes");
+        return -1;
+    }
+    (void)desk_save_layout(session);
     return 0;
 }
 
@@ -4395,8 +4561,8 @@ static int desk_start_new_process_from_prompt(desk_session_t *session,
     }
 
     char error[256];
-    if (desk_replace_active_pane_process(session, terminal, &process, error,
-                                         sizeof(error)) < 0) {
+    if (desk_commit_pending_split_process(session, terminal, &process, error,
+                                          sizeof(error)) < 0) {
         cubicle_process_terminate_options_t terminate_options;
         memset(&terminate_options, 0, sizeof(terminate_options));
         terminate_options.grace_period_ms = 0;
@@ -4481,8 +4647,8 @@ static int desk_open_menu_select(desk_session_t *session,
     }
 
     char error[256];
-    if (desk_replace_active_pane_process(session, terminal, &selected.process,
-                                         error, sizeof(error)) < 0) {
+    if (desk_commit_pending_split_process(session, terminal, &selected.process,
+                                          error, sizeof(error)) < 0) {
         snprintf(menu->status, sizeof(menu->status), "%s", error);
         return 0;
     }
@@ -4852,7 +5018,16 @@ static int handle_open_menu_input(desk_session_t *session,
                     (void)desk_load_process_menu(session, &workspace);
                 }
             } else if (arrow == 'D') {
-                if (session->open_menu.level == DESK_MENU_WORKSPACE) {
+                if (session->open_menu.level == DESK_MENU_WORKSPACE &&
+                    session->pending_split != DESK_PENDING_SPLIT_NONE) {
+                    desk_close_open_menu(session);
+                    if (!session->mouse_titles) {
+                        desk_menu_disable_mouse();
+                    }
+                    if (menu_closed != NULL) {
+                        *menu_closed = true;
+                    }
+                } else if (session->open_menu.level == DESK_MENU_WORKSPACE) {
                     (void)desk_open_root_menu(session);
                 }
             }
@@ -4907,7 +5082,16 @@ static int handle_open_menu_input(desk_session_t *session,
             continue;
         }
         if (input[i] == 0x1b) {
-            if (session->open_menu.level == DESK_MENU_WORKSPACE) {
+            if (session->open_menu.level == DESK_MENU_WORKSPACE &&
+                session->pending_split != DESK_PENDING_SPLIT_NONE) {
+                desk_close_open_menu(session);
+                if (!session->mouse_titles) {
+                    desk_menu_disable_mouse();
+                }
+                if (menu_closed != NULL) {
+                    *menu_closed = true;
+                }
+            } else if (session->open_menu.level == DESK_MENU_WORKSPACE) {
                 (void)desk_open_root_menu(session);
             } else {
                 desk_close_open_menu(session);
@@ -5147,6 +5331,73 @@ static bool desk_execute_command(desk_session_t *session,
         *layout_changed = true;
         return true;
     }
+    if (strcmp(command, "layout.transpose") == 0) {
+        if (pane_layout_transpose(&session->layout, terminal) == 0) {
+            session->zoomed = false;
+            *layout_changed = true;
+        }
+        return true;
+    }
+    if (strcmp(command, "layout.split.horizontal") == 0 ||
+        strcmp(command, "layout.split.vertical") == 0) {
+        char error[256];
+        desk_pending_split_t split =
+            strcmp(command, "layout.split.horizontal") == 0
+                ? DESK_PENDING_SPLIT_HORIZONTAL
+                : DESK_PENDING_SPLIT_VERTICAL;
+        if (desk_begin_split_process_menu(session, split, error,
+                                          sizeof(error)) < 0) {
+            pane_layout_status(&session->layout, error);
+            *layout_changed = true;
+            return true;
+        }
+        desk_menu_enable_mouse();
+        desk_cursor_erase(terminal, session);
+        desk_render_open_menu(terminal, session);
+        return true;
+    }
+    if (strcmp(command, "layout.delete") == 0) {
+        char error[256];
+        if (desk_delete_active_pane(session, terminal, error,
+                                    sizeof(error)) < 0) {
+            pane_layout_status(&session->layout, error);
+        }
+        *layout_changed = true;
+        return true;
+    }
+    if (strcmp(command, "layout.reset") == 0) {
+        int active_pane_id = session->layout.active_pane_id;
+        bool resize_mode = session->layout.resize_mode;
+        if (pane_layout_auto(&session->layout, session->pane_count) == 0) {
+            desk_apply_pane_labels(session);
+            if (active_pane_id > 0 &&
+                (size_t)active_pane_id <= session->pane_count) {
+                session->layout.active_pane_id = active_pane_id;
+            }
+            session->layout.resize_mode = resize_mode;
+            session->zoomed = false;
+            session->layout.zoom = DESK_ZOOM_NONE;
+            pane_layout_clear_status(&session->layout);
+            *layout_changed = true;
+        }
+        return true;
+    }
+    if (strcmp(command, "layout.zoom.horizontal") == 0) {
+        session->zoomed = false;
+        session->layout.zoom = session->layout.zoom == DESK_ZOOM_HORIZONTAL
+                                   ? DESK_ZOOM_NONE
+                                   : DESK_ZOOM_HORIZONTAL;
+        *layout_changed = true;
+        return true;
+    }
+    if (strcmp(command, "layout.zoom.vertical") == 0) {
+        session->zoomed = false;
+        session->layout.zoom = session->layout.zoom == DESK_ZOOM_VERTICAL
+                                   ? DESK_ZOOM_NONE
+                                   : DESK_ZOOM_VERTICAL;
+        *layout_changed = true;
+        return true;
+    }
     if (strcmp(command, "mouse.toggle") == 0) {
         session->mouse_titles = !session->mouse_titles;
         session->mouse_suspended_until_ms = 0;
@@ -5348,6 +5599,39 @@ static int handle_input(desk_session_t *session,
             start = i + 1;
             continue;
         }
+        if (session->layout.resize_mode &&
+            (input[i] == 's' || input[i] == 'q' || input[i] == 't' ||
+             input[i] == 'H' || input[i] == 'V' || input[i] == 'D' ||
+             input[i] == 'r' || input[i] == 'h' || input[i] == 'v')) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            const char *command = NULL;
+            if (input[i] == 's' || input[i] == 'q') {
+                session->layout.resize_mode = false;
+                *layout_changed = true;
+            } else if (input[i] == 't') {
+                command = "layout.transpose";
+            } else if (input[i] == 'H') {
+                command = "layout.split.horizontal";
+            } else if (input[i] == 'V') {
+                command = "layout.split.vertical";
+            } else if (input[i] == 'D') {
+                command = "layout.delete";
+            } else if (input[i] == 'r') {
+                command = "layout.reset";
+            } else if (input[i] == 'h') {
+                command = "layout.zoom.horizontal";
+            } else if (input[i] == 'v') {
+                command = "layout.zoom.vertical";
+            }
+            if (command != NULL) {
+                (void)desk_execute_command(session, terminal, command,
+                                           layout_changed, quit_requested);
+            }
+            start = i + 1;
+            continue;
+        }
         desk_resize_side_t side;
         int delta = 0;
         if (session->layout.resize_mode &&
@@ -5365,6 +5649,15 @@ static int handle_input(desk_session_t *session,
                 *layout_changed = true;
             }
             i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
+        if (session->layout.resize_mode && input[i] == 0x1b) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            session->layout.resize_mode = false;
+            *layout_changed = true;
             start = i + 1;
             continue;
         }
@@ -5631,6 +5924,8 @@ static void print_usage(FILE *stream, const char *program)
             "  --no-mouse    Disable mouse pane title selection.\n");
     fprintf(stream,
             "  Prefix-m      Toggle mouse pane title selection while running.\n");
+    fprintf(stream,
+            "  Prefix-s      Enter layout mode; arrows resize, H/V split, D deletes.\n");
     fprintf(stream, "  Prefix-:      Save the current layout by name.\n");
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
     fprintf(stream, "  Prefix-?      Show or edit configured key bindings.\n");

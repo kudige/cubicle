@@ -608,6 +608,13 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "pane.previous") == 0 ||
            strcmp(command, "layout.zoom") == 0 ||
            strcmp(command, "layout.resize.toggle") == 0 ||
+           strcmp(command, "layout.transpose") == 0 ||
+           strcmp(command, "layout.split.horizontal") == 0 ||
+           strcmp(command, "layout.split.vertical") == 0 ||
+           strcmp(command, "layout.delete") == 0 ||
+           strcmp(command, "layout.reset") == 0 ||
+           strcmp(command, "layout.zoom.horizontal") == 0 ||
+           strcmp(command, "layout.zoom.vertical") == 0 ||
            strcmp(command, "layout.save") == 0 ||
            strcmp(command, "layout.load") == 0 ||
            strcmp(command, "bindings.show") == 0 ||

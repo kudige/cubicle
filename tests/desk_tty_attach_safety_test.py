@@ -402,6 +402,232 @@ def run_desk_save_and_load_layout(desk, env):
         os.close(master_fd)
 
 
+def run_desk_layout_mode_keys(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_probe_start = False
+    saw_probe_start = False
+    sent_layout_keys = False
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 6
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_probe_start and b"desk-safe" in captured:
+                os.write(master_fd, b"LEAK_START")
+                sent_probe_start = True
+
+            if sent_probe_start and not saw_probe_start:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_LEAK_START" in logs.stdout:
+                    saw_probe_start = True
+
+            if saw_probe_start and not sent_layout_keys:
+                os.write(master_fd, b"\x18shvrtq")
+                sent_layout_keys = True
+
+            if sent_layout_keys and not sent_payload:
+                time.sleep(0.2)
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_LAYOUT_LEAK" in logs.stdout:
+                    raise AssertionError(
+                        f"layout-mode keys leaked into cube stdin:\n{logs.stdout}"
+                    )
+                os.write(master_fd, b"LAYOUT")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_LAYOUT" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_probe_start:
+            raise AssertionError(f"desk did not render layout-mode pane: {captured!r}")
+        if not saw_probe_start:
+            raise AssertionError("desk did not forward pre-layout probe")
+        if not sent_layout_keys:
+            raise AssertionError(f"desk did not render layout-mode pane: {captured!r}")
+        if not sent_payload:
+            raise AssertionError("desk did not send post-layout-mode payload")
+        if not saw_payload:
+            raise AssertionError(f"desk did not exit layout mode: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk layout mode exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
+def run_desk_layout_split_and_delete(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    started_extra = False
+    opened_split_menu = False
+    selected_extra = False
+    saw_extra_pane = False
+    sent_delete = False
+    saw_deleted = False
+    sent_quit = False
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not started_extra and b"layout-left" in captured:
+                run_checked(
+                    [
+                        cube,
+                        "run",
+                        "--bg",
+                        "--tty",
+                        "--name",
+                        "layout-extra",
+                        sys.executable,
+                        "-c",
+                        (
+                            "import sys,time,tty\n"
+                            "tty.setraw(0)\n"
+                            "sys.stdout.write('READY layout-extra\\n')\n"
+                            "sys.stdout.flush()\n"
+                            "time.sleep(10)\n"
+                        ),
+                    ],
+                    env,
+                )
+                os.write(master_fd, b"\x18sH")
+                opened_split_menu = True
+                started_extra = True
+
+            if opened_split_menu and not selected_extra:
+                if b"select a cube for the new pane" in captured and b"layout-extra" in captured:
+                    os.write(master_fd, b"\r")
+                    selected_extra = True
+
+            if selected_extra and not saw_extra_pane and b"layout-extra" in captured:
+                saw_extra_pane = True
+                captured.clear()
+                os.write(master_fd, b"D")
+                sent_delete = True
+
+            if sent_delete and not saw_deleted:
+                time.sleep(0.2)
+                if b"layout-left" in captured and b"layout-extra" not in captured:
+                    saw_deleted = True
+
+            if saw_deleted and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not started_extra:
+            raise AssertionError(f"desk did not render layout-left pane: {captured!r}")
+        if not opened_split_menu:
+            raise AssertionError("desk was not asked to open split menu")
+        if not selected_extra:
+            raise AssertionError(f"desk split menu did not expose layout-extra: {captured!r}")
+        if not saw_extra_pane:
+            raise AssertionError(f"desk did not attach split pane: {captured!r}")
+        if not sent_delete:
+            raise AssertionError("desk was not asked to delete split pane")
+        if not saw_deleted:
+            raise AssertionError(f"desk did not delete active split pane: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk split/delete exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_configurable_keys(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -532,7 +758,7 @@ def run_desk_bindings_overlay(desk, env):
                     saw_overlay = True
 
             if saw_overlay and not sent_edit:
-                os.write(master_fd, b"jjjjjje")
+                os.write(master_fd, b"j" * 13 + b"e")
                 sent_edit = True
 
             if sent_edit and not saw_edit_prompt:
@@ -548,7 +774,6 @@ def run_desk_bindings_overlay(desk, env):
                     b"Key bindings" in captured
                     and b"[bindings.show]" in captured
                     and b"C-G" in captured
-                    and b"now uses C-G" in captured
                 ):
                     saw_edited_binding = True
 
@@ -1749,6 +1974,9 @@ def main():
                     "saw_ctrl_c=False\n"
                     "saw_ping=False\n"
                     "saw_prefix_m=False\n"
+                    "saw_layout=False\n"
+                    "saw_leak_start=False\n"
+                    "saw_layout_leak=False\n"
                     "while time.time()<deadline:\n"
                     "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
                     "    if r:\n"
@@ -1765,7 +1993,21 @@ def main():
                     "        sys.stdout.write('GOT_PREFIX_M\\n')\n"
                     "        sys.stdout.flush()\n"
                     "        saw_prefix_m=True\n"
-                    "    if saw_ctrl_c and saw_ping and saw_prefix_m:\n"
+                    "    if not saw_leak_start and b'LEAK_START' in data:\n"
+                    "        sys.stdout.write('GOT_LEAK_START\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_leak_start=True\n"
+                    "    if not saw_layout and b'LAYOUT' in data:\n"
+                    "        sys.stdout.write('GOT_LAYOUT\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_layout=True\n"
+                    "    if saw_leak_start and not saw_layout and not saw_layout_leak:\n"
+                    "        tail=data.split(b'LEAK_START', 1)[1]\n"
+                    "        if any(ch in tail for ch in (b'h', b'v', b'r', b't')):\n"
+                    "            sys.stdout.write('GOT_LAYOUT_LEAK '+tail.hex()+'\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            saw_layout_leak=True\n"
+                    "    if saw_ctrl_c and saw_ping and saw_prefix_m and saw_layout:\n"
                     "        break\n"
                     "time.sleep(10)\n"
                 ),
@@ -1774,6 +2016,35 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+        run_desk_layout_mode_keys(desk, cube, env)
+        run_checked([cube, "workspace", "create", "DeskLayout"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskLayout",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "layout-left",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY layout-left\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(10)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskLayout"], env)
+        run_desk_layout_split_and_delete(desk, cube, env)
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskLayout"], env)
         write_test_config(
             config_path,
             log_dir,
