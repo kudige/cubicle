@@ -74,6 +74,13 @@ typedef struct cube_log_options {
     int has_end;
 } cube_log_options_t;
 
+typedef struct cube_process_ref {
+    char workspace[CUBICLE_NAME_MAX];
+    char process[CUBICLE_NAME_MAX];
+    int has_workspace;
+    int from_selected_workspace;
+} cube_process_ref_t;
+
 static struct termios cube_saved_terminal;
 static int cube_terminal_restore_active = 0;
 
@@ -145,7 +152,8 @@ static void print_usage(FILE *stream)
             "  cube config show|effective|paths|validate\n"
             "  cube defaults show|set|reset ...\n"
             "\n"
-            "Run and reconnect to persistent processes inside Cubicle workspaces.\n");
+            "Run and reconnect to persistent processes inside Cubicle workspaces.\n"
+            "Process NAME may be written as WORKSPACE.NAME to target an inactive workspace.\n");
 }
 
 static int print_command_usage(const char *command, FILE *stream)
@@ -172,17 +180,22 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "inspect") == 0) {
-        fprintf(stream, "Usage:\n  cube inspect NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube inspect NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "logs") == 0) {
         fprintf(stream,
                 "Usage:\n"
-                "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n");
+                "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "restart") == 0) {
-        fprintf(stream, "Usage:\n  cube restart NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube restart NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "events") == 0) {
@@ -192,19 +205,27 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "connect") == 0) {
-        fprintf(stream, "Usage:\n  cube connect [--ro] NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube connect [--ro] NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "push") == 0) {
-        fprintf(stream, "Usage:\n  cube push [--eof] [--output] NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube push [--eof] [--output] NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "signal") == 0) {
-        fprintf(stream, "Usage:\n  cube signal NAME SIGNAL\n");
+        fprintf(stream,
+                "Usage:\n  cube signal NAME SIGNAL\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "stop") == 0) {
-        fprintf(stream, "Usage:\n  cube stop NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube stop NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "kill") == 0) {
@@ -215,19 +236,26 @@ static int print_command_usage(const char *command, FILE *stream)
                 "\n"
                 "Options:\n"
                 "  --all       Kill all running processes in the selected workspace.\n"
-                "  --cleanup   Remove killed process records after they exit.\n");
+                "  --cleanup   Remove killed process records after they exit.\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "save") == 0) {
-        fprintf(stream, "Usage:\n  cube save NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube save NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "unsave") == 0) {
-        fprintf(stream, "Usage:\n  cube unsave NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube unsave NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "remove") == 0) {
-        fprintf(stream, "Usage:\n  cube remove NAME\n");
+        fprintf(stream,
+                "Usage:\n  cube remove NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "cleanup") == 0) {
@@ -1524,6 +1552,76 @@ static int print_workspace_rpc_error(const cube_rpc_response_t *response,
     return print_rpc_error(response);
 }
 
+static int split_qualified_process_ref(const char *input,
+                                       cube_process_ref_t *ref)
+{
+    const char *separator = strrchr(input, '.');
+    if (separator == NULL) {
+        return 0;
+    }
+    if (separator == input || separator[1] == '\0') {
+        fprintf(stderr, "cube: invalid process reference\n");
+        return -1;
+    }
+
+    size_t workspace_length = (size_t)(separator - input);
+    size_t process_length = strlen(separator + 1);
+    if (workspace_length >= sizeof(ref->workspace) ||
+        process_length >= sizeof(ref->process)) {
+        fprintf(stderr, "cube: process reference is too long\n");
+        return -1;
+    }
+
+    memcpy(ref->workspace, input, workspace_length);
+    ref->workspace[workspace_length] = '\0';
+    memcpy(ref->process, separator + 1, process_length + 1);
+    ref->has_workspace = 1;
+    ref->from_selected_workspace = 0;
+    return 1;
+}
+
+static int resolve_process_ref(const cube_options_t *options,
+                               const char *input,
+                               int require_workspace,
+                               cube_process_ref_t *ref)
+{
+    memset(ref, 0, sizeof(*ref));
+    if (!valid_name(input)) {
+        fprintf(stderr, "cube: invalid process name\n");
+        return 2;
+    }
+
+    int split_result = split_qualified_process_ref(input, ref);
+    if (split_result < 0) {
+        return 2;
+    }
+    if (split_result > 0) {
+        if (!valid_name(ref->workspace) || !valid_name(ref->process)) {
+            fprintf(stderr, "cube: invalid process reference\n");
+            return 2;
+        }
+        return 0;
+    }
+
+    int length = snprintf(ref->process, sizeof(ref->process), "%s", input);
+    if (length < 0 || (size_t)length >= sizeof(ref->process)) {
+        fprintf(stderr, "cube: process name is too long\n");
+        return 2;
+    }
+
+    if (resolve_workspace_selection(options, ref->workspace,
+                                    sizeof(ref->workspace),
+                                    &ref->from_selected_workspace) == 0) {
+        ref->has_workspace = 1;
+        return 0;
+    }
+    if (require_workspace) {
+        fprintf(stderr, "cube: no workspace selected\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int fetch_workspace_directory(const char *manager_socket,
                                      const char *workspace,
                                      char *directory,
@@ -2316,22 +2414,18 @@ static int process_inspect(const char *manager_socket,
                            const cube_options_t *options,
                            const char *process_name)
 {
-    char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
-        fprintf(stderr, "cube: no workspace selected\n");
-        return 1;
-    }
-    if (!valid_name(process_name)) {
-        fprintf(stderr, "cube: invalid process name\n");
-        return 2;
+    cube_process_ref_t ref;
+    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    if (ref_result != 0) {
+        return ref_result;
     }
 
     char escaped_workspace[CUBICLE_NAME_MAX * 2];
     char escaped_process[CUBICLE_NAME_MAX * 2];
     if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
-                            workspace) < 0 ||
+                            ref.workspace) < 0 ||
         cubicle_json_escape(escaped_process, sizeof(escaped_process),
-                            process_name) < 0) {
+                            ref.process) < 0) {
         fprintf(stderr, "cube: name is too long\n");
         return 2;
     }
@@ -2342,7 +2436,8 @@ static int process_inspect(const char *manager_socket,
              escaped_process, escaped_workspace);
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "process.get", params, &response) < 0) {
-        return print_rpc_error(&response);
+        return print_workspace_rpc_error(&response, ref.workspace,
+                                         ref.from_selected_workspace);
     }
 
     if (options->json) {
@@ -2388,7 +2483,7 @@ static int process_inspect(const char *manager_socket,
     }
 
     printf("Name:        %s\n", name);
-    printf("Workspace:   %s\n", workspace);
+    printf("Workspace:   %s\n", ref.workspace);
     printf("Mode:        %s\n", mode);
     printf("State:       %s\n", state);
     printf("Saved:       %s\n", saved ? "yes" : "no");
@@ -2453,27 +2548,24 @@ static int resolve_process_metadata(const char *manager_socket,
                                     char *mode,
                                     size_t mode_size)
 {
-    char workspace[CUBICLE_NAME_MAX];
-    int from_selected_workspace = 0;
-    int has_workspace = resolve_workspace_selection(
-        options, workspace, sizeof(workspace), &from_selected_workspace) == 0;
-    if (!valid_name(process_name)) {
-        fprintf(stderr, "cube: invalid process name\n");
-        return 2;
+    cube_process_ref_t ref;
+    int ref_result = resolve_process_ref(options, process_name, 0, &ref);
+    if (ref_result != 0) {
+        return ref_result;
     }
 
     char escaped_process[CUBICLE_NAME_MAX * 2];
     if (cubicle_json_escape(escaped_process, sizeof(escaped_process),
-                            process_name) < 0) {
+                            ref.process) < 0) {
         fprintf(stderr, "cube: process name is too long\n");
         return 2;
     }
 
     char params[2048];
-    if (has_workspace) {
+    if (ref.has_workspace) {
         char escaped_workspace[CUBICLE_NAME_MAX * 2];
         if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
-                                workspace) < 0) {
+                                ref.workspace) < 0) {
             fprintf(stderr, "cube: workspace name is too long\n");
             return 2;
         }
@@ -2487,9 +2579,9 @@ static int resolve_process_metadata(const char *manager_socket,
 
     cube_rpc_response_t response;
     if (call_manager(manager_socket, "process.get", params, &response) < 0) {
-        if (has_workspace) {
-            return print_workspace_rpc_error(&response, workspace,
-                                             from_selected_workspace);
+        if (ref.has_workspace) {
+            return print_workspace_rpc_error(&response, ref.workspace,
+                                             ref.from_selected_workspace);
         }
         return print_rpc_error(&response);
     }
@@ -2948,23 +3040,17 @@ static int process_restart(const char *manager_socket,
                            const cube_options_t *options,
                            const char *process_name)
 {
-    char workspace[CUBICLE_NAME_MAX];
-    int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
-                                    &from_selected_workspace) < 0) {
-        fprintf(stderr, "cube: no workspace selected\n");
-        return 1;
-    }
-    if (!valid_name(process_name)) {
-        fprintf(stderr, "cube: invalid process name\n");
-        return 2;
+    cube_process_ref_t ref;
+    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    if (ref_result != 0) {
+        return ref_result;
     }
 
     cubicle_json_builder_t get_params = {0};
     if (cubicle_json_builder_append(&get_params, "{\"process\":") < 0 ||
-        cubicle_json_builder_append_string(&get_params, process_name) < 0 ||
+        cubicle_json_builder_append_string(&get_params, ref.process) < 0 ||
         cubicle_json_builder_append(&get_params, ",\"workspace_id\":") < 0 ||
-        cubicle_json_builder_append_string(&get_params, workspace) < 0 ||
+        cubicle_json_builder_append_string(&get_params, ref.workspace) < 0 ||
         cubicle_json_builder_append(&get_params, "}") < 0) {
         cubicle_json_builder_cleanup(&get_params);
         fprintf(stderr, "cube: failed to encode process lookup\n");
@@ -2975,8 +3061,8 @@ static int process_restart(const char *manager_socket,
     if (call_manager(manager_socket, "process.get", get_params.data,
                      &response) < 0) {
         cubicle_json_builder_cleanup(&get_params);
-        return print_workspace_rpc_error(&response, workspace,
-                                         from_selected_workspace);
+        return print_workspace_rpc_error(&response, ref.workspace,
+                                         ref.from_selected_workspace);
     }
     cubicle_json_builder_cleanup(&get_params);
 

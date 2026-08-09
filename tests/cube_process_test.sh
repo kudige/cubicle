@@ -246,6 +246,60 @@ workspace_b_id=$(api workspace-create "Project B" | json_id)
 project_b_process_id=$(api process-start --workspace "$workspace_b_id" \
     --friendly-name project-b-proc /bin/true | json_id)
 api process-wait "$project_b_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube inspect "Project B.project-b-proc" >"$tmpdir/project-b-inspect.out"
+grep -q '^Workspace:   Project B$' "$tmpdir/project-b-inspect.out"
+grep -q '^Name:        project-b-proc$' "$tmpdir/project-b-inspect.out"
+project_b_save_output=$(cube save "Project B.project-b-proc")
+if [ "$project_b_save_output" != "Process Project B.project-b-proc saved" ]; then
+    echo "unexpected qualified save output: $project_b_save_output" >&2
+    exit 1
+fi
+cube inspect "Project B.project-b-proc" >"$tmpdir/project-b-saved.out"
+grep -q '^Saved:       yes$' "$tmpdir/project-b-saved.out"
+project_b_unsave_output=$(cube unsave "Project B.project-b-proc")
+if [ "$project_b_unsave_output" != "Process Project B.project-b-proc unsaved" ]; then
+    echo "unexpected qualified unsave output: $project_b_unsave_output" >&2
+    exit 1
+fi
+project_b_logs_process_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-logs -- \
+    python3 -c 'import sys; sys.stdout.write("b-out"); sys.stderr.write("b-err")' | json_id)
+api process-wait "$project_b_logs_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube logs --stdout "Project B.project-b-logs" >"$tmpdir/project-b-logs.out"
+printf "b-out" | cmp - "$tmpdir/project-b-logs.out"
+cube logs --stderr "Project B.project-b-logs" 2>"$tmpdir/project-b-logs.err"
+grep -q '^b-err$' "$tmpdir/project-b-logs.err"
+project_b_push_process_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-push -- sh -c 'cat; printf push-err >&2' | json_id)
+printf "push-in\n" | cube push --eof --output "Project B.project-b-push" \
+    >"$tmpdir/project-b-push.out" 2>"$tmpdir/project-b-push.err"
+api process-wait "$project_b_push_process_id" --timeout-ms 2000 | grep -q '"success":true'
+printf "push-in\n" | cmp - "$tmpdir/project-b-push.out"
+grep -q '^push-err$' "$tmpdir/project-b-push.err"
+project_b_restart_count="$tmpdir/project-b-restart-count"
+project_b_restart_process_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-restart --restart -- \
+    sh -c "printf run >> '$project_b_restart_count'" | json_id)
+api process-wait "$project_b_restart_process_id" --timeout-ms 2000 | grep -q '"success":true'
+project_b_restart_output=$(cube restart "Project B.project-b-restart")
+if [ "$project_b_restart_output" != "Process project-b-restart restarted" ]; then
+    echo "unexpected qualified restart output: $project_b_restart_output" >&2
+    exit 1
+fi
+for _ in $(seq 1 100); do
+    if [ -f "$project_b_restart_count" ] &&
+        [ "$(wc -c <"$project_b_restart_count")" -eq 6 ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ "$(wc -c <"$project_b_restart_count")" -ne 6 ]; then
+    echo "qualified restart did not rerun process" >&2
+    exit 1
+fi
+cube remove "Project B.project-b-logs" >/dev/null
+cube remove "Project B.project-b-push" >/dev/null
+cube remove "Project B.project-b-restart" >/dev/null
 all_ps_output=$(cube ps -a)
 printf "%s\n" "$all_ps_output" | grep -q '^Workspace Project A$'
 printf "%s\n" "$all_ps_output" | grep -q '^build	stream	lost$'
@@ -660,7 +714,8 @@ cube --workspace "Cleanup Workspace" cleanup >/dev/null
 cube workspace delete "Cleanup Workspace" >/dev/null
 
 set +e
-cube inspect remove-me >"$tmpdir/removed-inspect.out" 2>"$tmpdir/removed-inspect.err"
+cube --workspace "Project A" inspect remove-me \
+    >"$tmpdir/removed-inspect.out" 2>"$tmpdir/removed-inspect.err"
 status=$?
 set -e
 if [ "$status" -ne 1 ]; then

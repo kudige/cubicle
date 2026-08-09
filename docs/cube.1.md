@@ -232,6 +232,10 @@ cube --json inspect server
 Typical process states include `running`, `completed`, `failed`, `lost`, and
 `removed`.
 
+For commands that take a process `NAME`, use `WORKSPACE.NAME` to target a cube
+outside the currently selected workspace. If the workspace name contains spaces,
+quote the whole reference, for example `cube inspect "Project A.server"`.
+
 ## Logs
 
 ```text

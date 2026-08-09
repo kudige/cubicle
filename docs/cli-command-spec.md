@@ -351,6 +351,10 @@ cube ps --watch
 
 The default should show live processes and a bounded number of recently completed processes.
 
+Any command that takes a process `NAME` accepts `WORKSPACE.NAME` to reference a
+cube outside the selected workspace, for example `cube connect Shogun.CScope`.
+The split is made at the last `.` in the argument.
+
 ### 5.2 Inspect one process
 
 ```console
