@@ -2364,13 +2364,23 @@ static int process_inspect(const char *manager_socket,
     char state[32];
     int saved = 0;
     int restart = 0;
+    uint64_t stdout_start_offset = 0;
+    uint64_t stdout_offset = 0;
+    uint64_t stderr_start_offset = 0;
+    uint64_t stderr_offset = 0;
     if (json_string_field(document.root, "id", id, sizeof(id)) < 0 ||
         json_string_field(document.root, "friendly_name", name,
                           sizeof(name)) < 0 ||
         json_string_field(document.root, "mode", mode, sizeof(mode)) < 0 ||
         json_string_field(document.root, "state", state, sizeof(state)) < 0 ||
         json_bool_field(document.root, "saved", &saved) < 0 ||
-        json_bool_field(document.root, "restart", &restart) < 0) {
+        json_bool_field(document.root, "restart", &restart) < 0 ||
+        json_u64_field(document.root, "stdout_start_offset",
+                       &stdout_start_offset) < 0 ||
+        json_u64_field(document.root, "stdout_offset", &stdout_offset) < 0 ||
+        json_u64_field(document.root, "stderr_start_offset",
+                       &stderr_start_offset) < 0 ||
+        json_u64_field(document.root, "stderr_offset", &stderr_offset) < 0) {
         cubicle_json_cleanup(&document);
         cleanup_rpc_response(&response);
         fprintf(stderr, "cube: invalid process response\n");
@@ -2383,6 +2393,12 @@ static int process_inspect(const char *manager_socket,
     printf("State:       %s\n", state);
     printf("Saved:       %s\n", saved ? "yes" : "no");
     printf("Restart:     %s\n", restart ? "yes" : "no");
+    printf("Stdout:      start=%llu end=%llu\n",
+           (unsigned long long)stdout_start_offset,
+           (unsigned long long)stdout_offset);
+    printf("Stderr:      start=%llu end=%llu\n",
+           (unsigned long long)stderr_start_offset,
+           (unsigned long long)stderr_offset);
     printf("Process ID:  %s\n", id);
     yyjson_val *argv = yyjson_obj_get(document.root, "argv");
     char *command_line = command_line_from_argv(argv);

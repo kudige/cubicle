@@ -128,10 +128,13 @@ json_id() {
 }
 
 inspect_command_process_id=$(api process-start --workspace "$workspace_id" \
-    --friendly-name inspect-command /bin/echo inspect-command | json_id)
+    --friendly-name inspect-command -- \
+    python3 -c 'import sys; sys.stdout.write("inspect-command"); sys.stderr.write("inspect-error")' | json_id)
 api process-wait "$inspect_command_process_id" --timeout-ms 2000 | grep -q '"success":true'
 cube inspect inspect-command >"$tmpdir/inspect-command.out"
-grep -q '^Command:     /bin/echo inspect-command$' "$tmpdir/inspect-command.out"
+grep -F -q "Command:     python3 -c 'import sys; sys.stdout.write(\"inspect-command\"); sys.stderr.write(\"inspect-error\")'" "$tmpdir/inspect-command.out"
+grep -q '^Stdout:      start=0 end=15$' "$tmpdir/inspect-command.out"
+grep -q '^Stderr:      start=0 end=13$' "$tmpdir/inspect-command.out"
 cube remove inspect-command >/dev/null
 
 restart_count="$tmpdir/restart-count"

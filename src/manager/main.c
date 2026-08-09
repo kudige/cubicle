@@ -294,6 +294,11 @@ static int controller_log_path(char path[PATH_MAX],
     return 0;
 }
 
+static int process_output_path(char path[PATH_MAX],
+                               const manager_state_t *state,
+                               const char *process_id,
+                               const char *file_name);
+
 static int ensure_parent_directory(const char *path)
 {
     char parent[PATH_MAX];
@@ -1009,29 +1014,69 @@ static const char *api_process_state_name(const char *record_state)
     return "lost";
 }
 
-static int process_info_json(const char *manager_id_value,
+static int process_output_range(const manager_state_t *state,
+                                const char *process_id,
+                                const char *file_name,
+                                uint64_t *start_offset,
+                                uint64_t *end_offset)
+{
+    char path[PATH_MAX];
+    if (process_output_path(path, state, process_id, file_name) < 0) {
+        return -1;
+    }
+
+    struct stat status;
+    if (stat(path, &status) < 0) {
+        if (errno == ENOENT) {
+            *start_offset = 0;
+            *end_offset = 0;
+            return 0;
+        }
+        return -1;
+    }
+
+    *start_offset = 0;
+    *end_offset = status.st_size < 0 ? 0 : (uint64_t)status.st_size;
+    return 0;
+}
+
+static int process_info_json(const manager_state_t *state,
+                             const char *manager_id_value,
                              const cubicle_process_record_t *process,
                              char *buffer,
                              size_t buffer_size)
 {
     char escaped_name[256];
     char escaped_cwd[CUBICLE_PATH_MAX * 2];
+    uint64_t stdout_start_offset = 0;
+    uint64_t stdout_offset = 0;
+    uint64_t stderr_start_offset = 0;
+    uint64_t stderr_offset = 0;
     if (cubicle_json_escape(escaped_name, sizeof(escaped_name),
                             process->friendly_name) < 0 ||
         cubicle_json_escape(escaped_cwd, sizeof(escaped_cwd),
-                            process->cwd) < 0) {
+                            process->cwd) < 0 ||
+        process_output_range(state, process->process_id, "stdout.log",
+                             &stdout_start_offset, &stdout_offset) < 0 ||
+        process_output_range(state, process->process_id, "stderr.log",
+                             &stderr_start_offset, &stderr_offset) < 0) {
         return -1;
     }
 
     int length = snprintf(buffer, buffer_size,
-                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"argv\":%s,\"saved\":%s,\"restart\":%s,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_offset\":0,\"stderr_offset\":0,\"tty_offset\":0,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
+                          "{\"manager_id\":\"%s\",\"workspace_id\":\"%s\",\"id\":\"%s\",\"friendly_name\":\"%s\",\"mode\":\"%s\",\"state\":\"%s\",\"cwd\":\"%s\",\"argv\":%s,\"saved\":%s,\"restart\":%s,\"exit_code\":0,\"termination_signal\":0,\"has_exit_status\":false,\"stdout_start_offset\":%llu,\"stdout_offset\":%llu,\"stderr_start_offset\":%llu,\"stderr_offset\":%llu,\"tty_offset\":%llu,\"created_at_ms\":0,\"started_at_ms\":0,\"exited_at_ms\":0,\"local_pid\":0,\"local_pgid\":0}",
                           manager_id_value, process->workspace_id,
                           process->process_id, escaped_name, process->mode,
                           api_process_state_name(process->state), escaped_cwd,
                           process->argv_json[0] == '\0' ? "[]" :
                                                            process->argv_json,
                           process->saved ? "true" : "false",
-                          process->restart ? "true" : "false");
+                          process->restart ? "true" : "false",
+                          (unsigned long long)stdout_start_offset,
+                          (unsigned long long)stdout_offset,
+                          (unsigned long long)stderr_start_offset,
+                          (unsigned long long)stderr_offset,
+                          (unsigned long long)stdout_offset);
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -4501,7 +4546,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
-        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+        if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
                                              "failed to encode process",
@@ -4563,7 +4608,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                     continue;
                 }
                 refresh_observed_process_state(state, &process);
-                if (process_info_json(id, &process, item, sizeof(item)) < 0) {
+                if (process_info_json(state, id, &process, item, sizeof(item)) < 0) {
                     continue;
                 }
                 written = snprintf(result + used, sizeof(result) - used,
@@ -4856,7 +4901,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                  workspace.directory);
 
         char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
-        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+        if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
                                              "failed to encode process",
@@ -4993,7 +5038,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             }
         }
         char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
-        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+        if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
                                              "failed to encode process",
@@ -5061,7 +5106,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         unlock_state(lock_fd);
 
         char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
-        if (process_info_json(id, &process, result, sizeof(result)) < 0) {
+        if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
                                              "failed to encode process",

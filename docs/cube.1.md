@@ -215,7 +215,8 @@ cube --json run --bg --stream /bin/sleep 30
 
 `cube inspect NAME`
 : Show the current manager record for one process, including the stored command
-  line when restart metadata is available.
+  line when restart metadata is available, and the currently readable stdout
+  and stderr byte ranges.
 
 Examples:
 

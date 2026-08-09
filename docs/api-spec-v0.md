@@ -390,7 +390,9 @@ typedef struct cubicle_process_info {
     int termination_signal;
     bool has_exit_status;
 
+    uint64_t stdout_start_offset;
     uint64_t stdout_offset;
+    uint64_t stderr_start_offset;
     uint64_t stderr_offset;
     uint64_t tty_offset;
 

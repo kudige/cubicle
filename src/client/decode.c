@@ -332,8 +332,14 @@ int parse_process_info(const char *json, cubicle_process_info_t *out)
         cubicle_json_get_optional_bool(parsed.root, "has_exit_status",
                                        &out->has_exit_status, NULL, &error) <
             0 ||
+        cubicle_json_get_optional_u64(parsed.root, "stdout_start_offset",
+                                      &out->stdout_start_offset, NULL,
+                                      &error) < 0 ||
         cubicle_json_get_optional_u64(parsed.root, "stdout_offset",
                                       &out->stdout_offset, NULL, &error) < 0 ||
+        cubicle_json_get_optional_u64(parsed.root, "stderr_start_offset",
+                                      &out->stderr_start_offset, NULL,
+                                      &error) < 0 ||
         cubicle_json_get_optional_u64(parsed.root, "stderr_offset",
                                       &out->stderr_offset, NULL, &error) < 0 ||
         cubicle_json_get_optional_u64(parsed.root, "tty_offset",

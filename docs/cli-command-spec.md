@@ -366,6 +366,8 @@ Command:     bash
 Mode:        tty
 State:       running
 Restart:     no
+Stdout:      start=0 end=18432
+Stderr:      start=0 end=0
 Clients:     1 interactive, 1 read-only
 Started:     3 minutes ago
 Process ID:  0123456789abcdef0123456789abcdef
