@@ -132,6 +132,7 @@ static void print_usage(FILE *stream)
             "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
             "  cube events [--follow [--iterations N]]\n"
             "  cube connect [--ro] NAME\n"
+            "  cube push [--eof] [--output] NAME\n"
             "  cube restart NAME\n"
             "  cube signal NAME SIGNAL\n"
             "  cube stop NAME\n"
@@ -192,6 +193,10 @@ static int print_command_usage(const char *command, FILE *stream)
     }
     if (strcmp(command, "connect") == 0) {
         fprintf(stream, "Usage:\n  cube connect [--ro] NAME\n");
+        return 0;
+    }
+    if (strcmp(command, "push") == 0) {
+        fprintf(stream, "Usage:\n  cube push [--eof] [--output] NAME\n");
         return 0;
     }
     if (strcmp(command, "signal") == 0) {
@@ -330,6 +335,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "ps") == 0 ||
            strcmp(command, "inspect") == 0 ||
            strcmp(command, "connect") == 0 ||
+           strcmp(command, "push") == 0 ||
            strcmp(command, "restart") == 0 ||
            strcmp(command, "signal") == 0 ||
            strcmp(command, "stop") == 0 ||
@@ -4227,6 +4233,228 @@ static int attach_to_process_id(const char *manager_socket,
     return result;
 }
 
+static int push_drain_output(const char *manager_socket,
+                             const char *process_id,
+                             const char *mode,
+                             uint64_t stdout_offset,
+                             uint64_t stderr_offset,
+                             uint64_t tty_offset)
+{
+    int idle_iterations = 0;
+    int stdout_end = 0;
+    int stderr_end = 0;
+    int tty_end = 0;
+
+    for (;;) {
+        int advanced = 0;
+        int result = 0;
+        if (process_mode_uses_terminal(mode)) {
+            result = read_process_output_once(manager_socket, process_id,
+                                              "tty", &tty_offset, 8192,
+                                              stdout, &tty_end, &advanced);
+            if (result == 0 && strcmp(mode, "term") == 0) {
+                int stream_advanced = 0;
+                result = read_process_output_once(manager_socket, process_id,
+                                                  "stderr", &stderr_offset,
+                                                  8192, stderr, &stderr_end,
+                                                  &stream_advanced);
+                advanced = advanced || stream_advanced;
+            }
+        } else {
+            result = read_process_output_once(manager_socket, process_id,
+                                              "stdout", &stdout_offset, 8192,
+                                              stdout, &stdout_end, &advanced);
+            if (result == 0) {
+                int stream_advanced = 0;
+                result = read_process_output_once(manager_socket, process_id,
+                                                  "stderr", &stderr_offset,
+                                                  8192, stderr, &stderr_end,
+                                                  &stream_advanced);
+                advanced = advanced || stream_advanced;
+            }
+        }
+        if (result != 0) {
+            return result;
+        }
+
+        int completed = 0;
+        int status_result = manager_process_is_terminal(manager_socket,
+                                                        process_id,
+                                                        &completed);
+        if (status_result != 0) {
+            return status_result;
+        }
+
+        if (completed &&
+            ((process_mode_uses_terminal(mode) &&
+              (tty_end || strcmp(mode, "term") != 0 || stderr_end)) ||
+             (!process_mode_uses_terminal(mode) && stdout_end &&
+              stderr_end))) {
+            return 0;
+        }
+
+        if (advanced) {
+            idle_iterations = 0;
+            continue;
+        }
+        if (++idle_iterations >= 10) {
+            return 0;
+        }
+        cube_sleep_poll_interval();
+    }
+}
+
+static int process_push(const char *manager_socket,
+                        const cube_options_t *options,
+                        int argc,
+                        char **argv,
+                        int command_index)
+{
+    int send_eof = 0;
+    int show_output = 0;
+    int argument_index = command_index + 1;
+    while (argument_index < argc) {
+        if (strcmp(argv[argument_index], "--eof") == 0) {
+            send_eof = 1;
+            ++argument_index;
+            continue;
+        }
+        if (strcmp(argv[argument_index], "--output") == 0) {
+            show_output = 1;
+            ++argument_index;
+            continue;
+        }
+        if (argv[argument_index][0] == '-' &&
+            argv[argument_index][1] == '-') {
+            fprintf(stderr, "cube: unknown push option '%s'\n",
+                    argv[argument_index]);
+            return 2;
+        }
+        break;
+    }
+    if (argument_index + 1 != argc) {
+        fprintf(stderr, "cube: push requires a process name\n");
+        return 2;
+    }
+
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char mode[32];
+    int resolve_result = resolve_process_metadata(
+        manager_socket, options, argv[argument_index], process_id,
+        sizeof(process_id), mode, sizeof(mode));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+
+    unsigned int requested_channels = CUBE_CHANNEL_STDIN;
+    if (show_output) {
+        if (process_mode_uses_terminal(mode)) {
+            requested_channels |= CUBE_CHANNEL_TTY | CUBE_CHANNEL_STDOUT;
+            if (strcmp(mode, "term") == 0) {
+                requested_channels |= CUBE_CHANNEL_STDERR;
+            }
+        } else {
+            requested_channels |= CUBE_CHANNEL_STDOUT | CUBE_CHANNEL_STDERR;
+        }
+    }
+
+    cubicle_client_t *client = NULL;
+    cubicle_error_code_t code = cubicle_client_connect_uri(manager_socket, NULL,
+                                                           &client);
+    if (code != CUBICLE_OK) {
+        fprintf(stderr, "cube: failed to connect to manager\n");
+        return 2;
+    }
+
+    cubicle_attachment_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.process_id = process_id;
+    request.channels = (cubicle_channel_mask_t)requested_channels;
+    request.mode = CUBICLE_ATTACHMENT_INTERACTIVE;
+
+    cubicle_attachment_grant_t grant;
+    memset(&grant, 0, sizeof(grant));
+    code = cubicle_attachment_request(client, &request, &grant);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error = cubicle_client_last_error(client);
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "attachment request failed");
+        cubicle_client_disconnect(client);
+        return 2;
+    }
+    cubicle_client_disconnect(client);
+
+    cubicle_attachment_t *attachment = NULL;
+    cubicle_attachment_options_t attachment_options;
+    memset(&attachment_options, 0, sizeof(attachment_options));
+    code = cubicle_attachment_connect(&grant, &attachment_options,
+                                      &attachment);
+    if (code != CUBICLE_OK) {
+        fprintf(stderr, "cube: failed to attach to process\n");
+        return 2;
+    }
+
+    unsigned int accepted_channels =
+        (unsigned int)cubicle_attachment_channels(attachment);
+    if ((accepted_channels & CUBE_CHANNEL_STDIN) == 0) {
+        fprintf(stderr, "cube: process stdin is not available\n");
+        cubicle_attachment_disconnect(attachment);
+        return 2;
+    }
+
+    uint64_t stdout_offset =
+        cubicle_attachment_read_offset(attachment, CUBICLE_STREAM_STDOUT);
+    uint64_t stderr_offset =
+        cubicle_attachment_read_offset(attachment, CUBICLE_STREAM_STDERR);
+    uint64_t tty_offset =
+        cubicle_attachment_read_offset(attachment, CUBICLE_STREAM_TTY);
+
+    int result = 0;
+    for (;;) {
+        char buffer[4096];
+        ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "cube: failed to read stdin: %s\n",
+                    strerror(errno));
+            result = 2;
+            break;
+        }
+        if (nread == 0) {
+            break;
+        }
+        result = attachment_write_all(attachment, buffer, (size_t)nread);
+        if (result != 0) {
+            break;
+        }
+    }
+
+    if (result == 0 && send_eof) {
+        code = cubicle_attachment_close_input(attachment);
+        if (code != CUBICLE_OK) {
+            const cubicle_error_t *error =
+                cubicle_attachment_last_error(attachment);
+            fprintf(stderr, "cube: %s\n",
+                    error != NULL && error->message[0] != '\0'
+                        ? error->message
+                        : "failed to close process stdin");
+            result = 2;
+        }
+    }
+    if (result == 0 && show_output) {
+        result = push_drain_output(manager_socket, process_id, mode,
+                                   stdout_offset, stderr_offset, tty_offset);
+    }
+
+    (void)cubicle_attachment_detach(attachment);
+    cubicle_attachment_disconnect(attachment);
+    return result;
+}
+
 static int process_connect(const char *manager_socket,
                            const cube_options_t *options,
                            int argc,
@@ -4664,6 +4892,11 @@ int main(int argc, char **argv)
     if (strcmp(command, "connect") == 0) {
         return process_connect(manager_endpoint, &options, argc, argv,
                                command_index);
+    }
+
+    if (strcmp(command, "push") == 0) {
+        return process_push(manager_endpoint, &options, argc, argv,
+                            command_index);
     }
 
     if (strcmp(command, "restart") == 0) {

@@ -218,6 +218,27 @@ cube inspect autostart-me >"$tmpdir/autostart-inspect.out"
 grep -q '^Restart:     yes$' "$tmpdir/autostart-inspect.out"
 cube remove autostart-me >/dev/null
 
+push_live_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name push-live -- sh -c \
+    'IFS= read line; printf "live:%s\n" "$line"; sleep 30' | json_id)
+printf "hello\n" | cube push --output push-live \
+    >"$tmpdir/push-live.out" 2>"$tmpdir/push-live.err"
+grep -q '^live:hello$' "$tmpdir/push-live.out"
+api process-kill "$push_live_process_id" >/dev/null
+api process-wait "$push_live_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove push-live >/dev/null
+
+push_eof_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name push-eof -- sh -c \
+    'while IFS= read line; do printf "out:%s\n" "$line"; printf "err:%s\n" "$line" >&2; done; printf "done\n"' | json_id)
+printf "alpha\n" | cube push --eof --output push-eof \
+    >"$tmpdir/push-eof.out" 2>"$tmpdir/push-eof.err"
+grep -q '^out:alpha$' "$tmpdir/push-eof.out"
+grep -q '^done$' "$tmpdir/push-eof.out"
+grep -q '^err:alpha$' "$tmpdir/push-eof.err"
+api process-wait "$push_eof_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove push-eof >/dev/null
+
 workspace_b_id=$(api workspace-create "Project B" | json_id)
 project_b_process_id=$(api process-start --workspace "$workspace_b_id" \
     --friendly-name project-b-proc /bin/true | json_id)

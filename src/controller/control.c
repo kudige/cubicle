@@ -790,7 +790,7 @@ static int snapshot_json(cubicle_terminal_model_t *terminal_model,
 static int dispatch_api_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
-                                int child_stdin_fd,
+                                int *child_stdin_fd,
                                 int resize_fd,
                                 int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,
@@ -906,19 +906,36 @@ static int dispatch_api_request(control_client_t *client,
                 client, request_id, CUBICLE_ERR_INVALID_STATE,
                 "process completed", false, 0));
         }
-        if (child_stdin_fd < 0 ||
+        if (*child_stdin_fd < 0 ||
             cubicle_json_get_required_string(params, "data", data,
                                              sizeof(data), &error) < 0) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_INVALID_ARGUMENT,
                 "invalid write request", false, 0));
         }
-        if (write_best_effort(child_stdin_fd, data, strlen(data)) < 0) {
+        if (write_best_effort(*child_stdin_fd, data, strlen(data)) < 0) {
             CONTROLLER_API_RETURN(enqueue_api_error(
                 client, request_id, CUBICLE_ERR_IO, "write failed", true,
                 errno));
         }
         append_input_event(state, "api", data, strlen(data));
+        CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
+    }
+
+    if (strcmp(envelope.method, "controller.close_input") == 0) {
+        if (terminal_model != NULL) {
+            CONTROLLER_API_RETURN(enqueue_api_error(
+                client, request_id, CUBICLE_ERR_INVALID_STATE,
+                "input close is unsupported for terminal processes", false,
+                0));
+        }
+        if (*child_stdin_fd < 0) {
+            CONTROLLER_API_RETURN(enqueue_api_success(client, request_id,
+                                                      "{}"));
+        }
+        close(*child_stdin_fd);
+        *child_stdin_fd = -1;
+        append_event(state, "type=input_closed source=api");
         CONTROLLER_API_RETURN(enqueue_api_success(client, request_id, "{}"));
     }
 
@@ -1041,7 +1058,7 @@ static int dispatch_api_request(control_client_t *client,
             channels &= ~(uint64_t)CUBICLE_CHANNEL_STDIN;
         }
         if ((channels & CUBICLE_CHANNEL_STDIN) != 0 &&
-            (process_completed || child_stdin_fd < 0)) {
+            (process_completed || *child_stdin_fd < 0)) {
             channels &= ~(uint64_t)CUBICLE_CHANNEL_STDIN;
         }
         if (channels == 0) {
@@ -1248,7 +1265,7 @@ static int send_attach_catchup(control_client_t *client,
 static int dispatch_control_request(control_client_t *client,
                                     controller_state_t *state,
                                     pid_t child_pid,
-                                    int child_stdin_fd,
+                                    int *child_stdin_fd,
                                     int resize_fd,
                                     int stderr_resize_fd,
                                     terminal_size_state_t *terminal_size,
@@ -1304,7 +1321,7 @@ static int dispatch_control_request(control_client_t *client,
                strcmp(request, "attach in") == 0) {
         if (process_completed) {
             result = enqueue_error_response(client, "process_completed");
-        } else if (child_stdin_fd < 0) {
+        } else if (*child_stdin_fd < 0) {
             result = enqueue_error_response(client, "stdin_closed");
         } else {
             client->kind = CONTROL_CLIENT_ATTACHING_STDIN;
@@ -1436,7 +1453,7 @@ finish:
 static int finish_control_request(control_client_t *client,
                                   controller_state_t *state,
                                   pid_t child_pid,
-                                  int child_stdin_fd,
+                                  int *child_stdin_fd,
                                   int resize_fd,
                                   int stderr_resize_fd,
                                   terminal_size_state_t *terminal_size,
@@ -1462,7 +1479,7 @@ static int finish_control_request(control_client_t *client,
 static int finish_api_request(control_client_t *client,
                               controller_state_t *state,
                               pid_t child_pid,
-                              int child_stdin_fd,
+                              int *child_stdin_fd,
                               int resize_fd,
                               int stderr_resize_fd,
                               terminal_size_state_t *terminal_size,
@@ -1604,7 +1621,7 @@ void reap_idle_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIE
 int read_control_client_request(control_client_t *client,
                                 controller_state_t *state,
                                 pid_t child_pid,
-                                int child_stdin_fd,
+                                int *child_stdin_fd,
                                 int resize_fd,
                                 int stderr_resize_fd,
                                 terminal_size_state_t *terminal_size,

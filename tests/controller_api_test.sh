@@ -204,6 +204,19 @@ if [ "$(json_field "$read_response" result.data)" != "hello" ]; then
     exit 1
 fi
 
+close_input_response=$(api controller-close-input)
+if [ "$(json_field "$close_input_response" success)" != "True" ]; then
+    echo "controller.close_input failed: $close_input_response" >&2
+    exit 1
+fi
+
+write_after_close_response=$(api --allow-error controller-write after-close)
+if [ "$(json_field "$write_after_close_response" success)" != "False" ]; then
+    echo "controller.write after close unexpectedly succeeded: $write_after_close_response" >&2
+    exit 1
+fi
+grep -q 'type=input_closed source=api$' "$state_dir/events.log"
+
 detach_response=$(api controller-detach)
 if [ "$(json_field "$detach_response" success)" != "True" ]; then
     echo "controller.detach failed: $detach_response" >&2

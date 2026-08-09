@@ -229,6 +229,8 @@ def params_for_command(args):
             "channel": args.channel,
             "data": args.data,
         }
+    if command == "controller-close-input":
+        return "controller.close_input", {}
     if command == "controller-resize":
         return "controller.resize", {
             "rows": args.rows,
@@ -417,6 +419,7 @@ def build_parser():
     controller_write.add_argument("data")
     controller_write.add_argument("--channel", choices=("stdin", "tty"),
                                   default="stdin")
+    subparsers.add_parser("controller-close-input")
 
     controller_resize = subparsers.add_parser("controller-resize")
     controller_resize.add_argument("rows", type=int)

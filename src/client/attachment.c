@@ -643,6 +643,14 @@ cubicle_error_code_t cubicle_attachment_resize_tracked(
 cubicle_error_code_t cubicle_attachment_close_input(cubicle_attachment_t *attachment)
 {
     if (attachment == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
+    char *response = NULL;
+    cubicle_error_code_t code = attachment_rpc(attachment,
+                                               "controller.close_input", "{}",
+                                               &response);
+    free(response);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
     attachment->channels &= (cubicle_channel_mask_t)~CUBICLE_CHANNEL_STDIN;
     return CUBICLE_OK;
 }

@@ -21,6 +21,7 @@ cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
+cube push [--eof] [--output] NAME
 cube restart NAME
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
@@ -324,6 +325,32 @@ Examples:
 ```sh
 cube connect shell
 cube connect --ro build
+```
+
+## Pushing Input
+
+```text
+cube push [--eof] [--output] NAME
+```
+
+Read bytes from local stdin and write them to the managed process stdin without
+starting an interactive attachment.
+
+`--eof`
+: After all local stdin is written, close the managed process stdin. This is
+  supported for stream processes. Terminal processes fail clearly because PTYs
+  cannot close stdin without closing the terminal master.
+
+`--output`
+: Print new output generated after the push starts. Stream stdout is printed to
+  stdout and stream stderr to stderr; TTY output is printed to stdout. If the
+  process stays running, `cube push --output` returns after a short idle period.
+
+Examples:
+
+```sh
+printf 'status\n' | cube push shell
+cube push --eof --output worker < input.txt
 ```
 
 ## Process Control

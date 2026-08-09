@@ -420,7 +420,7 @@ These should not complicate Phase 2.
 ### 6.3 Non-interactive input push
 
 ```console
-cube push [--close] NAME
+cube push [--eof] [--output] NAME
 ```
 
 `cube push` reads all bytes from its own stdin and writes them to the managed
@@ -432,7 +432,7 @@ Default semantics:
 - connect directly or by relay to the process controller,
 - copy `cube` stdin to the process stdin or PTY input,
 - return after all local stdin has been written,
-- do not read or display process output,
+- do not read or display process output unless `--output` is set,
 - do not stop, detach, or otherwise alter process lifecycle.
 
 By default, `cube push NAME` leaves the managed process stdin open after the
@@ -443,20 +443,26 @@ process without causing EOF:
 printf 'status\n' | cube push shell
 ```
 
-`--close` writes all input and then closes the managed process stdin:
+`--eof` writes all input and then closes the managed process stdin:
 
 ```console
-printf 'quit\n' | cube push --close worker
+printf 'quit\n' | cube push --eof worker
 ```
 
-Close semantics:
+EOF semantics:
 
 - for stream processes, close the controller-side stdin pipe after all bytes
   are written;
-- for TTY and term processes, send the bytes to the PTY input and then request
-  the controller's closest supported input-close/EOF action;
+- for TTY and term processes, fail clearly because PTYs cannot close stdin
+  without also closing the terminal master;
 - if the process mode or controller cannot represent input close, fail clearly
   instead of pretending EOF was delivered.
+
+`--output` prints new output generated after the attachment starts. For stream
+processes, stdout is printed to stdout and stderr to stderr. For TTY processes,
+the TTY byte stream is printed to stdout. If the process exits, output is
+drained to EOF; otherwise `cube push --output` returns after a short idle
+period.
 
 `cube push` is not a replacement for `cube connect`:
 
@@ -471,7 +477,7 @@ Examples:
 ```console
 cat commands.txt | cube push repl
 printf '\003' | cube push terminal
-cube push --close build < input.txt
+cube push --eof --output build < input.txt
 ```
 
 ### 6.4 Detach sequence
@@ -503,7 +509,7 @@ cube signal NAME SIGNAL
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
 cube restart NAME
-cube push [--close] NAME
+cube push [--eof] [--output] NAME
 cube save NAME
 cube unsave NAME
 cube remove NAME
@@ -529,7 +535,7 @@ Recommended semantics:
   without stored argv metadata cannot be restarted. Saved process records must
   be unsaved first.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
-  the write with `--close`.
+  the write with `--eof` and printing new output with `--output`.
 - `save`: mark a process record so cleanup commands skip it.
 - `unsave`: clear the saved mark.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
@@ -768,7 +774,7 @@ Usage:
   cube run [OPTIONS] COMMAND [ARG...]
   cube ps
   cube connect [--ro] NAME
-  cube push [--close] NAME
+  cube push [--eof] [--output] NAME
   cube stop NAME
 
 Run and reconnect to persistent processes inside Cubicle workspaces.
@@ -834,7 +840,8 @@ Implement:
 - `cube connect NAME`
 - `cube connect --ro NAME`
 - `cube push NAME`
-- `cube push --close NAME`
+- `cube push --eof NAME`
+- `cube push --output NAME`
 - manager attachment-grant request
 - direct/relay controller connection according to grant
 - interactive input forwarding

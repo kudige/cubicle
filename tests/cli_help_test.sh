@@ -17,6 +17,7 @@ rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
 rm -f "$PWD/cube-ps-help.out" "$PWD/cube-ps-help.err"
 rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
+rm -f "$PWD/cube-push-help.out" "$PWD/cube-push-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
 rm -f "$PWD/cube-run-help.out" "$PWD/cube-run-help.err"
 rm -f "$PWD/cube-restart-help.out" "$PWD/cube-restart-help.err"
@@ -59,6 +60,7 @@ grep -q 'cube inspect NAME' "$PWD/cube-help.out"
 grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] NAME' "$PWD/cube-help.out"
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube signal NAME SIGNAL' "$PWD/cube-help.out"
+grep -q 'cube push \[--eof\] \[--output\] NAME' "$PWD/cube-help.out"
 grep -q 'cube restart NAME' "$PWD/cube-help.out"
 grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME\]' "$PWD/cube-help.out"
 grep -q 'cube save NAME' "$PWD/cube-help.out"
@@ -91,6 +93,13 @@ if [ -s "$PWD/cube-connect-help.err" ]; then
     exit 1
 fi
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-connect-help.out"
+
+cube push --help >"$PWD/cube-push-help.out" 2>"$PWD/cube-push-help.err"
+if [ -s "$PWD/cube-push-help.err" ]; then
+    echo "cube push help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube push \[--eof\] \[--output\] NAME' "$PWD/cube-push-help.out"
 
 cube logs --help >"$PWD/cube-logs-help.out" 2>"$PWD/cube-logs-help.err"
 if [ -s "$PWD/cube-logs-help.err" ]; then

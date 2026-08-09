@@ -873,6 +873,13 @@ produce local terminal response bytes unrelated to user input.
 
 Writes bytes to stdin or PTY input when granted.
 
+#### `controller.close_input`
+
+Closes the managed process stdin when that can be represented independently.
+For stream processes this closes the controller-side stdin pipe. For PTY-backed
+processes it may return `INVALID_STATE` because stdin cannot be closed without
+also closing the terminal master.
+
 #### `controller.resize`
 
 Updates canonical PTY rows and columns when the attachment holds input/control authority.
