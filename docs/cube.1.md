@@ -15,7 +15,7 @@ cube workspace create [--dir DIRECTORY] NAME
 cube workspace select NAME
 cube workspace stop NAME
 cube workspace delete NAME
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] [--restart] COMMAND [ARG...]
 cube ps [-a|--all]
 cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
@@ -148,7 +148,7 @@ area. If no workspace is selected, commands such as `cube ps` exit with
 ## Running Processes
 
 ```text
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] [--restart] COMMAND [ARG...]
 ```
 
 `cube run` starts a managed process in the current workspace.
@@ -182,6 +182,12 @@ cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COM
 : Set the managed process working directory. Without `--dir`, the process uses
   the selected workspace's default directory.
 
+`--restart`
+: Mark the process for manager-start autostart. When `cubicle-manager` starts,
+  it relaunches restart-enabled cubes whose controllers are not already live.
+  The manager also recreates the recorded workspace if that workspace record is
+  missing.
+
 Use `--` before a command whose first argument might otherwise be parsed as a
 `cube run` option.
 
@@ -192,6 +198,7 @@ cube run --stream make test
 cube run --dir /tmp --stream pwd
 cube run --fg --term vim docs/plan.txt
 cube run --bg --term --name shell bash
+cube run --bg --restart --name worker ./worker
 cube run --bg --stream ls -lR /
 cube run --bg --name server -- npm run dev
 cube --json run --bg --stream /bin/sleep 30

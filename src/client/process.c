@@ -37,6 +37,7 @@ cubicle_error_code_t cubicle_process_start(cubicle_client_t *client,
     cubicle_json_builder_append(&params, ",\"mode\":"); cubicle_json_builder_append_string(&params, mode_name(options->mode));
     cubicle_json_builder_append(&params, ",\"stdin_policy\":"); cubicle_json_builder_append_string(&params, options->stdin_policy == CUBICLE_STDIN_EOF ? "eof" : "open");
     if (options->cwd != NULL) { cubicle_json_builder_append(&params, ",\"cwd\":"); cubicle_json_builder_append_string(&params, options->cwd); }
+    if (options->restart) cubicle_json_builder_append(&params, ",\"restart\":true");
     cubicle_json_builder_append(&params, ",\"argv\":[");
     for (size_t i = 0; i < options->argc; ++i) {
         if (i > 0) cubicle_json_builder_append(&params, ",");

@@ -38,6 +38,32 @@ workspace_id=${workspace_id%% name=*}
     daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
+wait_for_manager() {
+    for _ in $(seq 1 100); do
+        if [ -S "$socket_path" ]; then
+            break
+        fi
+        sleep 0.05
+    done
+
+    if [ ! -S "$socket_path" ]; then
+        echo "manager daemon did not create control socket" >&2
+        exit 1
+    fi
+
+    for _ in $(seq 1 100); do
+        if python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
+
+    if ! python3 "$CUBICLE_API_CLIENT" "$socket_path" ping >/dev/null 2>&1; then
+        echo "manager daemon did not become ready" >&2
+        exit 1
+    fi
+}
+
 for _ in $(seq 1 100); do
     if [ -S "$socket_path" ]; then
         break
@@ -139,6 +165,58 @@ fi
 cube inspect restart-me >"$tmpdir/restart-inspect.out"
 grep -q '^Command:     /bin/sh -c ' "$tmpdir/restart-inspect.out"
 cube remove restart-me >/dev/null
+
+autostart_count="$tmpdir/autostart-count"
+autostart_script="printf 'run\n' >> '$autostart_count'"
+autostart_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name autostart-me --restart -- /bin/sh -c \
+    "$autostart_script" | json_id)
+api process-wait "$autostart_process_id" --timeout-ms 2000 | grep -q '"success":true'
+for _ in $(seq 1 100); do
+    if [ -f "$autostart_count" ] && [ "$(wc -l <"$autostart_count")" -eq 1 ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ ! -f "$autostart_count" ] || [ "$(wc -l <"$autostart_count")" -ne 1 ]; then
+    echo "restart-enabled process did not run initially" >&2
+    exit 1
+fi
+python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown >/dev/null 2>&1 || true
+wait "$manager_pid" 2>/dev/null || true
+manager_pid=
+rm -f "$socket_path"
+python3 - "$state_dir/workspaces.tsv" "$workspace_id" <<'PY'
+import sys
+
+path, workspace_id = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    lines = handle.readlines()
+with open(path, "w", encoding="utf-8") as handle:
+    for line in lines:
+        if not line.startswith(workspace_id + "\t"):
+            handle.write(line)
+PY
+"$CUBICLE_MANAGER" --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" \
+    daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
+manager_pid=$!
+wait_for_manager
+for _ in $(seq 1 100); do
+    if [ "$(wc -l <"$autostart_count")" -eq 2 ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ "$(wc -l <"$autostart_count")" -ne 2 ]; then
+    echo "manager restart did not autostart restart-enabled process" >&2
+    exit 1
+fi
+cube workspace list >"$tmpdir/workspaces-after-autostart.out"
+grep -q "	Project A$" "$tmpdir/workspaces-after-autostart.out"
+cube inspect autostart-me >"$tmpdir/autostart-inspect.out"
+grep -q '^Restart:     yes$' "$tmpdir/autostart-inspect.out"
+cube remove autostart-me >/dev/null
 
 workspace_b_id=$(api workspace-create "Project B" | json_id)
 project_b_process_id=$(api process-start --workspace "$workspace_b_id" \

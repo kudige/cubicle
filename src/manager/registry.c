@@ -4,6 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+static char *next_field(char **cursor)
+{
+    if (*cursor == NULL) {
+        return NULL;
+    }
+    char *field = *cursor;
+    char *separator = strpbrk(field, "\t\n");
+    if (separator == NULL) {
+        *cursor = NULL;
+    } else {
+        *separator = '\0';
+        *cursor = separator + 1;
+    }
+    return field;
+}
+
 int cubicle_parse_workspace_record(char *line, cubicle_workspace_record_t *record)
 {
     char *id = strtok(line, "\t\n");
@@ -22,16 +38,21 @@ int cubicle_parse_workspace_record(char *line, cubicle_workspace_record_t *recor
 
 int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
 {
-    char *process_id = strtok(line, "\t\n");
-    char *workspace_id = strtok(NULL, "\t\n");
-    char *friendly_name = strtok(NULL, "\t\n");
-    char *mode = strtok(NULL, "\t\n");
-    char *state = strtok(NULL, "\t\n");
-    char *controller_id = strtok(NULL, "\t\n");
-    char *control_socket = strtok(NULL, "\t\n");
-    char *cwd = strtok(NULL, "\t\n");
-    char *saved = strtok(NULL, "\t\n");
-    char *argv_json = strtok(NULL, "\t\n");
+    char *cursor = line;
+    char *process_id = next_field(&cursor);
+    char *workspace_id = next_field(&cursor);
+    char *friendly_name = next_field(&cursor);
+    char *mode = next_field(&cursor);
+    char *state = next_field(&cursor);
+    char *controller_id = next_field(&cursor);
+    char *control_socket = next_field(&cursor);
+    char *cwd = next_field(&cursor);
+    char *saved = next_field(&cursor);
+    char *argv_json = next_field(&cursor);
+    char *restart = next_field(&cursor);
+    char *stdin_policy = next_field(&cursor);
+    char *workspace_name = next_field(&cursor);
+    char *workspace_directory = next_field(&cursor);
     if (process_id == NULL || workspace_id == NULL || friendly_name == NULL ||
         mode == NULL || state == NULL || controller_id == NULL ||
         control_socket == NULL) {
@@ -49,6 +70,13 @@ int cubicle_parse_process_record(char *line, cubicle_process_record_t *record)
     record->saved = saved != NULL && strcmp(saved, "1") == 0 ? 1 : 0;
     snprintf(record->argv_json, sizeof(record->argv_json), "%s",
              argv_json == NULL ? "" : argv_json);
+    record->restart = restart != NULL && strcmp(restart, "1") == 0 ? 1 : 0;
+    snprintf(record->stdin_policy, sizeof(record->stdin_policy), "%s",
+             stdin_policy == NULL ? "open" : stdin_policy);
+    snprintf(record->workspace_name, sizeof(record->workspace_name), "%s",
+             workspace_name == NULL ? "" : workspace_name);
+    snprintf(record->workspace_directory, sizeof(record->workspace_directory),
+             "%s", workspace_directory == NULL ? "" : workspace_directory);
     return 0;
 }
 

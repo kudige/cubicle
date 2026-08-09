@@ -148,6 +148,8 @@ def params_for_command(args):
             params["friendly_name"] = args.friendly_name
         if args.cwd is not None:
             params["cwd"] = args.cwd
+        if args.restart:
+            params["restart"] = True
         if args.tty_rows is not None:
             params["tty_rows"] = args.tty_rows
         if args.tty_cols is not None:
@@ -334,6 +336,7 @@ def build_parser():
     process_start.add_argument("--stdin-policy", choices=("open", "eof"),
                                default="open")
     process_start.add_argument("--cwd")
+    process_start.add_argument("--restart", action="store_true")
     process_start.add_argument("--tty-rows", type=int)
     process_start.add_argument("--tty-cols", type=int)
     process_start.add_argument("argv", nargs="+")

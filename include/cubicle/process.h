@@ -48,6 +48,7 @@ typedef struct cubicle_process_info {
     cubicle_process_mode_t mode;
     cubicle_process_state_t state;
     bool saved;
+    bool restart;
     int exit_code;
     int termination_signal;
     bool has_exit_status;
@@ -68,6 +69,7 @@ typedef struct cubicle_process_start_options {
     cubicle_process_mode_t mode;
     cubicle_stdin_policy_t stdin_policy;
     const char *cwd;
+    bool restart;
     const char *const *argv;
     size_t argc;
     const char *const *env;

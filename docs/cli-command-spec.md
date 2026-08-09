@@ -75,7 +75,7 @@ cube [--config PATH] [--manager-socket ENDPOINT] [--workspace NAME] [--json] COM
 `CUBICLE_CONFIG=PATH`.
 
 ```text
-cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] COMMAND [ARG...]
+cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIRECTORY] [--restart] COMMAND [ARG...]
 ```
 
 Examples:
@@ -88,6 +88,7 @@ cube run --bg --tty emacs test.c
 cube run --bg --term bash
 cube run --bg --name backend npm run server
 cube run --dir /tmp --stream pwd
+cube run --bg --restart --name worker ./worker
 ```
 
 ### 3.1 Foreground and background
@@ -179,6 +180,11 @@ The display should not rewrite this as `bash:CScope`.
 
 `--dir DIRECTORY` sets the managed process working directory. If omitted, the
 process runs in the selected workspace's default directory.
+
+`--restart` marks the process for manager-start autostart. When
+`cubicle-manager` starts, restart-enabled cubes are relaunched if their
+controllers are not already live. The manager recreates the recorded workspace
+if the workspace record is missing.
 
 Without `--name`, Cubicle generates a useful name from the command line:
 
@@ -359,6 +365,7 @@ Workspace:   Shogun
 Command:     bash
 Mode:        tty
 State:       running
+Restart:     no
 Clients:     1 interactive, 1 read-only
 Started:     3 minutes ago
 Process ID:  0123456789abcdef0123456789abcdef

@@ -72,6 +72,33 @@ static void test_process_record(void)
                 "expected saved process record to parse");
     expect_true(record.saved == 1, "saved process flag");
 
+    char restart_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\t1\t[\"make\"]\t1\topen\tProject A\t/tmp/project\n";
+    expect_true(cubicle_parse_process_record(restart_line, &record) == 0,
+                "expected restart process record to parse");
+    expect_true(record.saved == 1, "restart process saved flag");
+    expect_string(record.argv_json, "[\"make\"]", "restart process argv");
+    expect_true(record.restart == 1, "restart process flag");
+    expect_string(record.stdin_policy, "open", "restart stdin policy");
+    expect_string(record.workspace_name, "Project A", "restart workspace name");
+    expect_string(record.workspace_directory, "/tmp/project",
+                  "restart workspace directory");
+
+    char argv_only_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\t0\t[\"make\"]\n";
+    expect_true(cubicle_parse_process_record(argv_only_line, &record) == 0,
+                "expected argv-only process record to parse");
+    expect_true(record.restart == 0, "argv-only restart default");
+    expect_string(record.stdin_policy, "open", "argv-only stdin default");
+    expect_string(record.workspace_name, "", "argv-only workspace name");
+
+    char empty_argv_line[] = "process-id\tworkspace-id\tmake-1\tstream\trunning\tcontroller-id\t/tmp/control.sock\t/tmp/project\t0\t\t0\topen\tProject A\t/tmp/project\n";
+    expect_true(cubicle_parse_process_record(empty_argv_line, &record) == 0,
+                "expected empty argv process record to parse");
+    expect_string(record.argv_json, "", "empty argv process argv");
+    expect_true(record.restart == 0, "empty argv restart flag");
+    expect_string(record.stdin_policy, "open", "empty argv stdin policy");
+    expect_string(record.workspace_name, "Project A",
+                  "empty argv workspace name");
+
     char malformed[] = "process-id\tworkspace-id\tmake-1\n";
     expect_true(cubicle_parse_process_record(malformed, &record) < 0,
                 "expected malformed process record to fail");

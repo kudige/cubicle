@@ -564,6 +564,7 @@ argv[]
 environment[]?            # explicit NAME=value entries
 inherit_environment?      # default false for remote-safe semantics
 cwd?                       # defaults to workspace.directory when omitted
+restart?                   # manager-start autostart policy, default false
 tty_rows?
 tty_cols?
 retention_policy?
@@ -571,6 +572,8 @@ idempotency_key
 ```
 
 Response: `process_info` in `STARTING`, `RUNNING`, or a terminal failure state.
+`process_info.restart` reports whether the process is marked for manager-start
+autostart.
 
 The manager:
 

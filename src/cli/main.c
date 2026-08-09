@@ -56,6 +56,7 @@ typedef struct cube_run_options {
     const char *directory;
     int background;
     int generated_name;
+    int restart;
 } cube_run_options_t;
 
 typedef struct cube_rpc_response {
@@ -125,7 +126,7 @@ static void print_usage(FILE *stream)
             "  cube [--config PATH] [--manager-socket PATH] [--workspace NAME] [--json] COMMAND [ARG...]\n"
             "  cube workspace [NAME]\n"
             "  cube workspace list|create|select|stop|delete ...\n"
-            "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n"
+            "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] [--restart] COMMAND [ARG...]\n"
             "  cube ps [-a|--all]\n"
             "  cube inspect NAME\n"
             "  cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME\n"
@@ -162,7 +163,7 @@ static int print_command_usage(const char *command, FILE *stream)
     if (strcmp(command, "run") == 0) {
         fprintf(stream,
                 "Usage:\n"
-                "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] COMMAND [ARG...]\n");
+                "  cube run [--fg|--bg] [--stream|--tty|--term] [--name NAME] [--dir DIR] [--restart] COMMAND [ARG...]\n");
         return 0;
     }
     if (strcmp(command, "ps") == 0) {
@@ -2356,12 +2357,14 @@ static int process_inspect(const char *manager_socket,
     char mode[32];
     char state[32];
     int saved = 0;
+    int restart = 0;
     if (json_string_field(document.root, "id", id, sizeof(id)) < 0 ||
         json_string_field(document.root, "friendly_name", name,
                           sizeof(name)) < 0 ||
         json_string_field(document.root, "mode", mode, sizeof(mode)) < 0 ||
         json_string_field(document.root, "state", state, sizeof(state)) < 0 ||
-        json_bool_field(document.root, "saved", &saved) < 0) {
+        json_bool_field(document.root, "saved", &saved) < 0 ||
+        json_bool_field(document.root, "restart", &restart) < 0) {
         cubicle_json_cleanup(&document);
         cleanup_rpc_response(&response);
         fprintf(stderr, "cube: invalid process response\n");
@@ -2373,6 +2376,7 @@ static int process_inspect(const char *manager_socket,
     printf("Mode:        %s\n", mode);
     printf("State:       %s\n", state);
     printf("Saved:       %s\n", saved ? "yes" : "no");
+    printf("Restart:     %s\n", restart ? "yes" : "no");
     printf("Process ID:  %s\n", id);
     yyjson_val *argv = yyjson_obj_get(document.root, "argv");
     char *command_line = command_line_from_argv(argv);
@@ -2968,6 +2972,7 @@ static int process_restart(const char *manager_socket,
     char state[32];
     char cwd[CUBICLE_PATH_MAX];
     int saved = 0;
+    int restart = 0;
     yyjson_val *argv = yyjson_obj_get(document.root, "argv");
     if (json_string_field(document.root, "id", process_id,
                           sizeof(process_id)) < 0 ||
@@ -2979,6 +2984,7 @@ static int process_restart(const char *manager_socket,
         json_string_field(document.root, "state", state, sizeof(state)) < 0 ||
         json_string_field(document.root, "cwd", cwd, sizeof(cwd)) < 0 ||
         json_bool_field(document.root, "saved", &saved) < 0 ||
+        json_bool_field(document.root, "restart", &restart) < 0 ||
         !yyjson_is_arr(argv) || yyjson_arr_size(argv) == 0) {
         cubicle_json_cleanup(&document);
         cleanup_rpc_response(&response);
@@ -3033,8 +3039,20 @@ static int process_restart(const char *manager_socket,
                                     ",\"stdin_policy\":\"open\",\"cwd\":") < 0 ||
         cubicle_json_builder_append_string(&start_params, cwd) < 0 ||
         cubicle_json_builder_append(&start_params, ",\"argv\":") < 0 ||
-        cubicle_json_builder_append(&start_params, argv_json) < 0 ||
-        cubicle_json_builder_append(&start_params, "}") < 0) {
+        cubicle_json_builder_append(&start_params, argv_json) < 0) {
+        cubicle_json_builder_cleanup(&start_params);
+        free(argv_json);
+        fprintf(stderr, "cube: failed to encode process start request\n");
+        return 2;
+    }
+    if (restart &&
+        cubicle_json_builder_append(&start_params, ",\"restart\":true") < 0) {
+        cubicle_json_builder_cleanup(&start_params);
+        free(argv_json);
+        fprintf(stderr, "cube: failed to encode process start request\n");
+        return 2;
+    }
+    if (cubicle_json_builder_append(&start_params, "}") < 0) {
         cubicle_json_builder_cleanup(&start_params);
         free(argv_json);
         fprintf(stderr, "cube: failed to encode process start request\n");
@@ -3129,8 +3147,14 @@ static int build_process_start_params(cubicle_json_builder_t *params,
                 ? "open"
                 : "eof") < 0 ||
         cubicle_json_builder_append(params, ",\"cwd\":") < 0 ||
-        cubicle_json_builder_append_string(params, run_options->directory) < 0 ||
-        cubicle_json_builder_append(params, ",\"argv\":[") < 0) {
+        cubicle_json_builder_append_string(params, run_options->directory) < 0) {
+        return -1;
+    }
+    if (run_options->restart &&
+        cubicle_json_builder_append(params, ",\"restart\":true") < 0) {
+        return -1;
+    }
+    if (cubicle_json_builder_append(params, ",\"argv\":[") < 0) {
         return -1;
     }
 
@@ -4278,6 +4302,7 @@ static int process_run(const char *manager_socket,
         .directory = NULL,
         .background = config->default_launch == CUBICLE_LAUNCH_BACKGROUND,
         .generated_name = 0,
+        .restart = 0,
     };
 
     int argument_index = command_index + 1;
@@ -4328,6 +4353,11 @@ static int process_run(const char *manager_socket,
             }
             run_options.directory = argv[argument_index + 1];
             argument_index += 2;
+            continue;
+        }
+        if (strcmp(argument, "--restart") == 0) {
+            run_options.restart = 1;
+            ++argument_index;
             continue;
         }
         if (argument[0] == '-' && argument[1] == '-') {

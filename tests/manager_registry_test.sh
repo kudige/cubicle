@@ -42,7 +42,7 @@ process_id=${process_id%% workspace_id=*}
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process list --workspace "Project A" >"$tmpdir/processes"
 grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$tmpdir/processes"
-grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0	$" "$state_dir/processes.tsv"
+grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0		0	open	Project A	$workspace_dir$" "$state_dir/processes.tsv"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" process resolve "$process_id" >"$tmpdir/resolve-by-id"
 grep -q "^$process_id	$workspace_id	make-1	stream	running	controller-1	$tmpdir/controller.sock	$workspace_dir	0$" "$tmpdir/resolve-by-id"

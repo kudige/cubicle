@@ -327,6 +327,8 @@ int parse_process_info(const char *json, cubicle_process_info_t *out)
     }
     if (cubicle_json_get_optional_bool(parsed.root, "saved",
                                        &out->saved, NULL, &error) < 0 ||
+        cubicle_json_get_optional_bool(parsed.root, "restart",
+                                       &out->restart, NULL, &error) < 0 ||
         cubicle_json_get_optional_bool(parsed.root, "has_exit_status",
                                        &out->has_exit_status, NULL, &error) <
             0 ||

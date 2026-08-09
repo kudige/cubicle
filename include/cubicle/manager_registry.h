@@ -29,6 +29,10 @@ typedef struct cubicle_process_record {
     char cwd[CUBICLE_PATH_MAX];
     char argv_json[CUBICLE_PROCESS_ARGV_JSON_MAX];
     int saved;
+    int restart;
+    char stdin_policy[32];
+    char workspace_name[128];
+    char workspace_directory[CUBICLE_PATH_MAX];
 } cubicle_process_record_t;
 
 typedef struct cubicle_cursor_record {
