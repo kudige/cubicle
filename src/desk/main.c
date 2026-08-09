@@ -1231,6 +1231,34 @@ static int pane_layout_grid(desk_pane_layout_t *panes, int rows, int cols)
     return 0;
 }
 
+static int pane_layout_three_panes(desk_pane_layout_t *panes)
+{
+    memset(panes, 0, sizeof(*panes));
+    int top_left = pane_create_leaf(panes, 1, "1");
+    int bottom_left = pane_create_leaf(panes, 2, "2");
+    int right = pane_create_leaf(panes, 3, "3");
+    if (top_left < 0 || bottom_left < 0 || right < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int left = pane_create_split(panes, DESK_SPLIT_VERTICAL, top_left,
+                                 bottom_left);
+    if (left < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    panes->root = pane_create_split(panes, DESK_SPLIT_HORIZONTAL, left, right);
+    if (panes->root < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    panes->active_pane_id = 1;
+    panes->next_pane_id = 4;
+    panes->zoom = DESK_ZOOM_NONE;
+    panes->resize_mode = false;
+    return 0;
+}
+
 static void desk_auto_grid(size_t pane_count, int *rows, int *cols)
 {
     if (pane_count <= 1) {
@@ -1260,6 +1288,9 @@ static void desk_auto_grid(size_t pane_count, int *rows, int *cols)
 
 static int pane_layout_auto(desk_pane_layout_t *panes, size_t pane_count)
 {
+    if (pane_count == 3) {
+        return pane_layout_three_panes(panes);
+    }
     int rows = 0;
     int cols = 0;
     desk_auto_grid(pane_count, &rows, &cols);

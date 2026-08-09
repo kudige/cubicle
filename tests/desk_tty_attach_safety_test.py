@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import fcntl
+import json
 import struct
 import termios
 
@@ -277,6 +278,124 @@ def find_saved_layout_file(env, name):
         env["XDG_STATE_HOME"], "cubicle", "desk-layouts", "named",
         f"{name}.layout",
     )
+
+
+def find_workspace_id(cube, env, name):
+    output = run_checked([cube, "--json", "workspace", "list"], env)
+    data = json.loads(output)
+    for workspace in data.get("workspaces", []):
+        if workspace.get("name") == name:
+            return workspace.get("id")
+    raise AssertionError(f"workspace {name!r} not found in {output}")
+
+
+def workspace_layout_file(env, workspace_id):
+    return os.path.join(
+        env["XDG_STATE_HOME"], "cubicle", "desk-layouts",
+        f"{workspace_id}.layout",
+    )
+
+
+def run_desk_three_pane_default_layout(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_quit = False
+    deadline = time.time() + 6
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if (
+                b"three-top" in captured
+                and b"three-bottom" in captured
+                and b"three-right" in captured
+                and not sent_quit
+            ):
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_quit:
+            raise AssertionError(
+                f"desk did not render three-pane workspace: {captured!r}"
+            )
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk three-pane layout exited with {proc.returncode}; output={captured!r}"
+            )
+
+        workspace_id = find_workspace_id(cube, env, "DeskThree")
+        path = workspace_layout_file(env, workspace_id)
+        with open(path, "r", encoding="utf-8") as handle:
+            layout = handle.read()
+        node_lines = [line for line in layout.splitlines() if line.startswith("node ")]
+        if len(node_lines) != 5:
+            raise AssertionError(f"three-pane layout should have 5 nodes:\n{layout}")
+
+        nodes = {}
+        for line in node_lines:
+            parts = line.split()
+            index = int(parts[1])
+            nodes[index] = {
+                "pane_id": int(parts[2]),
+                "split": int(parts[3]),
+                "first": int(parts[4]),
+                "second": int(parts[5]),
+                "label": parts[7] if len(parts) > 7 else "",
+            }
+        root = int(next(line.split()[1] for line in layout.splitlines()
+                       if line.startswith("root ")))
+        root_node = nodes[root]
+        if root_node["split"] != 1:
+            raise AssertionError(f"root should split left/right:\n{layout}")
+        left = nodes[root_node["first"]]
+        right = nodes[root_node["second"]]
+        if left["split"] != 2:
+            raise AssertionError(f"left pane should split top/bottom:\n{layout}")
+        top = nodes[left["first"]]
+        bottom = nodes[left["second"]]
+        if (
+            top["pane_id"] != 1
+            or top["label"] != "three-top"
+            or bottom["pane_id"] != 2
+            or bottom["label"] != "three-bottom"
+            or right["pane_id"] != 3
+            or right["label"] != "three-right"
+        ):
+            raise AssertionError(f"unexpected three-pane leaf assignment:\n{layout}")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
 
 
 def run_desk_save_and_load_layout(desk, env):
@@ -1167,6 +1286,8 @@ def run_desk_new_process_from_workspace_menu(
     expected_name,
     open_from_empty_pane=False,
     workspace_steps_before_open=0,
+    empty_pane_marker=b"[4]",
+    empty_pane_next_count=3,
 ):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1182,6 +1303,7 @@ def run_desk_new_process_from_workspace_menu(
     opened_menu = False
     selected_empty_pane = False
     opened_workspace = False
+    drove_hidden_workspace = False
     selected_new = False
     entered_command = False
     saw_new_process = False
@@ -1211,12 +1333,16 @@ def run_desk_new_process_from_workspace_menu(
                 and b"empty-middle" in captured
                 and b"empty-right" in captured
             ):
-                os.write(master_fd, b"\x18n\x18n\x18n")
+                os.write(master_fd, b"\x18n" * empty_pane_next_count)
                 selected_empty_pane = True
 
             if not opened_menu and (
                 (not open_from_empty_pane and b"desk-safe" in captured)
-                or (open_from_empty_pane and selected_empty_pane and b"[4]" in captured)
+                or (
+                    open_from_empty_pane
+                    and selected_empty_pane
+                    and empty_pane_marker in captured
+                )
             ):
                 os.write(master_fd, b"\x18o")
                 opened_menu = True
@@ -1227,10 +1353,28 @@ def run_desk_new_process_from_workspace_menu(
                 captured.clear()
 
             if (
+                open_from_empty_pane
+                and opened_menu
+                and not opened_workspace
+                and not drove_hidden_workspace
+                and b"Open cube" in captured
+            ):
+                os.write(master_fd, b"j" * workspace_steps_before_open + b"\x1b[C")
+                opened_workspace = True
+                drove_hidden_workspace = True
+                captured.clear()
+
+            if (
                 opened_workspace
                 and not selected_new
-                and submenu_marker in captured
-                and b"workspace has no running cubes" in captured
+                and (submenu_marker in captured or open_from_empty_pane)
+                and (
+                    b"workspace has no running cubes" in captured
+                    or (
+                        open_from_empty_pane
+                        and b"workspace has no" in captured
+                    )
+                )
                 and b"New" in captured
             ):
                 os.write(master_fd, b"\r")
@@ -2045,6 +2189,36 @@ def main():
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskLayout"], env)
+
+        run_checked([cube, "workspace", "create", "DeskThree"], env)
+        for name in ("three-top", "three-bottom", "three-right"):
+            run_checked(
+                [
+                    cube,
+                    "--workspace",
+                    "DeskThree",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    name,
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time,tty\n"
+                        "tty.setraw(0)\n"
+                        f"sys.stdout.write('READY {name}\\n')\n"
+                        "sys.stdout.flush()\n"
+                        "time.sleep(10)\n"
+                    ),
+                ],
+                env,
+            )
+        run_checked([cube, "workspace", "DeskThree"], env)
+        run_desk_three_pane_default_layout(desk, cube, env)
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskThree"], env)
         write_test_config(
             config_path,
             log_dir,
@@ -2104,7 +2278,13 @@ def main():
         run_checked([cube, "workspace", "delete", "DeskWorkspaceNew"], env)
 
         run_checked([cube, "workspace", "create", "DeskEmptyPane"], env)
-        for name in ("empty-left", "empty-middle", "empty-right"):
+        for name in (
+            "empty-left",
+            "empty-middle",
+            "empty-right",
+            "empty-four",
+            "empty-five",
+        ):
             run_checked(
                 [
                     cube,
@@ -2138,6 +2318,8 @@ def main():
             "bash",
             open_from_empty_pane=True,
             workspace_steps_before_open=1,
+            empty_pane_marker=b"[6]",
+            empty_pane_next_count=5,
         )
         run_checked(
             [cube, "--workspace", "DeskEmptyTarget", "kill", "--all", "--cleanup"],
