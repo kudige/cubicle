@@ -566,7 +566,8 @@ Desk key bindings can be configured with `[desk] prefix=KEY` and
 use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
 `Control-Shift-Right` are accepted and displayed as canonical tmux-style names.
 Supported command names are
-`pane.next`, `pane.previous`, `layout.zoom`, `layout.resize.toggle`,
+`pane.next`, `pane.previous`, `pane.left`, `pane.right`, `pane.above`,
+`pane.below`, `layout.zoom`, `layout.resize.toggle`,
 `layout.transpose`, `layout.split.horizontal`, `layout.split.vertical`,
 `layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
 `layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,

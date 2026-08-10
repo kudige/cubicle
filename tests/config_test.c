@@ -155,6 +155,7 @@ static void test_override_file(void)
                "bind.1=Prefix-n pane.previous\n"
                "bind.2=Control-G quit\n"
                "bind.3=Prefix-m none\n"
+               "bind.4=Prefix-Left pane.left\n"
                "\n"
                "[client]\n"
                "manager=unix:///tmp/cubicle-run/manager.sock\n"
@@ -193,10 +194,11 @@ static void test_override_file(void)
     assert(config.desk_debug_library == 1);
     assert(config.desk_debug_terminal == 1);
     assert(config.desk_prefix_key == 0);
-    assert(config.desk_key_binding_count == 10);
+    assert(config.desk_key_binding_count == 11);
     int saw_rebound_prefix_n = 0;
     int saw_direct_quit = 0;
     int saw_prefix_m = 0;
+    int saw_pane_left = 0;
     for (size_t i = 0; i < config.desk_key_binding_count; ++i) {
         if (config.desk_key_bindings[i].uses_prefix &&
             config.desk_key_bindings[i].key == 'n' &&
@@ -213,10 +215,16 @@ static void test_override_file(void)
             config.desk_key_bindings[i].key == 'm') {
             saw_prefix_m = 1;
         }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 0x1b &&
+            strcmp(config.desk_key_bindings[i].command, "pane.left") == 0) {
+            saw_pane_left = 1;
+        }
     }
     assert(saw_rebound_prefix_n);
     assert(saw_direct_quit);
     assert(!saw_prefix_m);
+    assert(saw_pane_left);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
     assert(config.default_kill_cleanup == 1);

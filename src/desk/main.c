@@ -100,6 +100,13 @@ typedef enum desk_resize_side {
     DESK_RESIZE_BOTTOM
 } desk_resize_side_t;
 
+typedef enum desk_pane_direction {
+    DESK_PANE_LEFT = 0,
+    DESK_PANE_RIGHT,
+    DESK_PANE_ABOVE,
+    DESK_PANE_BELOW
+} desk_pane_direction_t;
+
 typedef enum desk_pending_split {
     DESK_PENDING_SPLIT_NONE = 0,
     DESK_PENDING_SPLIT_HORIZONTAL,
@@ -733,6 +740,149 @@ static bool pane_layout_rect_for_pane(const desk_pane_layout_t *panes,
 {
     desk_rect_t root = {0, 0, terminal->rows, terminal->cols};
     return pane_layout_rect_for_node(panes, panes->root, pane_id, root, out);
+}
+
+static int rect_center_row(desk_rect_t rect)
+{
+    return rect.row * 2 + rect.rows;
+}
+
+static int rect_center_col(desk_rect_t rect)
+{
+    return rect.col * 2 + rect.cols;
+}
+
+static int rect_overlap_1d(int start_a, int length_a, int start_b, int length_b)
+{
+    int end_a = start_a + length_a;
+    int end_b = start_b + length_b;
+    int start = start_a > start_b ? start_a : start_b;
+    int end = end_a < end_b ? end_a : end_b;
+    return end > start ? end - start : 0;
+}
+
+static bool pane_direction_candidate_score(desk_rect_t active,
+                                           desk_rect_t candidate,
+                                           desk_pane_direction_t direction,
+                                           bool require_overlap,
+                                           int *gap_out,
+                                           int *perpendicular_out)
+{
+    int gap = 0;
+    int overlap = 0;
+    int perpendicular = 0;
+    if (direction == DESK_PANE_LEFT) {
+        if (candidate.col >= active.col) {
+            return false;
+        }
+        gap = active.col - (candidate.col + candidate.cols);
+        if (gap < 0) {
+            gap = 0;
+        }
+        overlap = rect_overlap_1d(active.row, active.rows,
+                                  candidate.row, candidate.rows);
+        perpendicular = abs(rect_center_row(active) -
+                            rect_center_row(candidate));
+    } else if (direction == DESK_PANE_RIGHT) {
+        if (candidate.col <= active.col) {
+            return false;
+        }
+        gap = candidate.col - (active.col + active.cols);
+        if (gap < 0) {
+            gap = 0;
+        }
+        overlap = rect_overlap_1d(active.row, active.rows,
+                                  candidate.row, candidate.rows);
+        perpendicular = abs(rect_center_row(active) -
+                            rect_center_row(candidate));
+    } else if (direction == DESK_PANE_ABOVE) {
+        if (candidate.row >= active.row) {
+            return false;
+        }
+        gap = active.row - (candidate.row + candidate.rows);
+        if (gap < 0) {
+            gap = 0;
+        }
+        overlap = rect_overlap_1d(active.col, active.cols,
+                                  candidate.col, candidate.cols);
+        perpendicular = abs(rect_center_col(active) -
+                            rect_center_col(candidate));
+    } else {
+        if (candidate.row <= active.row) {
+            return false;
+        }
+        gap = candidate.row - (active.row + active.rows);
+        if (gap < 0) {
+            gap = 0;
+        }
+        overlap = rect_overlap_1d(active.col, active.cols,
+                                  candidate.col, candidate.cols);
+        perpendicular = abs(rect_center_col(active) -
+                            rect_center_col(candidate));
+    }
+
+    if (require_overlap && overlap <= 0) {
+        return false;
+    }
+    *gap_out = gap;
+    *perpendicular_out = perpendicular;
+    return true;
+}
+
+static bool pane_layout_select_direction(desk_pane_layout_t *panes,
+                                         const desk_terminal_t *terminal,
+                                         size_t pane_count,
+                                         desk_pane_direction_t direction)
+{
+    int active_id = panes->active_pane_id;
+    if (active_id <= 0 || (size_t)active_id > pane_count) {
+        return false;
+    }
+
+    desk_rect_t active;
+    if (!pane_layout_rect_for_pane(panes, terminal, active_id, &active)) {
+        return false;
+    }
+
+    int best = 0;
+    int best_gap = 0;
+    int best_perpendicular = 0;
+    for (int pass = 0; pass < 2 && best == 0; ++pass) {
+        bool require_overlap = pass == 0;
+        for (size_t i = 0; i < pane_count; ++i) {
+            int candidate_id = (int)i + 1;
+            if (candidate_id == active_id) {
+                continue;
+            }
+            desk_rect_t candidate;
+            if (!pane_layout_rect_for_pane(panes, terminal, candidate_id,
+                                           &candidate)) {
+                continue;
+            }
+            int gap = 0;
+            int perpendicular = 0;
+            if (!pane_direction_candidate_score(active, candidate, direction,
+                                                require_overlap, &gap,
+                                                &perpendicular)) {
+                continue;
+            }
+            if (best == 0 || gap < best_gap ||
+                (gap == best_gap && perpendicular < best_perpendicular) ||
+                (gap == best_gap && perpendicular == best_perpendicular &&
+                 candidate_id < best)) {
+                best = candidate_id;
+                best_gap = gap;
+                best_perpendicular = perpendicular;
+            }
+        }
+    }
+
+    if (best == 0) {
+        return false;
+    }
+    panes->active_pane_id = best;
+    panes->zoom = DESK_ZOOM_NONE;
+    return true;
 }
 
 static bool pane_content_rect_for_pane(const desk_pane_layout_t *panes,
@@ -3534,6 +3684,18 @@ static const char *desk_command_description(const char *command)
     if (strcmp(command, "pane.previous") == 0) {
         return "Select previous pane";
     }
+    if (strcmp(command, "pane.left") == 0) {
+        return "Select pane to the left";
+    }
+    if (strcmp(command, "pane.right") == 0) {
+        return "Select pane to the right";
+    }
+    if (strcmp(command, "pane.above") == 0) {
+        return "Select pane above";
+    }
+    if (strcmp(command, "pane.below") == 0) {
+        return "Select pane below";
+    }
     if (strcmp(command, "layout.zoom") == 0) {
         return "Toggle active pane zoom";
     }
@@ -3636,6 +3798,10 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     menu->workspace = session->workspace;
     desk_add_bindings_item(session, "pane.next");
     desk_add_bindings_item(session, "pane.previous");
+    desk_add_bindings_item(session, "pane.left");
+    desk_add_bindings_item(session, "pane.right");
+    desk_add_bindings_item(session, "pane.above");
+    desk_add_bindings_item(session, "pane.below");
     desk_add_bindings_item(session, "layout.zoom");
     desk_add_bindings_item(session, "layout.resize.toggle");
     desk_add_bindings_item(session, "layout.transpose");
@@ -5545,6 +5711,29 @@ static bool desk_execute_command(desk_session_t *session,
         pane_layout_previous(&session->layout);
         session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
         *layout_changed = true;
+        return true;
+    }
+    desk_pane_direction_t direction = DESK_PANE_LEFT;
+    bool directional = true;
+    if (strcmp(command, "pane.left") == 0) {
+        direction = DESK_PANE_LEFT;
+    } else if (strcmp(command, "pane.right") == 0) {
+        direction = DESK_PANE_RIGHT;
+    } else if (strcmp(command, "pane.above") == 0) {
+        direction = DESK_PANE_ABOVE;
+    } else if (strcmp(command, "pane.below") == 0) {
+        direction = DESK_PANE_BELOW;
+    } else {
+        directional = false;
+    }
+    if (directional) {
+        int previous = session->layout.active_pane_id;
+        if (pane_layout_select_direction(&session->layout, terminal,
+                                         session->pane_count, direction) &&
+            session->layout.active_pane_id != previous) {
+            session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
+            *layout_changed = true;
+        }
         return true;
     }
     if (strcmp(command, "layout.zoom") == 0) {

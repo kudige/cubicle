@@ -280,8 +280,9 @@ Keys:
   `KEY` may be prefixed with `Prefix-` or may be a direct non-prefix shortcut.
   Aliases `Shift-`, `Control-`, `Ctrl-`, `Alt-`, and `Meta-` are accepted and
   displayed in canonical `S-`, `C-`, and `M-` form.
-  `COMMAND` is one of `pane.next`, `pane.previous`, `layout.zoom`,
-  `layout.resize.toggle`, `layout.transpose`, `layout.split.horizontal`,
+  `COMMAND` is one of `pane.next`, `pane.previous`, `pane.left`, `pane.right`,
+  `pane.above`, `pane.below`, `layout.zoom`, `layout.resize.toggle`,
+  `layout.transpose`, `layout.split.horizontal`,
   `layout.split.vertical`, `layout.delete`, `layout.reset`,
   `layout.zoom.horizontal`, `layout.zoom.vertical`, `layout.save`,
   `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, or `quit`.

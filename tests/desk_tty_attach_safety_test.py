@@ -314,6 +314,11 @@ def run_desk_three_pane_default_layout(desk, cube, env):
     os.close(slave_fd)
     captured = bytearray()
     sent_quit = False
+    step = 0
+    saw_bottom = False
+    saw_top = False
+    saw_right = False
+    saw_left = False
     deadline = time.time() + 6
     try:
         while time.time() < deadline:
@@ -334,17 +339,85 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 b"three-top" in captured
                 and b"three-bottom" in captured
                 and b"three-right" in captured
-                and not sent_quit
+                and step == 0
             ):
-                os.write(master_fd, b"\x18q")
-                sent_quit = True
+                os.write(master_fd, b"\x18\x1b[BHIT_BOTTOM")
+                step = 1
+
+            if step == 1 and not saw_bottom:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree", "logs", "--stdout", "three-bottom"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT three-bottom HIT_BOTTOM" in logs.stdout:
+                    saw_bottom = True
+                    os.write(master_fd, b"\x18\x1b[AHIT_TOP")
+                    step = 2
+
+            if step == 2 and not saw_top:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree", "logs", "--stdout", "three-top"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT three-top HIT_TOP" in logs.stdout:
+                    saw_top = True
+                    os.write(master_fd, b"\x18\x1b[CHIT_RIGHT")
+                    step = 3
+
+            if step == 3 and not saw_right:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree", "logs", "--stdout", "three-right"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT three-right HIT_RIGHT" in logs.stdout:
+                    saw_right = True
+                    os.write(master_fd, b"\x18\x1b[DHIT_LEFT")
+                    step = 4
+
+            if step == 4 and not saw_left:
+                top_logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree", "logs", "--stdout", "three-top"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                bottom_logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree", "logs", "--stdout", "three-bottom"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if (
+                    "GOT three-top HIT_LEFT" in top_logs.stdout
+                    or "GOT three-bottom HIT_LEFT" in bottom_logs.stdout
+                ):
+                    saw_left = True
+                    os.write(master_fd, b"\x18q")
+                    sent_quit = True
 
             if proc.poll() is not None:
                 break
 
         if not sent_quit:
             raise AssertionError(
-                f"desk did not render three-pane workspace: {captured!r}"
+                f"desk did not complete directional pane checks: {captured!r}"
+            )
+        if not (saw_bottom and saw_top and saw_right and saw_left):
+            raise AssertionError(
+                "desk directional pane selection failed: "
+                f"bottom={saw_bottom} top={saw_top} right={saw_right} "
+                f"left={saw_left} output={captured!r}"
             )
         if proc.poll() is None:
             proc.wait(timeout=2)
@@ -882,7 +955,7 @@ def run_desk_bindings_overlay(desk, env):
                     saw_overlay = True
 
             if saw_overlay and not sent_edit:
-                os.write(master_fd, b"j" * 13 + b"e")
+                os.write(master_fd, b"j" * 17 + b"e")
                 sent_edit = True
 
             if sent_edit and not saw_edit_prompt:
@@ -2195,6 +2268,17 @@ def main():
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskLayout"], env)
 
+        write_test_config(
+            config_path,
+            log_dir,
+            (
+                "[desk.keys]\n"
+                "bind.11=Prefix-Left pane.left\n"
+                "bind.12=Prefix-Right pane.right\n"
+                "bind.13=Prefix-Up pane.above\n"
+                "bind.14=Prefix-Down pane.below\n"
+            ),
+        )
         run_checked([cube, "workspace", "create", "DeskThree"], env)
         for name in ("three-top", "three-bottom", "three-right"):
             run_checked(
@@ -2210,11 +2294,22 @@ def main():
                     sys.executable,
                     "-c",
                     (
-                        "import sys,time,tty\n"
+                        "import os,select,sys,time,tty\n"
                         "tty.setraw(0)\n"
                         f"sys.stdout.write('READY {name}\\n')\n"
                         "sys.stdout.flush()\n"
-                        "time.sleep(10)\n"
+                        "deadline=time.time()+10\n"
+                        "data=b''\n"
+                        "markers=(b'HIT_BOTTOM',b'HIT_TOP',b'HIT_RIGHT',b'HIT_LEFT')\n"
+                        "while time.time()<deadline:\n"
+                        "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                        "    if r:\n"
+                        "        data+=os.read(0,64)\n"
+                        "    for marker in markers:\n"
+                        "        if marker in data:\n"
+                        f"            sys.stdout.write('GOT {name} '+marker.decode()+'\\n')\n"
+                        "            sys.stdout.flush()\n"
+                        "            data=data.replace(marker,b'',1)\n"
                     ),
                 ],
                 env,
@@ -2224,6 +2319,7 @@ def main():
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskThree"], env)
+        write_test_config(config_path, log_dir)
         write_test_config(
             config_path,
             log_dir,

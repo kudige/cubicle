@@ -606,6 +606,10 @@ static int desk_command_is_known(const char *command)
 {
     return strcmp(command, "pane.next") == 0 ||
            strcmp(command, "pane.previous") == 0 ||
+           strcmp(command, "pane.left") == 0 ||
+           strcmp(command, "pane.right") == 0 ||
+           strcmp(command, "pane.above") == 0 ||
+           strcmp(command, "pane.below") == 0 ||
            strcmp(command, "layout.zoom") == 0 ||
            strcmp(command, "layout.resize.toggle") == 0 ||
            strcmp(command, "layout.transpose") == 0 ||
