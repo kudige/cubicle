@@ -195,6 +195,7 @@ def run_desk_survives_dead_pane(desk, cube, env):
     captured = bytearray()
     saw_dying_pane = False
     saw_surviving_pane = False
+    saw_ended_notice = False
     sent_payload = False
     saw_payload = False
     sent_quit = False
@@ -218,8 +219,10 @@ def run_desk_survives_dead_pane(desk, cube, env):
                 saw_dying_pane = True
             if b"desk-safe" in captured:
                 saw_surviving_pane = True
+            if b"desk-dies just ended" in captured:
+                saw_ended_notice = True
 
-            if saw_dying_pane and saw_surviving_pane and not sent_payload:
+            if saw_dying_pane and saw_surviving_pane and saw_ended_notice and not sent_payload:
                 time.sleep(0.8)
                 if proc.poll() is not None:
                     break
@@ -248,6 +251,8 @@ def run_desk_survives_dead_pane(desk, cube, env):
             raise AssertionError(f"desk did not render dying pane: {captured!r}")
         if not saw_surviving_pane:
             raise AssertionError(f"desk did not render surviving pane: {captured!r}")
+        if not saw_ended_notice:
+            raise AssertionError(f"desk did not show ended pane notice: {captured!r}")
         if not sent_payload:
             raise AssertionError("desk exited before testing surviving pane input")
         if not saw_payload:

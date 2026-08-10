@@ -55,6 +55,8 @@
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
 #define DESK_CURSOR_BLINK_MS 500
+#define DESK_PROCESS_REFRESH_MS 1000
+#define DESK_NOTICE_MS 2500
 #define DESK_PANE_TITLE_ROWS 1
 #define DESK_MENU_MAX_ITEMS 128
 #define DESK_NEW_COMMAND_MAX 512
@@ -172,6 +174,7 @@ typedef struct desk_pane {
     cubicle_terminal_model_t *terminal_model;
     unsigned int rows;
     unsigned int cols;
+    bool ended_notice_shown;
 } desk_pane_t;
 
 typedef enum desk_menu_level {
@@ -256,6 +259,9 @@ typedef struct desk_session {
     size_t key_binding_count;
     cubicle_desk_key_binding_t startup_key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t startup_key_binding_count;
+    char notice[256];
+    long long notice_until_ms;
+    long long next_process_refresh_ms;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -267,6 +273,13 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
 static long long desk_monotonic_ms(void);
 static bool desk_string_equals_case(const char *left, const char *right);
 static int parse_prefix_key(const char *text, unsigned char *key);
+static void desk_apply_pane_labels(desk_session_t *session);
+static int resize_all_panes(desk_session_t *session,
+                            const desk_terminal_t *terminal,
+                            bool *changed);
+static int desk_save_layout(desk_session_t *session);
+static void desk_render_notice(const desk_terminal_t *terminal,
+                               const desk_session_t *session);
 static bool desk_execute_command(desk_session_t *session,
                                  desk_terminal_t *terminal,
                                  const char *command,
@@ -3002,6 +3015,75 @@ static void desk_cleanup_pane(desk_pane_t *pane)
     memset(pane, 0, sizeof(*pane));
 }
 
+static bool desk_process_has_ended(cubicle_process_state_t state)
+{
+    return state == CUBICLE_PROCESS_COMPLETED ||
+           state == CUBICLE_PROCESS_FAILED ||
+           state == CUBICLE_PROCESS_LOST ||
+           state == CUBICLE_PROCESS_REMOVED;
+}
+
+static void desk_show_notice(desk_session_t *session, const char *message)
+{
+    snprintf(session->notice, sizeof(session->notice), "%s",
+             message == NULL ? "" : message);
+    session->notice_until_ms = desk_monotonic_ms() + DESK_NOTICE_MS;
+}
+
+static void desk_show_process_ended_notice(desk_session_t *session,
+                                           const char *process_name)
+{
+    char message[256];
+    snprintf(message, sizeof(message), "%s just ended",
+             process_name != NULL && process_name[0] != '\0'
+                 ? process_name
+                 : "process");
+    desk_show_notice(session, message);
+}
+
+static int desk_remove_pane_at(desk_session_t *session,
+                               const desk_terminal_t *terminal,
+                               size_t pane_index,
+                               char *error,
+                               size_t error_size)
+{
+    if (pane_index >= session->pane_count) {
+        snprintf(error, error_size, "no such pane");
+        return -1;
+    }
+    if (session->pane_count <= 1) {
+        snprintf(error, error_size, "cannot delete the only pane");
+        return -1;
+    }
+
+    int removed_pane_id = (int)pane_index + 1;
+    int previous_active = session->layout.active_pane_id;
+    session->layout.active_pane_id = removed_pane_id;
+    if (pane_layout_delete_active(&session->layout) < 0) {
+        session->layout.active_pane_id = previous_active;
+        snprintf(error, error_size, "failed to delete pane");
+        return -1;
+    }
+    pane_layout_compact_after_delete(&session->layout, removed_pane_id);
+    desk_cleanup_pane(&session->panes[pane_index]);
+    for (size_t i = pane_index + 1; i < session->pane_count; ++i) {
+        session->panes[i - 1] = session->panes[i];
+    }
+    memset(&session->panes[session->pane_count - 1], 0,
+           sizeof(session->panes[session->pane_count - 1]));
+    session->pane_count--;
+    session->zoomed = false;
+    session->layout.zoom = DESK_ZOOM_NONE;
+    desk_apply_pane_labels(session);
+    bool resized = false;
+    if (resize_all_panes(session, terminal, &resized) < 0) {
+        snprintf(error, error_size, "failed to resize panes");
+        return -1;
+    }
+    (void)desk_save_layout(session);
+    return 0;
+}
+
 static void desk_detach_pane_after_read_failure(desk_session_t *session,
                                                 size_t pane_index)
 {
@@ -3019,6 +3101,84 @@ static void desk_detach_pane_after_read_failure(desk_session_t *session,
         pane->process = updated;
         desk_apply_pane_labels(session);
     }
+}
+
+static int desk_refresh_ended_panes(desk_session_t *session,
+                                    const desk_terminal_t *terminal,
+                                    bool *layout_changed)
+{
+    long long now = desk_monotonic_ms();
+    if (now > 0 && session->next_process_refresh_ms > 0 &&
+        now < session->next_process_refresh_ms) {
+        return 0;
+    }
+    session->next_process_refresh_ms =
+        now > 0 ? now + DESK_PROCESS_REFRESH_MS : 0;
+
+    for (size_t i = 0; i < session->pane_count;) {
+        desk_pane_t *pane = &session->panes[i];
+        if (pane->process.id[0] == '\0') {
+            ++i;
+            continue;
+        }
+
+        cubicle_process_info_t updated;
+        cubicle_error_code_t code = cubicle_process_get(
+            session->manager, pane->process.id,
+            pane->process.workspace_id[0] == '\0' ? NULL
+                                                  : pane->process.workspace_id,
+            &updated);
+        if (code != CUBICLE_OK) {
+            ++i;
+            continue;
+        }
+        if (!desk_process_has_ended(updated.state)) {
+            pane->process = updated;
+            ++i;
+            continue;
+        }
+        if (pane->ended_notice_shown) {
+            pane->process = updated;
+            ++i;
+            continue;
+        }
+
+        char name[CUBICLE_NAME_MAX];
+        snprintf(name, sizeof(name), "%s",
+                 pane->process.friendly_name[0] != '\0'
+                     ? pane->process.friendly_name
+                     : pane->process.id);
+        desk_debug_log("event=pane_process_ended pane=%zu process=%s state=%s",
+                       i + 1, name, cubicle_process_state_name(updated.state));
+
+        if (session->pane_count > 1) {
+            char error[256];
+            if (desk_remove_pane_at(session, terminal, i, error,
+                                    sizeof(error)) < 0) {
+                desk_debug_log("event=pane_remove_failed pane=%zu process=%s message=\"%s\"",
+                               i + 1, name, error);
+                pane->process = updated;
+                pane->ended_notice_shown = true;
+                ++i;
+            }
+            desk_show_process_ended_notice(session, name);
+            if (layout_changed != NULL) {
+                *layout_changed = true;
+            }
+            continue;
+        }
+
+        cubicle_attachment_disconnect(pane->attachment);
+        pane->attachment = NULL;
+        pane->process = updated;
+        pane->ended_notice_shown = true;
+        desk_show_process_ended_notice(session, name);
+        if (layout_changed != NULL) {
+            *layout_changed = true;
+        }
+        ++i;
+    }
+    return 0;
 }
 
 static void desk_disconnect_all_panes(desk_session_t *session)
@@ -3907,28 +4067,8 @@ static int desk_delete_active_pane(desk_session_t *session,
         snprintf(error, error_size, "no active pane");
         return -1;
     }
-    if (pane_layout_delete_active(&session->layout) < 0) {
-        snprintf(error, error_size, "failed to delete pane");
-        return -1;
-    }
-    pane_layout_compact_after_delete(&session->layout, removed_pane_id);
-    desk_cleanup_pane(&session->panes[(size_t)removed_pane_id - 1]);
-    for (size_t i = (size_t)removed_pane_id; i < session->pane_count; ++i) {
-        session->panes[i - 1] = session->panes[i];
-    }
-    memset(&session->panes[session->pane_count - 1], 0,
-           sizeof(session->panes[session->pane_count - 1]));
-    session->pane_count--;
-    session->zoomed = false;
-    session->layout.zoom = DESK_ZOOM_NONE;
-    desk_apply_pane_labels(session);
-    bool resized = false;
-    if (resize_all_panes(session, terminal, &resized) < 0) {
-        snprintf(error, error_size, "failed to resize panes");
-        return -1;
-    }
-    (void)desk_save_layout(session);
-    return 0;
+    return desk_remove_pane_at(session, terminal, (size_t)removed_pane_id - 1,
+                               error, error_size);
 }
 
 static int desk_apply_named_layout(desk_session_t *session,
@@ -4021,6 +4161,48 @@ static void render_all_panes(const desk_terminal_t *terminal,
     }
     desk_cursor_reset_blink(session);
     desk_cursor_render(terminal, session);
+    desk_render_notice(terminal, session);
+}
+
+static void desk_render_notice(const desk_terminal_t *terminal,
+                               const desk_session_t *session)
+{
+    if (session->notice[0] == '\0' || terminal->rows <= 0 ||
+        terminal->cols <= 0) {
+        return;
+    }
+
+    char text[sizeof(session->notice)];
+    size_t text_length = 0;
+    for (const unsigned char *cursor = (const unsigned char *)session->notice;
+         *cursor != '\0' && text_length + 1 < sizeof(text); ++cursor) {
+        text[text_length++] = (*cursor >= 0x20 && *cursor != 0x7f)
+                                  ? (char)*cursor
+                                  : '?';
+    }
+    text[text_length] = '\0';
+    if (text_length == 0) {
+        return;
+    }
+
+    int box_cols = (int)text_length + 4;
+    if (box_cols > terminal->cols) {
+        box_cols = terminal->cols;
+    }
+    if (box_cols < 4) {
+        return;
+    }
+    int row = terminal->rows / 2;
+    int col = (terminal->cols - box_cols) / 2 + 1;
+    int inner_cols = box_cols - 4;
+
+    char line[1024];
+    int length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[2;7m %.*s \x1b[0m",
+                          row, col, inner_cols, text);
+    if (length > 0 && (size_t)length < sizeof(line)) {
+        (void)cubeui_write_all(STDOUT_FILENO, line, (size_t)length);
+    }
 }
 
 static bool desk_menu_geometry(const desk_terminal_t *terminal,
@@ -4411,6 +4593,7 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
                                     session->mouse_titles);
         desk_cursor_reset_blink(session);
         desk_cursor_render(terminal, session);
+        desk_render_notice(terminal, session);
     }
     return 0;
 }
@@ -5821,6 +6004,13 @@ static int desk_run_workspace(const char *workspace_arg,
         bool has_stream_fd = false;
         bool has_polling_pane = false;
         desk_resume_mouse_if_ready(&session);
+        long long now_ms = desk_monotonic_ms();
+        if (session.notice[0] != '\0' && now_ms > 0 &&
+            session.notice_until_ms > 0 && now_ms >= session.notice_until_ms) {
+            session.notice[0] = '\0';
+            session.notice_until_ms = 0;
+            render_all_panes(&terminal, &session);
+        }
 
         if (g_resize_requested) {
             g_resize_requested = 0;
@@ -5836,6 +6026,13 @@ static int desk_run_workspace(const char *workspace_arg,
                 desk_render_open_menu(&terminal, &session);
                 layout_changed = false;
             }
+        }
+
+        if (session.open_menu.level == DESK_MENU_CLOSED &&
+            desk_refresh_ended_panes(&session, &terminal, &layout_changed) < 0) {
+            result = 2;
+            desk_debug_log("event=process_refresh_failed errno=%d", errno);
+            break;
         }
 
         if (session.open_menu.level == DESK_MENU_CLOSED) {
