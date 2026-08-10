@@ -2989,23 +2989,27 @@ static int resize_pane_attachment(desk_session_t *session,
     unsigned int rows = 0;
     unsigned int cols = 0;
     if (pane_content_size(terminal, &session->layout, (int)pane_index + 1,
-                          &rows, &cols) < 0 ||
-        grid_resize(&pane->grid, (int)rows, (int)cols) < 0) {
-        return -1;
-    }
-    if (pane->terminal_model != NULL &&
-        cubicle_terminal_model_resize(pane->terminal_model, rows, cols) < 0) {
+                          &rows, &cols) < 0) {
         return -1;
     }
     bool size_changed = pane->rows != rows || pane->cols != cols;
     if (pane->attachment != NULL) {
         bool sent = false;
         cubicle_error_code_t code = cubicle_attachment_resize_tracked(
-            pane->attachment, &pane->resize, rows, cols, false, &sent);
+            pane->attachment, &pane->resize, rows, cols, size_changed, &sent);
         if (code != CUBICLE_OK) {
             return -1;
         }
+        if ((sent || size_changed) && reload_pane_snapshot(pane) < 0) {
+            return -1;
+        }
         size_changed = size_changed || sent;
+    } else {
+        if (grid_resize(&pane->grid, (int)rows, (int)cols) < 0 ||
+            (pane->terminal_model != NULL &&
+             cubicle_terminal_model_resize(pane->terminal_model, rows, cols) < 0)) {
+            return -1;
+        }
     }
     pane->rows = rows;
     pane->cols = cols;
