@@ -319,6 +319,8 @@ def run_desk_three_pane_default_layout(desk, cube, env):
     saw_top = False
     saw_right = False
     saw_left = False
+    saw_vertical_zoom_redraw = False
+    saw_horizontal_zoom_redraw = False
     deadline = time.time() + 6
     try:
         while time.time() < deadline:
@@ -403,6 +405,21 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                     or "GOT three-bottom HIT_LEFT" in bottom_logs.stdout
                 ):
                     saw_left = True
+                    captured.clear()
+                    os.write(master_fd, b"\x18sv")
+                    step = 5
+
+            if step == 5 and not saw_vertical_zoom_redraw:
+                if b"\x1b[H\x1b[2J" in captured:
+                    saw_vertical_zoom_redraw = True
+                    captured.clear()
+                    os.write(master_fd, b"h")
+                    step = 6
+
+            if step == 6 and not saw_horizontal_zoom_redraw:
+                if b"\x1b[H\x1b[2J" in captured:
+                    saw_horizontal_zoom_redraw = True
+                    os.write(master_fd, b"rq")
                     os.write(master_fd, b"\x18q")
                     sent_quit = True
 
@@ -418,6 +435,12 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 "desk directional pane selection failed: "
                 f"bottom={saw_bottom} top={saw_top} right={saw_right} "
                 f"left={saw_left} output={captured!r}"
+            )
+        if not (saw_vertical_zoom_redraw and saw_horizontal_zoom_redraw):
+            raise AssertionError(
+                "desk axis zoom did not redraw after hiding panes: "
+                f"vertical={saw_vertical_zoom_redraw} "
+                f"horizontal={saw_horizontal_zoom_redraw} output={captured!r}"
             )
         if proc.poll() is None:
             proc.wait(timeout=2)

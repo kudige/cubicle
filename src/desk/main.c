@@ -2988,10 +2988,16 @@ static int resize_pane_attachment(desk_session_t *session,
     desk_pane_t *pane = &session->panes[pane_index];
     unsigned int rows = 0;
     unsigned int cols = 0;
-    if (pane_content_size(terminal, &session->layout, (int)pane_index + 1,
-                          &rows, &cols) < 0) {
+    desk_rect_t rect;
+    if (!pane_layout_rect_for_pane(&session->layout, terminal,
+                                   (int)pane_index + 1, &rect)) {
+        return 0;
+    }
+    if (rect.rows <= DESK_PANE_TITLE_ROWS || rect.cols <= 0) {
         return -1;
     }
+    rows = (unsigned int)(rect.rows - DESK_PANE_TITLE_ROWS);
+    cols = (unsigned int)rect.cols;
     bool size_changed = pane->rows != rows || pane->cols != cols;
     if (pane->attachment != NULL) {
         bool sent = false;
