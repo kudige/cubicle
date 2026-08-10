@@ -82,6 +82,8 @@ cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t
 cubicle_channel_mask_t cubicle_attachment_channels(const cubicle_attachment_t *attachment);
 void cubicle_attachment_replay(cubicle_attachment_t *attachment, uint64_t replay_bytes);
 uint64_t cubicle_attachment_read_offset(const cubicle_attachment_t *attachment, cubicle_stream_kind_t stream);
+cubicle_error_code_t cubicle_attachment_stream_start(cubicle_attachment_t *attachment, cubicle_stream_kind_t stream);
+int cubicle_attachment_stream_fd(const cubicle_attachment_t *attachment, cubicle_stream_kind_t stream);
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length);
 ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment, cubicle_stream_kind_t stream, void *buffer, size_t length, bool *end_of_stream_out);
 ssize_t cubicle_attachment_write(cubicle_attachment_t *attachment, const void *buffer, size_t length);

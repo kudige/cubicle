@@ -6,12 +6,24 @@
 #include "cubicle/transport_unix.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
+#include <unistd.h>
 
 enum { CUBICLE_ATTACHMENT_DEFAULT_IDLE_TIMEOUT_MS = 120000 };
+enum { CUBICLE_ATTACHMENT_STREAM_HEADER_MAX = 256 };
+
+static uint64_t attachment_stream_offset_value(
+    const cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream);
+static uint64_t *attachment_stream_offset(cubicle_attachment_t *attachment,
+                                          cubicle_stream_kind_t stream);
+static cubicle_channel_mask_t channel_for_stream(cubicle_stream_kind_t stream);
 
 static uint64_t attachment_now_ms(void)
 {
@@ -29,6 +41,155 @@ static cubicle_error_code_t attachment_set_error(cubicle_attachment_t *attachmen
 {
     return set_error(attachment == NULL ? NULL : &attachment->last_error,
                      code, system_errno, false, message);
+}
+
+static void attachment_close_stream(cubicle_attachment_t *attachment)
+{
+    if (attachment != NULL && attachment->stream_fd >= 0) {
+        close(attachment->stream_fd);
+        attachment->stream_fd = -1;
+    }
+}
+
+static const char *unix_path_from_endpoint(const cubicle_endpoint_t *endpoint)
+{
+    const char prefix[] = "unix://";
+    size_t prefix_length = sizeof(prefix) - 1;
+    if (endpoint == NULL ||
+        strncmp(endpoint->uri, prefix, prefix_length) != 0) {
+        return NULL;
+    }
+    const char *path = endpoint->uri + prefix_length;
+    return path[0] == '/' ? path : NULL;
+}
+
+static int attachment_write_all(int fd, const void *buffer, size_t length)
+{
+    const unsigned char *cursor = buffer;
+    while (length > 0) {
+        ssize_t written = send(fd, cursor, length, MSG_NOSIGNAL);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (written == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        cursor += (size_t)written;
+        length -= (size_t)written;
+    }
+    return 0;
+}
+
+static int attachment_set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static cubicle_error_code_t attachment_connect_unix_stream(
+    cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream,
+    int *fd_out)
+{
+    const char *path = unix_path_from_endpoint(&attachment->grant.endpoint);
+    if (path == NULL) {
+        return attachment_set_error(attachment, CUBICLE_ERR_UNSUPPORTED, 0,
+                                    "attachment streaming requires a Unix controller endpoint");
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    size_t path_length = strlen(path);
+    if (path_length >= sizeof(address.sun_path)) {
+        return attachment_set_error(attachment, CUBICLE_ERR_INVALID_ARGUMENT,
+                                    ENAMETOOLONG,
+                                    "controller socket path is too long");
+    }
+    memcpy(address.sun_path, path, path_length + 1);
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return attachment_set_error(attachment, CUBICLE_ERR_IO, errno,
+                                    "failed to create attachment stream socket");
+    }
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        return attachment_set_error(attachment, CUBICLE_ERR_MANAGER_UNAVAILABLE,
+                                    saved_errno,
+                                    "failed to connect attachment stream socket");
+    }
+
+    uint64_t offset = attachment_stream_offset_value(attachment, stream);
+    char command[128];
+    int command_length = snprintf(command, sizeof(command), "attach %s %llu\n",
+                                  stream_name(stream),
+                                  (unsigned long long)offset);
+    if (command_length < 0 || (size_t)command_length >= sizeof(command) ||
+        attachment_write_all(fd, command, (size_t)command_length) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        return attachment_set_error(attachment, CUBICLE_ERR_IO, saved_errno,
+                                    "failed to request attachment stream");
+    }
+
+    char header[CUBICLE_ATTACHMENT_STREAM_HEADER_MAX];
+    size_t used = 0;
+    while (used + 1 < sizeof(header)) {
+        char ch;
+        ssize_t nread = recv(fd, &ch, 1, 0);
+        if (nread < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            int saved_errno = errno;
+            close(fd);
+            return attachment_set_error(attachment, CUBICLE_ERR_IO,
+                                        saved_errno,
+                                        "failed to read attachment stream header");
+        }
+        if (nread == 0) {
+            close(fd);
+            return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL,
+                                        ECONNRESET,
+                                        "attachment stream closed before header");
+        }
+        if (ch == '\n') {
+            header[used] = '\0';
+            break;
+        }
+        header[used++] = ch;
+    }
+    if (used + 1 >= sizeof(header)) {
+        close(fd);
+        return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL,
+                                    ENOBUFS,
+                                    "attachment stream header is too large");
+    }
+    if (strncmp(header, "ok attached ", 12) != 0) {
+        close(fd);
+        return attachment_set_error(attachment, CUBICLE_ERR_PROTOCOL, 0,
+                                    header[0] == '\0'
+                                        ? "invalid attachment stream header"
+                                        : header);
+    }
+    if (attachment_set_nonblocking(fd) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        return attachment_set_error(attachment, CUBICLE_ERR_IO, saved_errno,
+                                    "failed to make attachment stream nonblocking");
+    }
+
+    *fd_out = fd;
+    return CUBICLE_OK;
 }
 
 static cubicle_error_code_t create_controller_client(
@@ -378,6 +539,7 @@ cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t
         return CUBICLE_ERR_INTERNAL;
     }
 
+    attachment->stream_fd = -1;
     attachment->grant = *grant;
     attachment->idle_timeout_ms =
         options != NULL && options->io_timeout_ms > 0
@@ -426,6 +588,46 @@ uint64_t cubicle_attachment_read_offset(
     return attachment_stream_offset_value(attachment, stream);
 }
 
+cubicle_error_code_t cubicle_attachment_stream_start(
+    cubicle_attachment_t *attachment,
+    cubicle_stream_kind_t stream)
+{
+    if (attachment == NULL) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    if ((attachment->channels & channel_for_stream(stream)) == 0) {
+        return attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
+                                    "attachment stream is not readable");
+    }
+
+    if (attachment->stream_fd >= 0 && attachment->stream_fd_stream == stream) {
+        return CUBICLE_OK;
+    }
+
+    attachment_close_stream(attachment);
+    int fd = -1;
+    cubicle_error_code_t code =
+        attachment_connect_unix_stream(attachment, stream, &fd);
+    if (code != CUBICLE_OK) {
+        return code;
+    }
+    attachment->stream_fd = fd;
+    attachment->stream_fd_stream = stream;
+    cubicle_library_debug_log("attachment.stream_start", stream_name(stream),
+                              CUBICLE_OK, 0, 0, NULL);
+    return CUBICLE_OK;
+}
+
+int cubicle_attachment_stream_fd(const cubicle_attachment_t *attachment,
+                                 cubicle_stream_kind_t stream)
+{
+    if (attachment == NULL || attachment->stream_fd < 0 ||
+        attachment->stream_fd_stream != stream) {
+        return -1;
+    }
+    return attachment->stream_fd;
+}
+
 ssize_t cubicle_attachment_read(cubicle_attachment_t *attachment, void *buffer, size_t length)
 {
     if (attachment == NULL) {
@@ -460,6 +662,36 @@ ssize_t cubicle_attachment_read_stream(cubicle_attachment_t *attachment,
     }
 
     uint64_t *offset = attachment_stream_offset(attachment, stream);
+    if (attachment->stream_fd >= 0 && attachment->stream_fd_stream == stream) {
+        ssize_t nread = recv(attachment->stream_fd, buffer, length, 0);
+        if (nread < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            int saved_errno = errno;
+            attachment_close_stream(attachment);
+            (void)attachment_set_error(attachment, CUBICLE_ERR_IO,
+                                       saved_errno,
+                                       "attachment stream read failed");
+            errno = saved_errno;
+            return -1;
+        }
+        if (nread == 0) {
+            attachment_close_stream(attachment);
+            (void)attachment_set_error(attachment, CUBICLE_ERR_IO, EPIPE,
+                                       "attachment stream closed");
+            errno = EPIPE;
+            return -1;
+        }
+        *offset += (uint64_t)nread;
+        if (end_of_stream_out != NULL) {
+            *end_of_stream_out = false;
+        }
+        cubicle_library_debug_log("attachment.stream_read", stream_name(stream),
+                                  CUBICLE_OK, length, (size_t)nread, NULL);
+        return nread;
+    }
+
     size_t maximum_length = length > 8192 ? 8192 : length;
     if (maximum_length > 1) {
         maximum_length /= 2;
@@ -818,6 +1050,7 @@ void cubicle_attachment_disconnect(cubicle_attachment_t *attachment)
     if (attachment == NULL) {
         return;
     }
+    attachment_close_stream(attachment);
     close_controller_client(attachment);
     free(attachment);
 }

@@ -2416,8 +2416,10 @@ def main():
             raise AssertionError(f"desk library log missing program marker:\n{library_events}")
         if "event=rpc.request method=workspace.get code=ok" not in library_events:
             raise AssertionError(f"desk library log missing workspace RPC:\n{library_events}")
-        if "event=rpc.request method=controller.read code=ok" not in library_events:
-            raise AssertionError(f"desk library log missing controller read RPC:\n{library_events}")
+        if "event=attachment.stream_start method=tty code=ok" not in library_events:
+            raise AssertionError(f"desk library log missing TTY stream start:\n{library_events}")
+        if "event=attachment.stream_read method=tty code=ok" not in library_events:
+            raise AssertionError(f"desk library log missing TTY stream read:\n{library_events}")
         desk_terminal_log = os.path.join(log_dir, "desk-terminal.log")
         if not os.path.exists(desk_terminal_log):
             raise AssertionError("desk.debug=terminal did not create desk terminal log")

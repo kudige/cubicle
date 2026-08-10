@@ -2960,6 +2960,20 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
         snprintf(error, error_size, "terminal model initialization failed");
         return CUBICLE_ERR_INTERNAL;
     }
+    code = cubicle_attachment_stream_start(pane->attachment,
+                                           CUBICLE_STREAM_TTY);
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *last =
+            cubicle_attachment_last_error(pane->attachment);
+        desk_debug_log("event=attach_stream_start_failed pane=%zu process=%s code=%d message=\"%s\" action=polling_fallback",
+                       pane_index + 1, pane->process.friendly_name,
+                       (int)code, last != NULL ? last->message : "");
+    } else {
+        desk_debug_log("event=attach_stream_start_ok pane=%zu process=%s fd=%d",
+                       pane_index + 1, pane->process.friendly_name,
+                       cubicle_attachment_stream_fd(pane->attachment,
+                                                   CUBICLE_STREAM_TTY));
+    }
     desk_debug_log("event=attach_ok pane=%zu process=%s",
                    pane_index + 1, pane->process.friendly_name);
     return CUBICLE_OK;
@@ -5803,7 +5817,9 @@ static int desk_run_workspace(const char *workspace_arg,
     while (!g_stop_requested) {
         bool layout_changed = false;
         bool quit_requested = false;
-        bool output_seen = false;
+        bool pane_ready[32] = {false};
+        bool has_stream_fd = false;
+        bool has_polling_pane = false;
         desk_resume_mouse_if_ready(&session);
 
         if (g_resize_requested) {
@@ -5823,9 +5839,62 @@ static int desk_run_workspace(const char *workspace_arg,
         }
 
         if (session.open_menu.level == DESK_MENU_CLOSED) {
+            desk_cursor_tick(&terminal, &session);
+        }
+
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(STDIN_FILENO, &read_set);
+        int max_fd = STDIN_FILENO;
+        if (session.open_menu.level == DESK_MENU_CLOSED) {
             for (size_t i = 0; i < session.pane_count; ++i) {
+                int stream_fd = cubicle_attachment_stream_fd(
+                    session.panes[i].attachment, CUBICLE_STREAM_TTY);
+                if (stream_fd >= 0) {
+                    FD_SET(stream_fd, &read_set);
+                    if (stream_fd > max_fd) {
+                        max_fd = stream_fd;
+                    }
+                    has_stream_fd = true;
+                } else if (session.panes[i].attachment != NULL) {
+                    has_polling_pane = true;
+                }
+            }
+        }
+        struct timeval timeout = {0, 50000};
+        int ready = select(max_fd + 1, &read_set, NULL, NULL, &timeout);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            result = 2;
+            desk_debug_log("event=select_failed errno=%d", errno);
+            break;
+        }
+        if (ready > 0 && session.open_menu.level == DESK_MENU_CLOSED) {
+            for (size_t i = 0; i < session.pane_count; ++i) {
+                int stream_fd = cubicle_attachment_stream_fd(
+                    session.panes[i].attachment, CUBICLE_STREAM_TTY);
+                if (stream_fd >= 0 && FD_ISSET(stream_fd, &read_set)) {
+                    pane_ready[i] = true;
+                }
+            }
+        }
+        if (session.open_menu.level == DESK_MENU_CLOSED) {
+            bool read_polling_fallback = !has_stream_fd || has_polling_pane;
+            for (size_t i = 0; i < session.pane_count; ++i) {
+                if (!pane_ready[i] && !read_polling_fallback) {
+                    continue;
+                }
+                if (!pane_ready[i]) {
+                    int stream_fd = cubicle_attachment_stream_fd(
+                        session.panes[i].attachment, CUBICLE_STREAM_TTY);
+                    if (stream_fd >= 0) {
+                        continue;
+                    }
+                }
                 if (read_and_render_pane_output(&terminal, &session, i,
-                                                &output_seen) < 0) {
+                                                NULL) < 0) {
                     result = 2;
                     desk_debug_log("event=loop_read_failed pane=%zu", i + 1);
                     break;
@@ -5833,25 +5902,6 @@ static int desk_run_workspace(const char *workspace_arg,
             }
         }
         if (result != 0) {
-            break;
-        }
-        (void)output_seen;
-        if (session.open_menu.level == DESK_MENU_CLOSED) {
-            desk_cursor_tick(&terminal, &session);
-        }
-
-        fd_set read_set;
-        FD_ZERO(&read_set);
-        FD_SET(STDIN_FILENO, &read_set);
-        struct timeval timeout = output_seen ? (struct timeval){0, 0}
-                                             : (struct timeval){0, 50000};
-        int ready = select(STDIN_FILENO + 1, &read_set, NULL, NULL, &timeout);
-        if (ready < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            result = 2;
-            desk_debug_log("event=select_failed errno=%d", errno);
             break;
         }
         if (ready > 0 && FD_ISSET(STDIN_FILENO, &read_set)) {
