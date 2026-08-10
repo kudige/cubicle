@@ -1226,6 +1226,36 @@ static int process_conflict_exists(const manager_state_t *state,
     return 0;
 }
 
+static int process_friendly_name_conflicts(const manager_state_t *state,
+                                           const char *workspace_id,
+                                           const char *process_id,
+                                           const char *friendly_name,
+                                           int *conflict)
+{
+    *conflict = 0;
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_process_record_t record;
+        if (cubicle_parse_process_record(line, &record) != 0) {
+            continue;
+        }
+        if (strcmp(record.workspace_id, workspace_id) == 0 &&
+            strcmp(record.process_id, process_id) != 0 &&
+            strcmp(record.friendly_name, friendly_name) == 0) {
+            *conflict = 1;
+            break;
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
 static int parse_workspace_key_record(const char *line,
                                       workspace_key_record_t *record)
 {
@@ -1879,6 +1909,9 @@ typedef struct process_record_update {
     const char *state;
     int has_saved;
     int saved;
+    const char *friendly_name;
+    int has_restart;
+    int restart;
 } process_record_update_t;
 
 static int write_process_record(FILE *output,
@@ -1941,6 +1974,13 @@ static int rewrite_process_records(const manager_state_t *state,
                 }
                 if (update != NULL && update->has_saved) {
                     record.saved = update->saved;
+                }
+                if (update != NULL && update->friendly_name != NULL) {
+                    snprintf(record.friendly_name, sizeof(record.friendly_name),
+                             "%s", update->friendly_name);
+                }
+                if (update != NULL && update->has_restart) {
+                    record.restart = update->restart;
                 }
             }
             if (write_process_record(output, &record) < 0) {
@@ -5037,6 +5077,142 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 unlock_state(lock_fd);
             }
         }
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
+        if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode process",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "process.update") == 0) {
+        char process_ref[128];
+        char workspace_ref[128];
+        char friendly_name[128];
+        bool restart = false;
+        int has_workspace_ref = 0;
+        int has_friendly_name = 0;
+        int has_restart = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process", process_ref,
+                                             sizeof(process_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &has_workspace_ref,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "friendly_name",
+                                             friendly_name,
+                                             sizeof(friendly_name),
+                                             &has_friendly_name,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_bool(params, "restart", &restart,
+                                           &has_restart,
+                                           &validation_error) < 0 ||
+            (has_friendly_name &&
+             validate_field(friendly_name, "friendly name") < 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid process update request",
+                                             false, 0));
+        }
+        if (!has_friendly_name && !has_restart) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "process update has no changes",
+                                             false, 0));
+        }
+
+        char workspace_id[128];
+        const char *workspace_id_ptr = NULL;
+        if (has_workspace_ref && workspace_ref[0] != '\0') {
+            cubicle_workspace_record_t workspace;
+            if (find_workspace(state, workspace_ref, &workspace) < 0) {
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_NOT_FOUND,
+                                                 "workspace not found",
+                                                 false, 0));
+            }
+            snprintf(workspace_id, sizeof(workspace_id), "%s", workspace.id);
+            workspace_id_ptr = workspace_id;
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_ref, workspace_id_ptr, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                CUBICLE_CAP_PROCESS_SIGNAL)) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "process update access is required",
+                                             false, 0));
+        }
+
+        if (has_friendly_name) {
+            int conflict = 0;
+            if (process_friendly_name_conflicts(
+                    state, process.workspace_id, process.process_id,
+                    friendly_name, &conflict) < 0) {
+                int saved_errno = errno;
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_IO,
+                                                 "failed to check process name",
+                                                 true, saved_errno));
+            }
+            if (conflict) {
+                unlock_state(lock_fd);
+                MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                                 CUBICLE_ERR_CONFLICT,
+                                                 "friendly name already exists",
+                                                 false, 0));
+            }
+        }
+
+        process_record_update_t update = {
+            .friendly_name = has_friendly_name ? friendly_name : NULL,
+            .has_restart = has_restart,
+            .restart = restart ? 1 : 0,
+        };
+        int found = 0;
+        if (rewrite_process_records(state, process.process_id, &update, 0,
+                                    &found) < 0 || !found) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to update process",
+                                             true, saved_errno));
+        }
+        if (has_friendly_name) {
+            snprintf(process.friendly_name, sizeof(process.friendly_name), "%s",
+                     friendly_name);
+        }
+        if (has_restart) {
+            process.restart = restart ? 1 : 0;
+        }
+        unlock_state(lock_fd);
+
         char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
         if (process_info_json(state, id, &process, result, sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,

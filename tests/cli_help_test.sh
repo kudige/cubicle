@@ -21,6 +21,7 @@ rm -f "$PWD/cube-push-help.out" "$PWD/cube-push-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
 rm -f "$PWD/cube-run-help.out" "$PWD/cube-run-help.err"
 rm -f "$PWD/cube-restart-help.out" "$PWD/cube-restart-help.err"
+rm -f "$PWD/cube-update-help.out" "$PWD/cube-update-help.err"
 rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
 rm -f "$PWD/cube-defaults-help.out" "$PWD/cube-defaults-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"
@@ -61,6 +62,7 @@ grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] 
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube signal NAME SIGNAL' "$PWD/cube-help.out"
 grep -q 'cube push \[--eof\] \[--output\] NAME' "$PWD/cube-help.out"
+grep -q 'cube update NAME \[--restart|--no-restart|--name NAME\]' "$PWD/cube-help.out"
 grep -q 'cube restart NAME' "$PWD/cube-help.out"
 grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME\]' "$PWD/cube-help.out"
 grep -q 'cube save NAME' "$PWD/cube-help.out"
@@ -114,6 +116,13 @@ if [ -s "$PWD/cube-restart-help.err" ]; then
     exit 1
 fi
 grep -q 'cube restart NAME' "$PWD/cube-restart-help.out"
+
+cube update --help >"$PWD/cube-update-help.out" 2>"$PWD/cube-update-help.err"
+if [ -s "$PWD/cube-update-help.err" ]; then
+    echo "cube update help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube update NAME \[--restart|--no-restart|--name NAME\]' "$PWD/cube-update-help.out"
 
 cube run --help >"$PWD/cube-run-help.out" 2>"$PWD/cube-run-help.err"
 if [ -s "$PWD/cube-run-help.err" ]; then
@@ -179,6 +188,7 @@ rm -f "$PWD/cube-help.out" "$PWD/cube-help.err"
 rm -f "$PWD/cube-kill-help.out" "$PWD/cube-kill-help.err"
 rm -f "$PWD/cube-connect-help.out" "$PWD/cube-connect-help.err"
 rm -f "$PWD/cube-logs-help.out" "$PWD/cube-logs-help.err"
+rm -f "$PWD/cube-update-help.out" "$PWD/cube-update-help.err"
 rm -f "$PWD/cube-save-help.out" "$PWD/cube-save-help.err"
 rm -f "$PWD/cube-defaults-help.out" "$PWD/cube-defaults-help.err"
 rm -f "$PWD/cube-missing-manager.out" "$PWD/cube-missing-manager.err"

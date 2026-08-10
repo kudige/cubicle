@@ -113,6 +113,47 @@ cubicle_error_code_t cubicle_process_kill(cubicle_client_t *client,
     return simple_string_rpc(client, "process.kill", "process_id", process_id, NULL);
 }
 
+cubicle_error_code_t cubicle_process_update(cubicle_client_t *client,
+    const char *process_id_or_name, const cubicle_process_update_options_t *options,
+    cubicle_process_info_t *process_out)
+{
+    if (client == NULL || process_id_or_name == NULL ||
+        process_id_or_name[0] == '\0' || options == NULL ||
+        process_out == NULL ||
+        (options->friendly_name == NULL && !options->has_restart)) {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"process\":");
+    cubicle_json_builder_append_string(&params, process_id_or_name);
+    if (options->workspace_id != NULL) {
+        cubicle_json_builder_append(&params, ",\"workspace_id\":");
+        cubicle_json_builder_append_string(&params, options->workspace_id);
+    }
+    if (options->friendly_name != NULL) {
+        cubicle_json_builder_append(&params, ",\"friendly_name\":");
+        cubicle_json_builder_append_string(&params, options->friendly_name);
+    }
+    if (options->has_restart) {
+        cubicle_json_builder_append(&params, options->restart
+                                                 ? ",\"restart\":true"
+                                                 : ",\"restart\":false");
+    }
+    append_common_options(&params, &options->request);
+    cubicle_json_builder_append(&params, "}");
+    char *response = NULL;
+    cubicle_error_code_t code =
+        rpc_object(client, "process.update", params.data, &response);
+    cubicle_json_builder_cleanup(&params);
+    if (code != CUBICLE_OK) return code;
+    code = parse_process_info(result_object(client, response), process_out) == 0
+               ? CUBICLE_OK
+               : set_client_error(client, CUBICLE_ERR_PROTOCOL, 0,
+                                  "invalid process result");
+    free(response);
+    return code;
+}
+
 static cubicle_error_code_t process_save_rpc(cubicle_client_t *client,
     const char *method, const char *process_id,
     cubicle_process_info_t *process_out)

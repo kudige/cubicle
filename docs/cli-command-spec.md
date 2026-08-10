@@ -343,6 +343,9 @@ cube ps --json
 `cube ps -a` lists all workspaces, with each workspace followed by the cubes
 belonging to it. `--all` is the equivalent long option.
 
+In the current implementation, restart-enabled processes are marked with a
+trailing `*` at the end of their process line.
+
 Later:
 
 ```console
@@ -515,6 +518,7 @@ cube signal NAME SIGNAL
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
 cube restart NAME
+cube update NAME [--restart|--no-restart|--name NAME]
 cube push [--eof] [--output] NAME
 cube save NAME
 cube unsave NAME
@@ -540,6 +544,10 @@ Recommended semantics:
   process with the same cube name, mode, directory, and stored argv. Processes
   without stored argv metadata cannot be restarted. Saved process records must
   be unsaved first.
+- `update`: change retained process attributes without restarting the process.
+  `--restart` enables manager-start restart, `--no-restart` disables it, and
+  `--name NAME` renames the process within its workspace. The target may be
+  written as `WORKSPACE.NAME`.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--eof` and printing new output with `--output`.
 - `save`: mark a process record so cleanup commands skip it.

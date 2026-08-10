@@ -429,6 +429,23 @@ int main(void)
            CUBICLE_OK);
     assert(strcmp(started.friendly_name, "api-started") == 0);
 
+    cubicle_process_update_options_t update_options;
+    memset(&update_options, 0, sizeof(update_options));
+    update_options.workspace_id = workspace_id;
+    update_options.friendly_name = "api-updated";
+    update_options.has_restart = true;
+    update_options.restart = true;
+    cubicle_process_info_t updated;
+    memset(&updated, 0, sizeof(updated));
+    // Endpoint test for process.update
+    assert(cubicle_process_update(client, started.id, &update_options,
+                                  &updated) == CUBICLE_OK);
+    assert(strcmp(updated.friendly_name, "api-updated") == 0);
+    assert(updated.restart);
+    assert(cubicle_process_get(client, "api-updated", workspace_id,
+                               &started) == CUBICLE_OK);
+    assert(strcmp(started.id, updated.id) == 0);
+
     // Endpoint test for process.signal
     assert(cubicle_process_signal(client, started.id, SIGUSR1) ==
            CUBICLE_OK);

@@ -168,6 +168,15 @@ def params_for_command(args):
         }
     if command == "process-kill":
         return "process.kill", {"process_id": args.process}
+    if command == "process-update":
+        params = {"process": args.process}
+        if args.workspace is not None:
+            params["workspace_id"] = args.workspace
+        if args.friendly_name is not None:
+            params["friendly_name"] = args.friendly_name
+        if args.restart is not None:
+            params["restart"] = args.restart
+        return "process.update", params
     if command == "process-save":
         return "process.save", {"process_id": args.process}
     if command == "process-unsave":
@@ -355,6 +364,12 @@ def build_parser():
 
     process_kill = subparsers.add_parser("process-kill")
     process_kill.add_argument("process")
+
+    process_update = subparsers.add_parser("process-update")
+    process_update.add_argument("process")
+    process_update.add_argument("--workspace")
+    process_update.add_argument("--friendly-name")
+    process_update.add_argument("--restart", action=argparse.BooleanOptionalAction)
 
     process_save = subparsers.add_parser("process-save")
     process_save.add_argument("process")

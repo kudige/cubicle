@@ -127,6 +127,34 @@ json_id() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
 }
 
+update_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name update-me -- sh -c 'sleep 30' | json_id)
+api process-update update-me --workspace "$workspace_id" --restart | grep -q '"restart":true'
+cube ps >"$tmpdir/update-ps-restart.out"
+grep -q '^update-me	stream	running \*$' "$tmpdir/update-ps-restart.out"
+update_output=$(cube update update-me --name updated-me --no-restart)
+if [ "$update_output" != "Process updated-me updated (restart disabled)" ]; then
+    echo "unexpected update output: $update_output" >&2
+    exit 1
+fi
+cube ps >"$tmpdir/update-ps-no-restart.out"
+grep -q '^updated-me	stream	running$' "$tmpdir/update-ps-no-restart.out"
+cube inspect updated-me >"$tmpdir/update-inspect.out"
+grep -q '^Name:        updated-me$' "$tmpdir/update-inspect.out"
+grep -q '^Restart:     no$' "$tmpdir/update-inspect.out"
+set +e
+cube update updated-me --name build >"$tmpdir/update-conflict.out" 2>&1
+update_conflict_status=$?
+set -e
+if [ "$update_conflict_status" -eq 0 ]; then
+    echo "update should reject conflicting friendly name" >&2
+    exit 1
+fi
+grep -q 'friendly name already exists' "$tmpdir/update-conflict.out"
+api process-kill "$update_process_id" >/dev/null
+api process-wait "$update_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove updated-me >/dev/null
+
 inspect_command_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name inspect-command -- \
     python3 -c 'import sys; sys.stdout.write("inspect-command"); sys.stderr.write("inspect-error")' | json_id)

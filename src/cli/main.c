@@ -140,6 +140,7 @@ static void print_usage(FILE *stream)
             "  cube events [--follow [--iterations N]]\n"
             "  cube connect [--ro] NAME\n"
             "  cube push [--eof] [--output] NAME\n"
+            "  cube update NAME [--restart|--no-restart|--name NAME]\n"
             "  cube restart NAME\n"
             "  cube signal NAME SIGNAL\n"
             "  cube stop NAME\n"
@@ -195,6 +196,13 @@ static int print_command_usage(const char *command, FILE *stream)
     if (strcmp(command, "restart") == 0) {
         fprintf(stream,
                 "Usage:\n  cube restart NAME\n"
+                "\nNAME may be WORKSPACE.NAME.\n");
+        return 0;
+    }
+    if (strcmp(command, "update") == 0) {
+        fprintf(stream,
+                "Usage:\n"
+                "  cube update NAME [--restart|--no-restart|--name NAME]\n"
                 "\nNAME may be WORKSPACE.NAME.\n");
         return 0;
     }
@@ -364,6 +372,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "inspect") == 0 ||
            strcmp(command, "connect") == 0 ||
            strcmp(command, "push") == 0 ||
+           strcmp(command, "update") == 0 ||
            strcmp(command, "restart") == 0 ||
            strcmp(command, "signal") == 0 ||
            strcmp(command, "stop") == 0 ||
@@ -2027,10 +2036,13 @@ static int print_process_list_result(const char *workspace,
         char name[CUBICLE_NAME_MAX];
         char mode[32];
         char state[32];
+        int restart = 0;
         if (json_string_field(item, "friendly_name", name, sizeof(name)) == 0 &&
             json_string_field(item, "mode", mode, sizeof(mode)) == 0 &&
-            json_string_field(item, "state", state, sizeof(state)) == 0) {
-            printf("%s\t%s\t%s\n", name, mode, state);
+            json_string_field(item, "state", state, sizeof(state)) == 0 &&
+            json_bool_field(item, "restart", &restart) == 0) {
+            printf("%s\t%s\t%s%s\n", name, mode, state,
+                   restart ? " *" : "");
         }
     }
 
@@ -3034,6 +3046,132 @@ static int process_state_is_live(const char *state)
            strcmp(state, "starting") == 0 ||
            strcmp(state, "stopping") == 0 ||
            strcmp(state, "draining") == 0;
+}
+
+static int process_update(const char *manager_socket,
+                          const cube_options_t *options,
+                          int argc,
+                          char **argv,
+                          int command_index)
+{
+    if (command_index + 1 >= argc) {
+        fprintf(stderr, "cube: update requires a process name\n");
+        return 2;
+    }
+
+    const char *process_name = argv[command_index + 1];
+    const char *new_name = NULL;
+    int has_restart = 0;
+    int restart = 0;
+    for (int i = command_index + 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--restart") == 0) {
+            has_restart = 1;
+            restart = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--no-restart") == 0) {
+            has_restart = 1;
+            restart = 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--name") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cube: --name requires a value\n");
+                return 2;
+            }
+            new_name = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_command_usage("update", stdout);
+            return 0;
+        }
+        fprintf(stderr, "cube: unknown update option '%s'\n", argv[i]);
+        return 2;
+    }
+    if (new_name == NULL && !has_restart) {
+        fprintf(stderr, "cube: update requires --restart, --no-restart, or --name\n");
+        return 2;
+    }
+    if (new_name != NULL && !valid_name(new_name)) {
+        fprintf(stderr, "cube: invalid process name '%s'\n", new_name);
+        return 2;
+    }
+
+    cube_process_ref_t ref;
+    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    if (ref_result != 0) {
+        return ref_result;
+    }
+
+    cubicle_json_builder_t params = {0};
+    if (cubicle_json_builder_append(&params, "{\"process\":") < 0 ||
+        cubicle_json_builder_append_string(&params, ref.process) < 0 ||
+        cubicle_json_builder_append(&params, ",\"workspace_id\":") < 0 ||
+        cubicle_json_builder_append_string(&params, ref.workspace) < 0) {
+        cubicle_json_builder_cleanup(&params);
+        fprintf(stderr, "cube: failed to build process update request\n");
+        return 2;
+    }
+    if (new_name != NULL &&
+        (cubicle_json_builder_append(&params, ",\"friendly_name\":") < 0 ||
+         cubicle_json_builder_append_string(&params, new_name) < 0)) {
+        cubicle_json_builder_cleanup(&params);
+        fprintf(stderr, "cube: failed to build process update request\n");
+        return 2;
+    }
+    if (has_restart &&
+        cubicle_json_builder_append(&params, restart ? ",\"restart\":true"
+                                                    : ",\"restart\":false") < 0) {
+        cubicle_json_builder_cleanup(&params);
+        fprintf(stderr, "cube: failed to build process update request\n");
+        return 2;
+    }
+    if (cubicle_json_builder_append(&params, "}") < 0) {
+        cubicle_json_builder_cleanup(&params);
+        fprintf(stderr, "cube: failed to build process update request\n");
+        return 2;
+    }
+
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "process.update", params.data,
+                     &response) < 0) {
+        cubicle_json_builder_cleanup(&params);
+        return print_workspace_rpc_error(&response, ref.workspace,
+                                         ref.from_selected_workspace);
+    }
+    cubicle_json_builder_cleanup(&params);
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+    char updated_name[CUBICLE_NAME_MAX];
+    int updated_restart = 0;
+    if (json_string_field(document.root, "friendly_name", updated_name,
+                          sizeof(updated_name)) < 0 ||
+        json_bool_field(document.root, "restart", &updated_restart) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process response\n");
+        return 2;
+    }
+    printf("Process %s updated", updated_name);
+    if (has_restart) {
+        printf(" (restart %s)", updated_restart ? "enabled" : "disabled");
+    }
+    printf("\n");
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
 }
 
 static int process_restart(const char *manager_socket,
@@ -4999,6 +5137,11 @@ int main(int argc, char **argv)
     if (strcmp(command, "push") == 0) {
         return process_push(manager_endpoint, &options, argc, argv,
                             command_index);
+    }
+
+    if (strcmp(command, "update") == 0) {
+        return process_update(manager_endpoint, &options, argc, argv,
+                              command_index);
     }
 
     if (strcmp(command, "restart") == 0) {

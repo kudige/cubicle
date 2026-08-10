@@ -22,6 +22,7 @@ cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
 cube push [--eof] [--output] NAME
+cube update NAME [--restart|--no-restart|--name NAME]
 cube restart NAME
 cube stop NAME
 cube kill [--all] [--cleanup] [NAME]
@@ -208,7 +209,8 @@ cube --json run --bg --stream /bin/sleep 30
 ## Process Listing And Inspection
 
 `cube ps`
-: List process names, modes, and states in the selected workspace.
+: List process names, modes, and states in the selected workspace. A trailing
+  `*` marks a process configured for manager-start restart.
 
 `cube ps -a`
 : List every workspace, with the cubes in each workspace.
@@ -383,6 +385,11 @@ cube push --eof --output worker < input.txt
 : Kill the process if it is running, remove the old unsaved process record, and
   start a new background process with the same name, mode, directory, and stored
   command argv.
+
+`cube update NAME [--restart|--no-restart|--name NAME]`
+: Change retained process attributes. `--restart` enables manager-start
+  restart, `--no-restart` disables it, and `--name` renames the process within
+  its workspace.
 
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,

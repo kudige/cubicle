@@ -620,6 +620,23 @@ include_completed
 pagination
 ```
 
+#### `process.update`
+
+Updates retained process attributes without restarting the process.
+
+Request:
+
+```text
+process_id | process
+workspace_id?              # required when resolving process by friendly name
+friendly_name?
+restart?
+```
+
+At least one mutable attribute must be present. `friendly_name` must remain
+unique within the process workspace. Response contains current process
+information.
+
 #### `process.signal`
 
 Request:

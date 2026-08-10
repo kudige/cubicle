@@ -95,6 +95,14 @@ typedef struct cubicle_process_terminate_options {
     bool force_after_grace;
 } cubicle_process_terminate_options_t;
 
+typedef struct cubicle_process_update_options {
+    const char *workspace_id;
+    const char *friendly_name;
+    bool has_restart;
+    bool restart;
+    cubicle_request_options_t request;
+} cubicle_process_update_options_t;
+
 typedef struct cubicle_output_chunk {
     uint64_t start_offset;
     uint64_t next_offset;
@@ -109,6 +117,7 @@ cubicle_error_code_t cubicle_process_list(cubicle_client_t *client, const cubicl
 cubicle_error_code_t cubicle_process_signal(cubicle_client_t *client, const char *process_id, int signal_number);
 cubicle_error_code_t cubicle_process_terminate(cubicle_client_t *client, const char *process_id, const cubicle_process_terminate_options_t *options);
 cubicle_error_code_t cubicle_process_kill(cubicle_client_t *client, const char *process_id);
+cubicle_error_code_t cubicle_process_update(cubicle_client_t *client, const char *process_id_or_name, const cubicle_process_update_options_t *options, cubicle_process_info_t *process_out);
 cubicle_error_code_t cubicle_process_save(cubicle_client_t *client, const char *process_id, cubicle_process_info_t *process_out);
 cubicle_error_code_t cubicle_process_unsave(cubicle_client_t *client, const char *process_id, cubicle_process_info_t *process_out);
 cubicle_error_code_t cubicle_process_wait(cubicle_client_t *client, const char *process_id, int timeout_ms, cubicle_process_info_t *process_out);
