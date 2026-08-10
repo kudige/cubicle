@@ -524,6 +524,7 @@ cube save NAME
 cube unsave NAME
 cube remove NAME
 cube cleanup
+cube shutdown [--manager-only]
 ```
 
 Recommended semantics:
@@ -555,6 +556,8 @@ Recommended semantics:
 - `remove`: remove retained process state; fail if running unless explicitly forced.
 - `cleanup`: remove retained terminal process state in the current workspace;
   skip live and saved processes.
+- `shutdown`: stop all managed processes and then stop the manager daemon.
+  `--manager-only` preserves the older manager-only shutdown behavior.
 
 Output/history commands:
 

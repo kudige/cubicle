@@ -31,6 +31,7 @@ cube save NAME
 cube unsave NAME
 cube remove NAME
 cube cleanup
+cube shutdown [--manager-only]
 cube access list
 cube access add PUBLIC_KEY_OR_FILE [--role observer|operator|owner] [--label LABEL]
 cube access set-role KEY_ID observer|operator|owner
@@ -411,6 +412,10 @@ cube push --eof --output worker < input.txt
 : Remove completed/removable process records in the selected workspace and
   report how many live and saved processes were skipped.
 
+`cube shutdown`
+: Stop all managed processes and then ask the manager daemon to exit. Use
+  `--manager-only` to exit the manager without stopping managed processes.
+
 Examples:
 
 ```sh
@@ -424,6 +429,7 @@ cube save important-build
 cube unsave important-build
 cube remove old-build
 cube cleanup
+cube shutdown
 cube --json cleanup
 ```
 

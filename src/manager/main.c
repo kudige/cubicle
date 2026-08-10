@@ -2716,6 +2716,184 @@ static int read_metadata_field(const char *metadata_path, const char *field,
     return -1;
 }
 
+typedef struct shutdown_target {
+    cubicle_process_record_t process;
+    int terminal;
+} shutdown_target_t;
+
+static int kill_process_group_from_metadata(const manager_state_t *state,
+                                            const char *process_id,
+                                            int signal_number)
+{
+    char controller_state[PATH_MAX];
+    char metadata_path[PATH_MAX];
+    char pgid_value[64];
+    if (controller_state_path(controller_state, state, process_id) < 0) {
+        return -1;
+    }
+    int length = snprintf(metadata_path, sizeof(metadata_path), "%s/metadata",
+                          controller_state);
+    if (length < 0 || (size_t)length >= sizeof(metadata_path) ||
+        read_metadata_field(metadata_path, "pgid", pgid_value,
+                            sizeof(pgid_value)) < 0) {
+        return -1;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    long pgid = strtol(pgid_value, &end, 10);
+    if (errno != 0 || end == pgid_value || *end != '\0' || pgid <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (kill(-(pid_t)pgid, signal_number) < 0 && errno != ESRCH) {
+        return -1;
+    }
+    return 0;
+}
+
+static int shutdown_target_signal(const manager_state_t *state,
+                                  const shutdown_target_t *target,
+                                  int signal_number)
+{
+    if (signal_controller(&target->process, signal_number) == 0) {
+        return 0;
+    }
+    return kill_process_group_from_metadata(state, target->process.process_id,
+                                            signal_number);
+}
+
+static int collect_shutdown_targets(const manager_state_t *state,
+                                    shutdown_target_t **targets_out,
+                                    size_t *count_out)
+{
+    *targets_out = NULL;
+    *count_out = 0;
+
+    FILE *file = open_state_file_for_read(state, "processes.tsv");
+    if (file == NULL) {
+        return 0;
+    }
+
+    shutdown_target_t *targets = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    char line[CUBICLE_PROCESS_RECORD_LINE_MAX];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cubicle_process_record_t process;
+        if (cubicle_parse_process_record(line, &process) != 0) {
+            continue;
+        }
+        refresh_observed_process_state(state, &process);
+        if (process_is_terminal_state(process.state)) {
+            continue;
+        }
+        if (count == capacity) {
+            size_t new_capacity = capacity == 0 ? 16 : capacity * 2;
+            shutdown_target_t *new_targets =
+                realloc(targets, new_capacity * sizeof(*targets));
+            if (new_targets == NULL) {
+                int saved_errno = errno;
+                free(targets);
+                fclose(file);
+                errno = saved_errno;
+                return -1;
+            }
+            targets = new_targets;
+            capacity = new_capacity;
+        }
+        targets[count].process = process;
+        targets[count].terminal = 0;
+        ++count;
+    }
+    fclose(file);
+
+    *targets_out = targets;
+    *count_out = count;
+    return 0;
+}
+
+static size_t refresh_shutdown_targets(const manager_state_t *state,
+                                       shutdown_target_t *targets,
+                                       size_t count)
+{
+    size_t terminal_count = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (targets[i].terminal) {
+            ++terminal_count;
+            continue;
+        }
+        char latest_state[32];
+        if (process_observed_state(state, &targets[i].process, latest_state,
+                                   sizeof(latest_state)) == 0 &&
+            process_is_terminal_state(latest_state)) {
+            snprintf(targets[i].process.state, sizeof(targets[i].process.state),
+                     "%s", latest_state);
+            targets[i].terminal = 1;
+            ++terminal_count;
+        }
+    }
+    return terminal_count;
+}
+
+static size_t wait_for_shutdown_targets(const manager_state_t *state,
+                                        shutdown_target_t *targets,
+                                        size_t count,
+                                        unsigned int timeout_ms)
+{
+    size_t terminal_count = refresh_shutdown_targets(state, targets, count);
+    unsigned int waited_ms = 0;
+    while (terminal_count < count && waited_ms < timeout_ms) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 50000000L};
+        nanosleep(&delay, NULL);
+        waited_ms += 50;
+        terminal_count = refresh_shutdown_targets(state, targets, count);
+    }
+    return terminal_count;
+}
+
+static int stop_managed_processes_for_shutdown(const manager_state_t *state,
+                                               size_t *target_count_out,
+                                               size_t *stopped_count_out,
+                                               size_t *failed_count_out)
+{
+    *target_count_out = 0;
+    *stopped_count_out = 0;
+    *failed_count_out = 0;
+
+    shutdown_target_t *targets = NULL;
+    size_t count = 0;
+    if (collect_shutdown_targets(state, &targets, &count) < 0) {
+        return -1;
+    }
+    *target_count_out = count;
+
+    for (size_t i = 0; i < count; ++i) {
+        if (shutdown_target_signal(state, &targets[i], SIGTERM) < 0) {
+            ++*failed_count_out;
+        }
+    }
+
+    size_t stopped_count = wait_for_shutdown_targets(state, targets, count, 2000);
+    if (stopped_count < count) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!targets[i].terminal &&
+                shutdown_target_signal(state, &targets[i], SIGKILL) < 0) {
+                ++*failed_count_out;
+            }
+        }
+        stopped_count = wait_for_shutdown_targets(state, targets, count, 2000);
+    }
+
+    *stopped_count_out = stopped_count;
+    if (stopped_count < count) {
+        *failed_count_out += count - stopped_count;
+    }
+    free(targets);
+    (void)reconcile_process_records(state);
+    return 0;
+}
+
 static int launch_controller(const manager_state_t *state,
                              const char *controller_state,
                              const char *controller_log,
@@ -4098,8 +4276,45 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     if (strcmp(method, "manager.shutdown") == 0) {
+        bool stop_managed_processes = false;
+        int has_stop_managed_processes = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_optional_bool(params, "stop_managed_processes",
+                                           &stop_managed_processes,
+                                           &has_stop_managed_processes,
+                                           &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid shutdown request",
+                                             false, 0));
+        }
+
+        size_t target_count = 0;
+        size_t stopped_count = 0;
+        size_t failed_count = 0;
+        if (has_stop_managed_processes && stop_managed_processes &&
+            stop_managed_processes_for_shutdown(state, &target_count,
+                                                &stopped_count,
+                                                &failed_count) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to stop managed processes",
+                                             true, errno));
+        }
         runtime_request_shutdown(connection->runtime);
-        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+        char result[160];
+        int length = snprintf(
+            result, sizeof(result),
+            "{\"stop_managed_processes\":%s,\"target_count\":%zu,\"stopped_count\":%zu,\"failed_count\":%zu}",
+            has_stop_managed_processes && stop_managed_processes ? "true" : "false",
+            target_count, stopped_count, failed_count);
+        if (length < 0 || (size_t)length >= sizeof(result)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode shutdown result",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
     }
 
     if (strcmp(method, "manager.reconcile") == 0) {

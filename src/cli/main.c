@@ -149,6 +149,7 @@ static void print_usage(FILE *stream)
             "  cube unsave NAME\n"
             "  cube remove NAME\n"
             "  cube cleanup\n"
+            "  cube shutdown [--manager-only]\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
             "  cube config show|effective|paths|validate\n"
             "  cube defaults show|set|reset ...\n"
@@ -270,6 +271,13 @@ static int print_command_usage(const char *command, FILE *stream)
         fprintf(stream, "Usage:\n  cube cleanup\n");
         return 0;
     }
+    if (strcmp(command, "shutdown") == 0) {
+        fprintf(stream,
+                "Usage:\n"
+                "  cube shutdown [--manager-only]\n"
+                "\nBy default, shutdown stops all managed processes before the manager exits.\n");
+        return 0;
+    }
     if (strcmp(command, "access") == 0) {
         fprintf(stream,
                 "Usage:\n"
@@ -381,6 +389,7 @@ static int command_requires_manager(const char *command)
            strcmp(command, "unsave") == 0 ||
            strcmp(command, "remove") == 0 ||
            strcmp(command, "cleanup") == 0 ||
+           strcmp(command, "shutdown") == 0 ||
            strcmp(command, "access") == 0 ||
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0;
@@ -2352,6 +2361,73 @@ static int process_cleanup(const char *manager_socket,
     printf("Skipped %llu saved processes\n",
            (unsigned long long)counts.skipped_saved_count);
     return 0;
+}
+
+static int manager_shutdown_command(const char *manager_socket,
+                                    const cube_options_t *options,
+                                    int argc,
+                                    char **argv,
+                                    int command_index)
+{
+    int stop_managed_processes = 1;
+    for (int i = command_index + 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--manager-only") == 0) {
+            stop_managed_processes = 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_command_usage("shutdown", stdout);
+            return 0;
+        }
+        fprintf(stderr, "cube: unknown shutdown option '%s'\n", argv[i]);
+        return 2;
+    }
+
+    char params[64];
+    snprintf(params, sizeof(params), "{\"stop_managed_processes\":%s}",
+             stop_managed_processes ? "true" : "false");
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "manager.shutdown", params, &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    if (options->json) {
+        printf("%s\n", response.result_json);
+        cleanup_rpc_response(&response);
+        return 0;
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid shutdown response\n");
+        return 2;
+    }
+    uint64_t target_count = 0;
+    uint64_t stopped_count = 0;
+    uint64_t failed_count = 0;
+    if (json_u64_field(document.root, "target_count", &target_count) < 0 ||
+        json_u64_field(document.root, "stopped_count", &stopped_count) < 0 ||
+        json_u64_field(document.root, "failed_count", &failed_count) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid shutdown response\n");
+        return 2;
+    }
+
+    if (stop_managed_processes) {
+        printf("Stopped %llu of %llu managed processes\n",
+               (unsigned long long)stopped_count,
+               (unsigned long long)target_count);
+        if (failed_count > 0) {
+            printf("Failed to stop %llu managed processes\n",
+                   (unsigned long long)failed_count);
+        }
+    }
+    printf("Manager shutdown requested\n");
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return failed_count > 0 ? 1 : 0;
 }
 
 static int shell_arg_is_plain(const char *value)
@@ -5108,6 +5184,11 @@ int main(int argc, char **argv)
             return 2;
         }
         return process_cleanup(manager_endpoint, &options);
+    }
+
+    if (strcmp(command, "shutdown") == 0) {
+        return manager_shutdown_command(manager_endpoint, &options, argc, argv,
+                                        command_index);
     }
 
     if (strcmp(command, "access") == 0) {

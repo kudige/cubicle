@@ -847,7 +847,25 @@ if [ "$status" -ne 2 ]; then
 fi
 grep -q 'run requires a command' "$tmpdir/run-missing.err"
 
-shutdown_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown)
-printf "%s" "$shutdown_response" | grep -q '"success": true'
+shutdown_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name shutdown-sleep -- sh -c 'sleep 30' | json_id)
+for _ in $(seq 1 100); do
+    if [ -f "$state_dir/controllers/$shutdown_process_id/metadata" ]; then
+        break
+    fi
+    sleep 0.05
+done
+shutdown_child_pid=$(sed -n 's/^pid=//p' "$state_dir/controllers/$shutdown_process_id/metadata")
+if [ -z "$shutdown_child_pid" ] || [ ! -d "/proc/$shutdown_child_pid" ]; then
+    echo "shutdown test child did not start" >&2
+    exit 1
+fi
+shutdown_output=$(cube shutdown)
+printf "%s\n" "$shutdown_output" | grep -q '^Stopped [1-9][0-9]* of [1-9][0-9]* managed processes$'
+printf "%s\n" "$shutdown_output" | grep -q '^Manager shutdown requested$'
 wait "$manager_pid"
 manager_pid=
+if [ -d "/proc/$shutdown_child_pid" ]; then
+    echo "cube shutdown did not stop managed child $shutdown_child_pid" >&2
+    exit 1
+fi

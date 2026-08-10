@@ -458,7 +458,19 @@ failed_count
 
 #### `manager.shutdown`
 
-Stops the manager daemon without stopping process controllers or managed processes unless an explicit separate option is supplied.
+Stops the manager daemon. By default this does not stop process controllers or
+managed processes.
+
+Request:
+
+```text
+stop_managed_processes?    # default false
+```
+
+When `stop_managed_processes` is true, the manager asks every live controller
+to terminate its process group, falls back to the recorded process group when a
+controller is unavailable, escalates to forceful termination after a short
+grace period, reconciles process records, and then exits.
 
 ### 9.2 Workspace methods
 

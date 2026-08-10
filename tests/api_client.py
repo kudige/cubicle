@@ -100,7 +100,10 @@ def params_for_command(args):
             params["workspace_id"] = args.workspace
         return "manager.cleanup", params
     if command == "shutdown":
-        return "manager.shutdown", {}
+        params = {}
+        if args.stop_managed_processes:
+            params["stop_managed_processes"] = True
+        return "manager.shutdown", params
     if command == "workspace-create":
         params = {"name": args.name}
         if args.directory is not None:
@@ -304,7 +307,8 @@ def build_parser():
     subparsers.add_parser("status")
     cleanup = subparsers.add_parser("cleanup")
     cleanup.add_argument("--workspace")
-    subparsers.add_parser("shutdown")
+    shutdown = subparsers.add_parser("shutdown")
+    shutdown.add_argument("--stop-managed-processes", action="store_true")
 
     workspace_create = subparsers.add_parser("workspace-create")
     workspace_create.add_argument("--dir", dest="directory")
