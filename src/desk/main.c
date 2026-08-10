@@ -3116,11 +3116,15 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
                  last != NULL && last->message[0] != '\0'
                      ? last->message
                      : "initial controller resize failed");
+        cubicle_attachment_disconnect(pane->attachment);
+        pane->attachment = NULL;
         return code;
     }
 
     if (reload_pane_snapshot(pane) < 0) {
         snprintf(error, error_size, "terminal model initialization failed");
+        cubicle_attachment_disconnect(pane->attachment);
+        pane->attachment = NULL;
         return CUBICLE_ERR_INTERNAL;
     }
     code = cubicle_attachment_stream_start(pane->attachment,
@@ -3284,6 +3288,24 @@ static int desk_refresh_ended_panes(desk_session_t *session,
         }
         if (!desk_process_has_ended(updated.state)) {
             pane->process = updated;
+            if (pane->attachment == NULL) {
+                char error[256];
+                desk_debug_log("event=pane_reattach_start pane=%zu process=%s",
+                               i + 1, pane->process.friendly_name);
+                cubicle_error_code_t attach_code =
+                    attach_pane(session, i, error, sizeof(error));
+                if (attach_code == CUBICLE_OK) {
+                    desk_debug_log("event=pane_reattach_ok pane=%zu process=%s",
+                                   i + 1, pane->process.friendly_name);
+                    if (layout_changed != NULL) {
+                        *layout_changed = true;
+                    }
+                } else {
+                    desk_debug_log("event=pane_reattach_failed pane=%zu process=%s code=%d message=\"%s\"",
+                                   i + 1, pane->process.friendly_name,
+                                   (int)attach_code, error);
+                }
+            }
             ++i;
             continue;
         }

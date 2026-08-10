@@ -325,6 +325,13 @@ void close_all_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIE
     }
 }
 
+static int control_client_is_attached(control_client_kind_t kind)
+{
+    return kind == CONTROL_CLIENT_ATTACHED_STDOUT ||
+           kind == CONTROL_CLIENT_ATTACHED_STDERR ||
+           kind == CONTROL_CLIENT_ATTACHED_STDIN;
+}
+
 static const char *stream_file_name(const char *stream)
 {
     if (strcmp(stream, "stdout") == 0 || strcmp(stream, "out") == 0) {
@@ -1609,6 +1616,7 @@ void reap_idle_control_clients(control_client_t clients[CUBICLE_MAX_CONTROL_CLIE
     }
     for (size_t i = 0; i < CUBICLE_MAX_CONTROL_CLIENTS; ++i) {
         if (clients[i].kind == CONTROL_CLIENT_EMPTY ||
+            control_client_is_attached(clients[i].kind) ||
             clients[i].last_activity_ms == 0 ||
             now - clients[i].last_activity_ms <=
                 CUBICLE_CONTROL_CLIENT_IDLE_TIMEOUT_MS) {

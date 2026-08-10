@@ -325,6 +325,24 @@ target_compile_options(cubicle-manager-registry-unit-test PRIVATE
 
 add_test(NAME cubicle-manager-registry-unit-test COMMAND cubicle-manager-registry-unit-test)
 
+add_executable(cubicle-controller-idle-reap-test
+    tests/controller_idle_reap_test.c
+    src/controller/control.c
+    src/controller/io.c
+    src/controller/state.c
+)
+
+target_link_libraries(cubicle-controller-idle-reap-test PRIVATE cubicle_common)
+target_include_directories(cubicle-controller-idle-reap-test PRIVATE third_party/yyjson)
+
+target_compile_options(cubicle-controller-idle-reap-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(NAME cubicle-controller-idle-reap-test COMMAND cubicle-controller-idle-reap-test)
+
 if(CUBICLE_ENABLE_FUZZERS)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "CUBICLE_ENABLE_FUZZERS requires Clang")
