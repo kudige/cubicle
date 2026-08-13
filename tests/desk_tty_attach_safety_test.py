@@ -319,6 +319,8 @@ def run_desk_three_pane_default_layout(desk, cube, env):
     saw_top = False
     saw_right = False
     saw_left = False
+    saw_full_zoom_redraw = False
+    saw_full_zoom_restore = False
     saw_vertical_zoom_redraw = False
     saw_vertical_zoom_preserved = False
     sent_vertical_switch_at = 0.0
@@ -407,10 +409,36 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 ):
                     saw_left = True
                     captured.clear()
-                    os.write(master_fd, b"\x18sv")
+                    os.write(master_fd, b"\x18 ")
                     step = 5
 
-            if step == 5 and not saw_vertical_zoom_redraw:
+            if step == 5 and not saw_full_zoom_redraw:
+                if b"\x1b[H\x1b[2J" in captured:
+                    latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
+                    if (
+                        b"three-top" in latest_frame
+                        and b"three-bottom" not in latest_frame
+                        and b"three-right" not in latest_frame
+                    ):
+                        saw_full_zoom_redraw = True
+                        captured.clear()
+                        os.write(master_fd, b"\x18 ")
+                        step = 6
+
+            if step == 6 and not saw_full_zoom_restore:
+                if b"\x1b[H\x1b[2J" in captured:
+                    latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
+                    if (
+                        b"three-top" in latest_frame
+                        and b"three-bottom" in latest_frame
+                        and b"three-right" in latest_frame
+                    ):
+                        saw_full_zoom_restore = True
+                        captured.clear()
+                        os.write(master_fd, b"\x18sv")
+                        step = 7
+
+            if step == 7 and not saw_vertical_zoom_redraw:
                 if b"\x1b[H\x1b[2J" in captured:
                     latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
                     if (
@@ -422,9 +450,9 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                         captured.clear()
                         os.write(master_fd, b"q\x18n")
                         sent_vertical_switch_at = time.time()
-                        step = 6
+                        step = 8
 
-            if step == 6 and not saw_vertical_zoom_preserved:
+            if step == 8 and not saw_vertical_zoom_preserved:
                 if (
                     sent_vertical_switch_at > 0
                     and b"\x1b[H\x1b[2J" in captured
@@ -461,6 +489,12 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 "desk directional pane selection failed: "
                 f"bottom={saw_bottom} top={saw_top} right={saw_right} "
                 f"left={saw_left} output={captured!r}"
+            )
+        if not (saw_full_zoom_redraw and saw_full_zoom_restore):
+            raise AssertionError(
+                "desk full zoom did not redraw immediately: "
+                f"redraw={saw_full_zoom_redraw} "
+                f"restore={saw_full_zoom_restore} output={captured!r}"
             )
         if not (
             saw_vertical_zoom_redraw

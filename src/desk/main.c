@@ -4427,6 +4427,18 @@ static void render_all_panes(const desk_terminal_t *terminal,
     desk_render_notice(terminal, session);
 }
 
+static int desk_apply_layout_change(desk_session_t *session,
+                                    const desk_terminal_t *terminal)
+{
+    bool sizes_changed = false;
+    if (resize_all_panes(session, terminal, &sizes_changed) < 0) {
+        return -1;
+    }
+    (void)desk_save_layout(session);
+    render_all_panes(terminal, session);
+    return 0;
+}
+
 static void desk_render_notice(const desk_terminal_t *terminal,
                                const desk_session_t *session)
 {
@@ -6459,7 +6471,16 @@ static int desk_run_workspace(const char *workspace_arg,
                                    errno);
                     break;
                 }
-                if (session.open_menu.level != DESK_MENU_CLOSED) {
+                if (layout_changed &&
+                    session.open_menu.level == DESK_MENU_CLOSED) {
+                    if (desk_apply_layout_change(&session, &terminal) < 0) {
+                        result = 2;
+                        desk_debug_log("event=input_layout_apply_failed errno=%d",
+                                       errno);
+                        break;
+                    }
+                    layout_changed = false;
+                } else if (session.open_menu.level != DESK_MENU_CLOSED) {
                     render_all_panes(&terminal, &session);
                     desk_render_open_menu(&terminal, &session);
                 } else if (menu_closed) {
@@ -6472,10 +6493,10 @@ static int desk_run_workspace(const char *workspace_arg,
         }
 
         if (layout_changed) {
-            bool sizes_changed = false;
-            if (resize_all_panes(&session, &terminal, &sizes_changed) == 0) {
-                (void)desk_save_layout(&session);
-                render_all_panes(&terminal, &session);
+            if (desk_apply_layout_change(&session, &terminal) < 0) {
+                result = 2;
+                desk_debug_log("event=layout_apply_failed errno=%d", errno);
+                break;
             }
         }
         if (quit_requested) {
