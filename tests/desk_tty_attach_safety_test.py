@@ -320,7 +320,8 @@ def run_desk_three_pane_default_layout(desk, cube, env):
     saw_right = False
     saw_left = False
     saw_vertical_zoom_redraw = False
-    saw_horizontal_zoom_redraw = False
+    saw_vertical_zoom_preserved = False
+    sent_vertical_switch_at = 0.0
     deadline = time.time() + 6
     try:
         while time.time() < deadline:
@@ -411,17 +412,42 @@ def run_desk_three_pane_default_layout(desk, cube, env):
 
             if step == 5 and not saw_vertical_zoom_redraw:
                 if b"\x1b[H\x1b[2J" in captured:
-                    saw_vertical_zoom_redraw = True
-                    captured.clear()
-                    os.write(master_fd, b"h")
-                    step = 6
+                    latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
+                    if (
+                        b"three-top" in latest_frame
+                        and b"three-right" in latest_frame
+                        and b"three-bottom" not in latest_frame
+                    ):
+                        saw_vertical_zoom_redraw = True
+                        captured.clear()
+                        os.write(master_fd, b"q\x18n")
+                        sent_vertical_switch_at = time.time()
+                        step = 6
 
-            if step == 6 and not saw_horizontal_zoom_redraw:
-                if b"\x1b[H\x1b[2J" in captured:
-                    saw_horizontal_zoom_redraw = True
-                    os.write(master_fd, b"rq")
-                    os.write(master_fd, b"\x18q")
-                    sent_quit = True
+            if step == 6 and not saw_vertical_zoom_preserved:
+                if (
+                    sent_vertical_switch_at > 0
+                    and b"\x1b[H\x1b[2J" in captured
+                ):
+                    latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
+                    if (
+                        b"three-bottom" in latest_frame
+                        and b"three-right" in latest_frame
+                        and b"three-top" not in latest_frame
+                    ):
+                        saw_vertical_zoom_preserved = True
+                        os.write(master_fd, b"\x18srq")
+                        os.write(master_fd, b"\x18q")
+                        sent_quit = True
+                    elif (
+                        time.time() - sent_vertical_switch_at > 0.3
+                        and b"three-top" in latest_frame
+                        and b"three-bottom" in latest_frame
+                        and b"three-right" in latest_frame
+                    ):
+                        raise AssertionError(
+                            f"desk reset vertical zoom while switching panes: {latest_frame!r}"
+                        )
 
             if proc.poll() is not None:
                 break
@@ -436,11 +462,15 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 f"bottom={saw_bottom} top={saw_top} right={saw_right} "
                 f"left={saw_left} output={captured!r}"
             )
-        if not (saw_vertical_zoom_redraw and saw_horizontal_zoom_redraw):
+        if not (
+            saw_vertical_zoom_redraw
+            and saw_vertical_zoom_preserved
+        ):
             raise AssertionError(
                 "desk axis zoom did not redraw after hiding panes: "
                 f"vertical={saw_vertical_zoom_redraw} "
-                f"horizontal={saw_horizontal_zoom_redraw} output={captured!r}"
+                f"preserved={saw_vertical_zoom_preserved} "
+                f"output={captured!r}"
             )
         if proc.poll() is None:
             proc.wait(timeout=2)

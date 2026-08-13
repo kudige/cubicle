@@ -505,7 +505,6 @@ static void pane_layout_next(desk_pane_layout_t *panes)
         }
     }
     panes->active_pane_id = best != 0 ? best : fallback;
-    panes->zoom = DESK_ZOOM_NONE;
 }
 
 static void pane_layout_previous(desk_pane_layout_t *panes)
@@ -528,7 +527,6 @@ static void pane_layout_previous(desk_pane_layout_t *panes)
         }
     }
     panes->active_pane_id = best != 0 ? best : fallback;
-    panes->zoom = DESK_ZOOM_NONE;
 }
 
 static int pane_layout_next_id(const desk_pane_layout_t *panes);
@@ -881,7 +879,6 @@ static bool pane_layout_select_direction(desk_pane_layout_t *panes,
         return false;
     }
     panes->active_pane_id = best;
-    panes->zoom = DESK_ZOOM_NONE;
     return true;
 }
 
@@ -5733,15 +5730,16 @@ static bool desk_execute_command(desk_session_t *session,
                                  bool *quit_requested)
 {
     bool keep_zoom = session->zoomed;
+    desk_zoom_t previous_zoom = session->layout.zoom;
     if (strcmp(command, "pane.next") == 0) {
         pane_layout_next(&session->layout);
-        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
+        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
         *layout_changed = true;
         return true;
     }
     if (strcmp(command, "pane.previous") == 0) {
         pane_layout_previous(&session->layout);
-        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
+        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
         *layout_changed = true;
         return true;
     }
@@ -5763,7 +5761,7 @@ static bool desk_execute_command(desk_session_t *session,
         if (pane_layout_select_direction(&session->layout, terminal,
                                          session->pane_count, direction) &&
             session->layout.active_pane_id != previous) {
-            session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : DESK_ZOOM_NONE;
+            session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
             *layout_changed = true;
         }
         return true;
@@ -5990,8 +5988,10 @@ static int handle_input(desk_session_t *session,
                     desk_title_hit_test(terminal, session, mouse_row,
                                         mouse_col, &pane_id)) {
                     desk_debug_log("event=mouse_title_select pane=%d", pane_id);
+                    desk_zoom_t previous_zoom = session->layout.zoom;
                     session->layout.active_pane_id = pane_id;
-                    session->layout.zoom = DESK_ZOOM_NONE;
+                    session->layout.zoom =
+                        session->zoomed ? DESK_ZOOM_FULL : previous_zoom;
                     *layout_changed = true;
                 } else {
                     desk_suspend_mouse_for_selection(session);
