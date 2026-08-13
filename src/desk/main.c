@@ -136,6 +136,7 @@ typedef struct desk_pane_layout {
     int active_pane_id;
     int next_pane_id;
     desk_zoom_t zoom;
+    int zoom_pane_id;
     bool resize_mode;
     char status[128];
 } desk_pane_layout_t;
@@ -441,6 +442,20 @@ static bool pane_subtree_contains(const desk_pane_layout_t *panes, int node,
            pane_subtree_contains(panes, entry->second, pane_id);
 }
 
+static int pane_find_leaf_node(const desk_pane_layout_t *panes, int node,
+                               int pane_id);
+
+static int pane_layout_zoom_target(const desk_pane_layout_t *panes)
+{
+    if ((panes->zoom == DESK_ZOOM_HORIZONTAL ||
+         panes->zoom == DESK_ZOOM_VERTICAL) &&
+        panes->zoom_pane_id > 0 &&
+        pane_find_leaf_node(panes, panes->root, panes->zoom_pane_id) >= 0) {
+        return panes->zoom_pane_id;
+    }
+    return panes->active_pane_id;
+}
+
 static int pane_first_leaf(const desk_pane_layout_t *panes, int node)
 {
     if (node < 0 || !panes->nodes[node].used) {
@@ -578,7 +593,6 @@ static int pane_layout_split(desk_pane_layout_t *panes, desk_split_t split)
     panes->nodes[leaf].split_size = 0;
     panes->nodes[leaf].pane_id = 0;
     panes->active_pane_id = panes->nodes[new_leaf].pane_id;
-    panes->zoom = DESK_ZOOM_NONE;
     return 0;
 }
 
@@ -599,7 +613,6 @@ static int pane_layout_delete_active(desk_pane_layout_t *panes)
     panes->nodes[parent] = panes->nodes[sibling];
     panes->nodes[leaf].used = false;
     panes->nodes[sibling].used = false;
-    panes->zoom = DESK_ZOOM_NONE;
     return 0;
 }
 
@@ -618,6 +631,11 @@ static void pane_layout_compact_after_delete(desk_pane_layout_t *panes,
     }
     if (panes->active_pane_id > removed_pane_id) {
         panes->active_pane_id--;
+    }
+    if (panes->zoom_pane_id == removed_pane_id) {
+        panes->zoom_pane_id = panes->active_pane_id;
+    } else if (panes->zoom_pane_id > removed_pane_id) {
+        panes->zoom_pane_id--;
     }
     panes->next_pane_id = pane_layout_next_id(panes);
 }
@@ -710,10 +728,11 @@ static bool pane_layout_rect_for_node(const desk_pane_layout_t *panes,
         return false;
     }
 
+    int zoom_target = pane_layout_zoom_target(panes);
     bool first_has_active =
-        pane_subtree_contains(panes, entry->first, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->first, zoom_target);
     bool second_has_active =
-        pane_subtree_contains(panes, entry->second, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->second, zoom_target);
     bool zooms_this_split =
         panes->zoom == DESK_ZOOM_FULL ||
         (panes->zoom == DESK_ZOOM_HORIZONTAL &&
@@ -921,10 +940,11 @@ static bool pane_layout_rect_for_tree_node(const desk_pane_layout_t *panes,
         return false;
     }
 
+    int zoom_target = pane_layout_zoom_target(panes);
     bool first_has_active =
-        pane_subtree_contains(panes, entry->first, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->first, zoom_target);
     bool second_has_active =
-        pane_subtree_contains(panes, entry->second, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->second, zoom_target);
     bool zooms_this_split =
         panes->zoom == DESK_ZOOM_FULL ||
         (panes->zoom == DESK_ZOOM_HORIZONTAL &&
@@ -1128,7 +1148,6 @@ static int pane_layout_transpose(desk_pane_layout_t *panes,
             panes->nodes[sibling_split].second = active_second;
         }
 
-        panes->zoom = DESK_ZOOM_NONE;
         pane_layout_clear_status(panes);
         return 0;
     }
@@ -1202,6 +1221,7 @@ static int pane_layout_write(FILE *file, const desk_pane_layout_t *panes,
     fprintf(file, "active %d\n", panes->active_pane_id);
     fprintf(file, "next %d\n", panes->next_pane_id);
     fprintf(file, "zoom %d\n", (int)panes->zoom);
+    fprintf(file, "zoom_pane %d\n", panes->zoom_pane_id);
     for (size_t i = 0; i < sizeof(panes->nodes) / sizeof(panes->nodes[0]);
          ++i) {
         if (!panes->nodes[i].used) {
@@ -1257,6 +1277,10 @@ static int pane_layout_parse_line(desk_pane_layout_t *loaded,
         loaded->zoom = (desk_zoom_t)value;
         return 0;
     }
+    if (sscanf(line, "zoom_pane %d", &value) == 1) {
+        loaded->zoom_pane_id = value;
+        return 0;
+    }
 
     int index = -1;
     int pane_id = 0;
@@ -1303,6 +1327,12 @@ static int pane_layout_finish_loaded(desk_pane_layout_t *panes,
     }
     if (loaded->next_pane_id <= 0) {
         loaded->next_pane_id = pane_layout_next_id(loaded);
+    }
+    if (loaded->zoom == DESK_ZOOM_NONE ||
+        pane_find_leaf_node(loaded, loaded->root, loaded->zoom_pane_id) < 0) {
+        loaded->zoom_pane_id = loaded->zoom == DESK_ZOOM_NONE
+                                   ? 0
+                                   : loaded->active_pane_id;
     }
     loaded->resize_mode = false;
     *panes = *loaded;
@@ -1587,10 +1617,18 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
             fprintf(file, "pane %zu %s\n", i + 1, session->panes[i].process.id);
         }
     }
+    desk_zoom_t saved_zoom = session->layout.zoom;
+    int saved_zoom_pane_id = session->layout.zoom_pane_id;
+    session->layout.zoom = DESK_ZOOM_NONE;
+    session->layout.zoom_pane_id = 0;
     if (pane_layout_write(file, &session->layout, false) < 0) {
+        session->layout.zoom = saved_zoom;
+        session->layout.zoom_pane_id = saved_zoom_pane_id;
         fclose(file);
         return -1;
     }
+    session->layout.zoom = saved_zoom;
+    session->layout.zoom_pane_id = saved_zoom_pane_id;
     return fclose(file);
 }
 
@@ -2027,10 +2065,11 @@ static void pane_render_node(const desk_pane_layout_t *panes,
         return;
     }
 
+    int zoom_target = pane_layout_zoom_target(panes);
     bool first_has_active =
-        pane_subtree_contains(panes, entry->first, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->first, zoom_target);
     bool second_has_active =
-        pane_subtree_contains(panes, entry->second, panes->active_pane_id);
+        pane_subtree_contains(panes, entry->second, zoom_target);
     bool zooms_this_split =
         panes->zoom == DESK_ZOOM_FULL ||
         (panes->zoom == DESK_ZOOM_HORIZONTAL &&
@@ -2838,9 +2877,12 @@ static int desk_save_layout(desk_session_t *session)
         return 0;
     }
     desk_zoom_t saved_zoom = session->layout.zoom;
+    int saved_zoom_pane_id = session->layout.zoom_pane_id;
     session->layout.zoom = DESK_ZOOM_NONE;
+    session->layout.zoom_pane_id = 0;
     int result = pane_layout_save(&session->layout, session->layout_path);
     session->layout.zoom = saved_zoom;
+    session->layout.zoom_pane_id = saved_zoom_pane_id;
     return result;
 }
 
@@ -2958,6 +3000,7 @@ static int load_or_create_layout(desk_session_t *session,
     if (load_result == 0) {
         if (pane_layout_leaf_count(&session->layout) == session->pane_count) {
             session->layout.zoom = DESK_ZOOM_NONE;
+            session->layout.zoom_pane_id = 0;
             session->layout.resize_mode = false;
             desk_apply_pane_labels(session);
             return 0;
@@ -3235,7 +3278,6 @@ static int desk_remove_pane_at(desk_session_t *session,
            sizeof(session->panes[session->pane_count - 1]));
     session->pane_count--;
     session->zoomed = false;
-    session->layout.zoom = DESK_ZOOM_NONE;
     desk_apply_pane_labels(session);
     bool resized = false;
     if (resize_all_panes(session, terminal, &resized) < 0) {
@@ -4349,6 +4391,7 @@ static int desk_apply_named_layout(desk_session_t *session,
     desk_disconnect_all_panes(session);
     session->layout = loaded_layout;
     session->layout.zoom = DESK_ZOOM_NONE;
+    session->layout.zoom_pane_id = 0;
     session->layout.resize_mode = false;
     session->zoomed = false;
     session->pane_count = (size_t)max_pane_id;
@@ -5795,6 +5838,7 @@ static bool desk_execute_command(desk_session_t *session,
         session->zoomed = !session->zoomed;
         session->layout.zoom = session->zoomed ? DESK_ZOOM_FULL
                                                : DESK_ZOOM_NONE;
+        session->layout.zoom_pane_id = 0;
         *layout_changed = true;
         return true;
     }
@@ -5849,6 +5893,7 @@ static bool desk_execute_command(desk_session_t *session,
             session->layout.resize_mode = resize_mode;
             session->zoomed = false;
             session->layout.zoom = DESK_ZOOM_NONE;
+            session->layout.zoom_pane_id = 0;
             pane_layout_clear_status(&session->layout);
             *layout_changed = true;
         }
@@ -5856,17 +5901,25 @@ static bool desk_execute_command(desk_session_t *session,
     }
     if (strcmp(command, "layout.zoom.horizontal") == 0) {
         session->zoomed = false;
-        session->layout.zoom = session->layout.zoom == DESK_ZOOM_HORIZONTAL
-                                   ? DESK_ZOOM_NONE
-                                   : DESK_ZOOM_HORIZONTAL;
+        if (session->layout.zoom == DESK_ZOOM_HORIZONTAL) {
+            session->layout.zoom = DESK_ZOOM_NONE;
+            session->layout.zoom_pane_id = 0;
+        } else {
+            session->layout.zoom = DESK_ZOOM_HORIZONTAL;
+            session->layout.zoom_pane_id = session->layout.active_pane_id;
+        }
         *layout_changed = true;
         return true;
     }
     if (strcmp(command, "layout.zoom.vertical") == 0) {
         session->zoomed = false;
-        session->layout.zoom = session->layout.zoom == DESK_ZOOM_VERTICAL
-                                   ? DESK_ZOOM_NONE
-                                   : DESK_ZOOM_VERTICAL;
+        if (session->layout.zoom == DESK_ZOOM_VERTICAL) {
+            session->layout.zoom = DESK_ZOOM_NONE;
+            session->layout.zoom_pane_id = 0;
+        } else {
+            session->layout.zoom = DESK_ZOOM_VERTICAL;
+            session->layout.zoom_pane_id = session->layout.active_pane_id;
+        }
         *layout_changed = true;
         return true;
     }

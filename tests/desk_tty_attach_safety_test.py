@@ -431,9 +431,9 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                 ):
                     latest_frame = captured.split(b"\x1b[H\x1b[2J")[-1]
                     if (
-                        b"three-bottom" in latest_frame
+                        b"three-top" in latest_frame
                         and b"three-right" in latest_frame
-                        and b"three-top" not in latest_frame
+                        and b"three-bottom" not in latest_frame
                     ):
                         saw_vertical_zoom_preserved = True
                         os.write(master_fd, b"\x18srq")
