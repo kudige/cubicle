@@ -82,6 +82,8 @@ def run_desk_and_ctrl_c(desk, cube, env, log_dir):
     captured = bytearray()
     sent_arrow = False
     saw_arrow = False
+    sent_split_arrow = False
+    saw_split_arrow = False
     sent_ctrl_c = False
     saw_ctrl_c = False
     sent_quit = False
@@ -130,7 +132,18 @@ def run_desk_and_ctrl_c(desk, cube, env, log_dir):
                 if "type=input length=3" in events and "data_hex=1b5b41" in events:
                     saw_arrow = True
 
-            if saw_arrow and not sent_ctrl_c:
+            if saw_arrow and not sent_split_arrow:
+                os.write(master_fd, b"\x1b")
+                time.sleep(0.01)
+                os.write(master_fd, b"[B")
+                sent_split_arrow = True
+
+            if sent_split_arrow and not saw_split_arrow:
+                events = read_controller_events(log_dir)
+                if "type=input length=3" in events and "data_hex=1b5b42" in events:
+                    saw_split_arrow = True
+
+            if saw_split_arrow and not sent_ctrl_c:
                 os.write(master_fd, b"\x03")
                 sent_ctrl_c = True
 
@@ -160,6 +173,13 @@ def run_desk_and_ctrl_c(desk, cube, env, log_dir):
             events = read_controller_events(log_dir)
             raise AssertionError(
                 f"desk did not forward Up arrow as one CSI input event:\n{events}"
+            )
+        if not sent_split_arrow:
+            raise AssertionError("desk did not send split Down arrow")
+        if not saw_split_arrow:
+            events = read_controller_events(log_dir)
+            raise AssertionError(
+                f"desk did not reassemble split Down arrow as one CSI input event:\n{events}"
             )
         if not sent_ctrl_c:
             raise AssertionError("desk did not send Ctrl-C after Up arrow")

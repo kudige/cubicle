@@ -55,6 +55,7 @@
 #define DESK_MIN_PANE_ROWS 2
 #define DESK_OUTPUT_READ_BURST 16
 #define DESK_CURSOR_BLINK_MS 500
+#define DESK_PENDING_INPUT_TIMEOUT_MS 30
 #define DESK_PROCESS_REFRESH_MS 1000
 #define DESK_NOTICE_MS 2500
 #define DESK_PANE_TITLE_ROWS 1
@@ -262,6 +263,7 @@ typedef struct desk_session {
     int cursor_col;
     unsigned char pending_input[64];
     size_t pending_input_length;
+    long long pending_input_since_ms;
     desk_open_menu_t open_menu;
     cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t key_binding_count;
@@ -5281,6 +5283,7 @@ static void desk_save_pending_input(desk_session_t *session,
         memcpy(session->pending_input, input + offset, pending);
     }
     session->pending_input_length = pending;
+    session->pending_input_since_ms = pending > 0 ? desk_monotonic_ms() : 0;
 }
 
 static desk_menu_item_t *desk_menu_item_at_position(
@@ -5672,7 +5675,7 @@ static bool desk_escape_sequence_incomplete(const unsigned char *input,
         return false;
     }
     if (offset + 1 >= length) {
-        return false;
+        return true;
     }
     if (input[offset + 1] == 'O') {
         return offset + 2 >= length;
@@ -5695,6 +5698,7 @@ static void desk_save_pending_from(desk_session_t *session,
 {
     if (offset >= length) {
         session->pending_input_length = 0;
+        session->pending_input_since_ms = 0;
         return;
     }
     size_t remaining = length - offset;
@@ -5703,6 +5707,7 @@ static void desk_save_pending_from(desk_session_t *session,
     }
     memcpy(session->pending_input, input + offset, remaining);
     session->pending_input_length = remaining;
+    session->pending_input_since_ms = remaining > 0 ? desk_monotonic_ms() : 0;
 }
 
 static int desk_write_prefix_sequence(desk_session_t *session)
@@ -5716,6 +5721,26 @@ static int desk_write_input_sequence(desk_session_t *session,
                                      size_t length)
 {
     return write_active_pane(session, input, length);
+}
+
+static int desk_flush_expired_pending_input(desk_session_t *session)
+{
+    if (session->pending_input_length == 0 ||
+        session->pending_input_since_ms <= 0) {
+        return 0;
+    }
+    long long now_ms = desk_monotonic_ms();
+    if (now_ms <= 0 ||
+        now_ms - session->pending_input_since_ms <
+            DESK_PENDING_INPUT_TIMEOUT_MS) {
+        return 0;
+    }
+    size_t length = session->pending_input_length;
+    unsigned char pending[sizeof(session->pending_input)];
+    memcpy(pending, session->pending_input, length);
+    session->pending_input_length = 0;
+    session->pending_input_since_ms = 0;
+    return desk_write_input_sequence(session, pending, length);
 }
 
 static int desk_handle_prefixed_sequence(desk_session_t *session,
@@ -6382,6 +6407,15 @@ static int desk_run_workspace(const char *workspace_arg,
             desk_debug_log("event=select_failed errno=%d", errno);
             break;
         }
+        if (ready == 0 && session.open_menu.level == DESK_MENU_CLOSED &&
+            session.pending_input_length > 0) {
+            if (desk_flush_expired_pending_input(&session) < 0) {
+                result = 2;
+                desk_debug_log("event=pending_input_flush_failed errno=%d",
+                               errno);
+                break;
+            }
+        }
         if (ready > 0 && session.open_menu.level == DESK_MENU_CLOSED) {
             for (size_t i = 0; i < session.pane_count; ++i) {
                 int stream_fd = cubicle_attachment_stream_fd(
@@ -6444,6 +6478,7 @@ static int desk_run_workspace(const char *workspace_arg,
                     handled_length = session.pending_input_length +
                                      (size_t)input_length;
                     session.pending_input_length = 0;
+                    session.pending_input_since_ms = 0;
                 }
                 if (flush_pending_terminal_resize(&session, &terminal,
                                                   &layout_changed) < 0) {
