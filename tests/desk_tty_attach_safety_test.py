@@ -1241,6 +1241,9 @@ def run_desk_open_other_workspace_process(desk, cube, env):
     selected_process = False
     sent_payload = False
     saw_payload = False
+    reopened_menu = False
+    saw_last_workspace_highlight = False
+    closed_highlighted_menu_at = 0.0
     sent_quit = False
     deadline = time.time() + 7
     try:
@@ -1303,9 +1306,25 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 if "GOT_OPEN" in logs.stdout:
                     saw_payload = True
 
-            if saw_payload and not sent_quit:
-                os.write(master_fd, b"\x18q")
-                sent_quit = True
+            if saw_payload and not reopened_menu:
+                captured.clear()
+                os.write(master_fd, b"\x18o")
+                reopened_menu = True
+
+            if reopened_menu and not saw_last_workspace_highlight:
+                if re.search(
+                    rb"\x1b\[[0-9]+;[0-9]+H\x1b\[1;7;48;5;236mworkspace: DeskOther",
+                    captured,
+                ):
+                    saw_last_workspace_highlight = True
+
+            if saw_last_workspace_highlight and not sent_quit:
+                if closed_highlighted_menu_at == 0.0:
+                    os.write(master_fd, b"q")
+                    closed_highlighted_menu_at = time.time()
+                elif time.time() - closed_highlighted_menu_at > 0.2:
+                    os.write(master_fd, b"\x18q")
+                    sent_quit = True
 
             if proc.poll() is not None:
                 break
@@ -1320,6 +1339,10 @@ def run_desk_open_other_workspace_process(desk, cube, env):
             raise AssertionError(f"desk open menu did not show other process: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"newly opened pane did not receive input: {captured!r}")
+        if not saw_last_workspace_highlight:
+            raise AssertionError(
+                f"desk did not highlight the last opened workspace: {captured!r}"
+            )
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:

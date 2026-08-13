@@ -269,6 +269,7 @@ typedef struct desk_session {
     char notice[256];
     long long notice_until_ms;
     long long next_process_refresh_ms;
+    char last_opened_workspace_id[CUBICLE_ID_STRING_LENGTH];
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -3414,6 +3415,8 @@ static int desk_switch_workspace(desk_session_t *session,
 
     desk_disconnect_all_panes(session);
     session->workspace = *workspace;
+    snprintf(session->last_opened_workspace_id,
+             sizeof(session->last_opened_workspace_id), "%s", workspace->id);
     for (size_t i = 0; i < attachable_count; ++i) {
         session->panes[i].process = attachable[i];
     }
@@ -3456,6 +3459,24 @@ static void desk_menu_select_first_enabled(desk_open_menu_t *menu)
             return;
         }
     }
+}
+
+static bool desk_menu_select_workspace(desk_open_menu_t *menu,
+                                       const char *workspace_id)
+{
+    if (workspace_id == NULL || workspace_id[0] == '\0') {
+        return false;
+    }
+    for (size_t i = 0; i < menu->item_count; ++i) {
+        if (menu->items[i].kind == DESK_MENU_ITEM_WORKSPACE &&
+            strcmp(menu->items[i].workspace.id, workspace_id) == 0 &&
+            !menu->items[i].disabled) {
+            menu->selected = i;
+            menu->scroll_offset = i;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool desk_layout_name_matches_filter(const char *name,
@@ -3586,6 +3607,8 @@ static int desk_load_process_menu(desk_session_t *session,
     memset(menu, 0, sizeof(*menu));
     menu->level = DESK_MENU_WORKSPACE;
     menu->workspace = *workspace;
+    snprintf(session->last_opened_workspace_id,
+             sizeof(session->last_opened_workspace_id), "%s", workspace->id);
 
     cubicle_process_filter_t filter;
     memset(&filter, 0, sizeof(filter));
@@ -3678,7 +3701,9 @@ static int desk_open_root_menu(desk_session_t *session)
         snprintf(menu->status, sizeof(menu->status),
                  "no cubes or other workspaces available");
     }
-    desk_menu_select_first_enabled(menu);
+    if (!desk_menu_select_workspace(menu, session->last_opened_workspace_id)) {
+        desk_menu_select_first_enabled(menu);
+    }
     return 0;
 }
 
@@ -6167,6 +6192,9 @@ static int desk_run_workspace(const char *workspace_arg,
     int result = resolve_workspace(&session, workspace_arg, error,
                                    sizeof(error));
     if (result == 0) {
+        snprintf(session.last_opened_workspace_id,
+                 sizeof(session.last_opened_workspace_id), "%s",
+                 session.workspace.id);
         result = load_workspace_processes(&session, error, sizeof(error));
     }
     if (result == 0) {
