@@ -83,6 +83,33 @@ static void test_resize_and_terminal_response(void)
     cubicle_terminal_model_destroy(model);
 }
 
+static void test_resize_growth_restores_scrollback(void)
+{
+    cubicle_terminal_model_t *model = NULL;
+    cubicle_terminal_snapshot_t snapshot;
+
+    expect_true(cubicle_terminal_model_create(4, 8, &model) == 0,
+                "expected terminal model creation to succeed");
+    if (model == NULL) {
+        return;
+    }
+    const char *input = "1\r\n2\r\n3\r\n4\r\n5\r\n6";
+    expect_true(cubicle_terminal_model_feed(model, input, strlen(input)) == 0,
+                "expected scrollback input feed to succeed");
+    expect_true(cubicle_terminal_model_resize(model, 6, 8) == 0,
+                "expected terminal growth to succeed");
+    expect_true(cubicle_terminal_model_snapshot(model, 0, &snapshot) == 0,
+                "expected grown terminal snapshot to succeed");
+    expect_true(strcmp(snapshot_cell(&snapshot, 0, 0)->text, "1") == 0,
+                "expected first scrolled line to return after growth");
+    expect_true(strcmp(snapshot_cell(&snapshot, 1, 0)->text, "2") == 0,
+                "expected second scrolled line to return after growth");
+    expect_true(strcmp(snapshot_cell(&snapshot, 5, 0)->text, "6") == 0,
+                "expected prompt-side content to remain at bottom");
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+    cubicle_terminal_model_destroy(model);
+}
+
 static void test_dirty_rows(void)
 {
     cubicle_terminal_model_t *model = NULL;
@@ -130,6 +157,7 @@ int main(void)
 {
     test_text_cursor_and_attrs();
     test_resize_and_terminal_response();
+    test_resize_growth_restores_scrollback();
     test_dirty_rows();
     test_incomplete_utf8_is_discarded();
     return failures == 0 ? 0 : 1;

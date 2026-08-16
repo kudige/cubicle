@@ -8,6 +8,11 @@
 #include <string.h>
 #include <vterm.h>
 
+typedef struct terminal_scrollback_line {
+    int cols;
+    VTermScreenCell *cells;
+} terminal_scrollback_line_t;
+
 struct cubicle_terminal_model {
     VTerm *term;
     VTermScreen *screen;
@@ -17,6 +22,9 @@ struct cubicle_terminal_model {
     bool dirty_rows[1000];
     char response[4096];
     size_t response_length;
+    terminal_scrollback_line_t *scrollback;
+    size_t scrollback_count;
+    size_t scrollback_capacity;
 };
 
 static int track_damage(VTermRect rect, void *user)
@@ -71,26 +79,88 @@ static int ignore_bell(void *user)
     return 1;
 }
 
-static int ignore_scrollback_push(int cols, const VTermScreenCell *cells,
-                                  void *user)
+static void clear_scrollback(cubicle_terminal_model_t *model)
 {
-    (void)cols;
-    (void)cells;
-    (void)user;
+    if (model == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < model->scrollback_count; ++i) {
+        free(model->scrollback[i].cells);
+    }
+    free(model->scrollback);
+    model->scrollback = NULL;
+    model->scrollback_count = 0;
+    model->scrollback_capacity = 0;
+}
+
+static int save_scrollback_line(cubicle_terminal_model_t *model,
+                                int cols,
+                                const VTermScreenCell *cells)
+{
+    if (model == NULL || cols <= 0 || cells == NULL) {
+        return 0;
+    }
+    VTermScreenCell *copy = malloc((size_t)cols * sizeof(*copy));
+    if (copy == NULL) {
+        return 0;
+    }
+    memcpy(copy, cells, (size_t)cols * sizeof(*copy));
+
+    if (model->scrollback_count == model->scrollback_capacity) {
+        size_t next_capacity = model->scrollback_capacity == 0
+                                   ? 64
+                                   : model->scrollback_capacity * 2;
+        terminal_scrollback_line_t *next =
+            realloc(model->scrollback, next_capacity * sizeof(*next));
+        if (next == NULL) {
+            free(copy);
+            return 0;
+        }
+        model->scrollback = next;
+        model->scrollback_capacity = next_capacity;
+    }
+    model->scrollback[model->scrollback_count].cols = cols;
+    model->scrollback[model->scrollback_count].cells = copy;
+    model->scrollback_count++;
+    return 1;
+}
+
+static int restore_scrollback_line(cubicle_terminal_model_t *model,
+                                   int cols,
+                                   VTermScreenCell *cells)
+{
+    if (model == NULL || cols <= 0 || cells == NULL) {
+        return 0;
+    }
+    while (model->scrollback_count > 0) {
+        terminal_scrollback_line_t *line =
+            &model->scrollback[model->scrollback_count - 1];
+        if (line->cols == cols) {
+            memcpy(cells, line->cells, (size_t)cols * sizeof(*cells));
+            free(line->cells);
+            model->scrollback_count--;
+            return 1;
+        }
+        free(line->cells);
+        model->scrollback_count--;
+    }
     return 0;
 }
 
-static int ignore_scrollback_pop(int cols, VTermScreenCell *cells, void *user)
+static int track_scrollback_push(int cols, const VTermScreenCell *cells,
+                                 void *user)
 {
-    (void)cols;
-    (void)cells;
-    (void)user;
-    return 0;
+    return save_scrollback_line(user, cols, cells);
 }
 
-static int ignore_scrollback_clear(void *user)
+static int track_scrollback_pop(int cols, VTermScreenCell *cells, void *user)
 {
-    (void)user;
+    return restore_scrollback_line(user, cols, cells);
+}
+
+static int track_scrollback_clear(void *user)
+{
+    clear_scrollback(user);
     return 1;
 }
 
@@ -114,9 +184,9 @@ static const VTermScreenCallbacks screen_callbacks = {
     .settermprop = track_termprop,
     .bell = ignore_bell,
     .resize = track_resize,
-    .sb_pushline = ignore_scrollback_push,
-    .sb_popline = ignore_scrollback_pop,
-    .sb_clear = ignore_scrollback_clear,
+    .sb_pushline = track_scrollback_push,
+    .sb_popline = track_scrollback_pop,
+    .sb_clear = track_scrollback_clear,
 };
 
 static void log_vterm_no_progress(const unsigned char *cursor,
@@ -330,6 +400,7 @@ int cubicle_terminal_model_create(unsigned int rows, unsigned int cols,
 void cubicle_terminal_model_destroy(cubicle_terminal_model_t *model)
 {
     if (model != NULL) {
+        clear_scrollback(model);
         vterm_free(model->term);
         free(model);
     }
@@ -470,6 +541,7 @@ int cubicle_terminal_model_load_snapshot(
         errno = EINVAL;
         return -1;
     }
+    clear_scrollback(model);
     if (cubicle_terminal_model_resize(model, snapshot->rows,
                                       snapshot->cols) < 0) {
         return -1;
