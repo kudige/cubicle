@@ -6071,6 +6071,29 @@ static bool is_terminal_response_sequence(const unsigned char *input,
            is_terminal_osc_response(input, length, offset, consumed);
 }
 
+static int flush_pending_layout_resize(desk_session_t *session,
+                                       desk_terminal_t *terminal,
+                                       bool *pending_resize,
+                                       bool *layout_changed)
+{
+    if (pending_resize == NULL || !*pending_resize) {
+        return 0;
+    }
+    long long start_ms = desk_monotonic_ms();
+    bool sizes_changed = false;
+    if (refresh_pane_sizes(session, terminal, false, &sizes_changed) < 0) {
+        return -1;
+    }
+    long long elapsed_ms = desk_monotonic_ms() - start_ms;
+    desk_debug_log("event=layout_resize_flush elapsed_ms=%lld sizes_changed=%d",
+                   elapsed_ms, (int)sizes_changed);
+    *pending_resize = false;
+    if (layout_changed != NULL) {
+        *layout_changed = true;
+    }
+    return 0;
+}
+
 static int handle_input(desk_session_t *session,
                         desk_terminal_t *terminal,
                         const unsigned char *input,
@@ -6079,6 +6102,7 @@ static int handle_input(desk_session_t *session,
                         bool *quit_requested)
 {
     size_t start = 0;
+    bool pending_resize = false;
     for (size_t i = 0; i < length; ++i) {
         if (is_incomplete_sgr_mouse(input, length, i)) {
             desk_save_pending_input(session, input, length, i);
@@ -6170,6 +6194,11 @@ static int handle_input(desk_session_t *session,
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
             }
+            if (flush_pending_layout_resize(session, terminal,
+                                            &pending_resize,
+                                            layout_changed) < 0) {
+                return -1;
+            }
             const char *command = NULL;
             if (input[i] == 's' || input[i] == 'q') {
                 session->layout.resize_mode = false;
@@ -6205,11 +6234,7 @@ static int handle_input(desk_session_t *session,
             }
             if (pane_layout_resize_side(&session->layout, terminal, side,
                                         delta) == 0) {
-                bool sizes_changed = false;
-                if (refresh_pane_sizes(session, terminal, false,
-                                       &sizes_changed) < 0) {
-                    return -1;
-                }
+                pending_resize = true;
                 *layout_changed = true;
             }
             i += consumed - 1;
@@ -6220,11 +6245,20 @@ static int handle_input(desk_session_t *session,
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
             }
+            if (flush_pending_layout_resize(session, terminal,
+                                            &pending_resize,
+                                            layout_changed) < 0) {
+                return -1;
+            }
             session->layout.resize_mode = false;
             *layout_changed = true;
             start = i + 1;
             continue;
         }
+    }
+    if (flush_pending_layout_resize(session, terminal, &pending_resize,
+                                    layout_changed) < 0) {
+        return -1;
     }
     return flush_active_input(session, input, start, length);
 }
