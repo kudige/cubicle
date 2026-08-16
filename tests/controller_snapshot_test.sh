@@ -1,7 +1,7 @@
 set -eu
 
 tmpdir=$(mktemp -d)
-trap 'if [ -n "${stream_pid:-}" ]; then kill "$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true; fi; if [ -n "${tty_pid:-}" ]; then kill "$tty_pid" 2>/dev/null || true; wait "$tty_pid" 2>/dev/null || true; fi; if [ -n "${large_pid:-}" ]; then kill "$large_pid" 2>/dev/null || true; wait "$large_pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
+trap 'if [ -n "${stream_pid:-}" ]; then kill "$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true; fi; if [ -n "${tty_pid:-}" ]; then kill "$tty_pid" 2>/dev/null || true; wait "$tty_pid" 2>/dev/null || true; fi; if [ -n "${large_pid:-}" ]; then kill "$large_pid" 2>/dev/null || true; wait "$large_pid" 2>/dev/null || true; fi; if [ -n "${scroll_pid:-}" ]; then kill "$scroll_pid" 2>/dev/null || true; wait "$scroll_pid" 2>/dev/null || true; fi; rm -rf "$tmpdir"' EXIT
 
 json_field() {
     printf '%s' "$1" | python3 -c 'import json,sys
@@ -141,5 +141,56 @@ set -e
 
 if [ "$large_status" -ne 143 ]; then
     echo "expected terminated large TTY controller status 143, got $large_status" >&2
+    exit 1
+fi
+
+scroll_state="$tmpdir/scroll-state"
+scroll_socket="$tmpdir/scroll.sock"
+"$CUBICLE_CONTROLLER" --state-dir "$scroll_state" --control-socket "$scroll_socket" --mode tty -- python3 -c 'import sys,time; time.sleep(0.5); sys.stdout.write("1\r\n2\r\n3\r\n4\r\n5\r\n6"); sys.stdout.flush(); time.sleep(30)' >/dev/null 2>/dev/null &
+scroll_pid=$!
+wait_for_socket "$scroll_socket"
+
+scroll_resize=$(api "$scroll_socket" controller-resize 4 8)
+if [ "$(json_field "$scroll_resize" success)" != "True" ]; then
+    echo "scroll controller initial resize failed: $scroll_resize" >&2
+    exit 1
+fi
+
+scroll_snapshot=""
+for _ in $(seq 1 100); do
+    scroll_snapshot=$(api "$scroll_socket" call controller.snapshot)
+    if [ "$(json_cell_text "$scroll_snapshot" 3 0)" = "6" ]; then
+        break
+    fi
+    sleep 0.05
+done
+
+if [ "$(json_cell_text "$scroll_snapshot" 3 0)" != "6" ]; then
+    echo "scroll controller did not reach expected small viewport state: $scroll_snapshot" >&2
+    exit 1
+fi
+
+scroll_grow=$(api "$scroll_socket" controller-resize 6 8)
+if [ "$(json_field "$scroll_grow" success)" != "True" ]; then
+    echo "scroll controller growth resize failed: $scroll_grow" >&2
+    exit 1
+fi
+scroll_grown_snapshot=$(api "$scroll_socket" call controller.snapshot)
+if [ "$(json_cell_text "$scroll_grown_snapshot" 0 0)" != "1" ] ||
+   [ "$(json_cell_text "$scroll_grown_snapshot" 1 0)" != "2" ] ||
+   [ "$(json_cell_text "$scroll_grown_snapshot" 5 0)" != "6" ]; then
+    echo "controller snapshot did not restore scrollback after growth: $scroll_grown_snapshot" >&2
+    exit 1
+fi
+
+python3 "$CUBICLE_CONTROL_CLIENT" "$scroll_socket" terminate >/dev/null
+set +e
+wait "$scroll_pid"
+scroll_status=$?
+scroll_pid=
+set -e
+
+if [ "$scroll_status" -ne 143 ]; then
+    echo "expected terminated scroll TTY controller status 143, got $scroll_status" >&2
     exit 1
 fi
