@@ -32,7 +32,7 @@ ctest --test-dir build --output-on-failure
 Start a manager and create a workspace:
 
 ```console
-cubicle-manager daemon
+cubicle-manager
 cube workspace create --dir "$PWD" ProjectA
 ```
 
@@ -104,14 +104,15 @@ cube config effective
 cube config validate
 ```
 
-`cubicle-manager daemon` detaches after startup. Use
-`cubicle-manager daemon --foreground` under a supervisor or test harness.
+`cubicle-manager` runs the daemon by default and detaches after startup. Use
+`cubicle-manager --foreground` under a supervisor or test harness. The explicit
+`cubicle-manager daemon ...` form is also accepted.
 
 For local-LAN experiments, the manager can listen on unauthenticated TCP only
 when explicitly allowed:
 
 ```console
-cubicle-manager daemon --listen tcp://127.0.0.1:7777 --allow-insecure
+cubicle-manager --listen tcp://127.0.0.1:7777 --allow-insecure
 cube --manager-socket tcp://127.0.0.1:7777 ps
 ```
 

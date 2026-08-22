@@ -96,7 +96,7 @@ PY
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" \
     --controller-bin "$CUBICLE_CONTROLLER" \
-    daemon --foreground --control-socket "$socket_path" --event-interval-ms 50 &
+    --foreground --control-socket "$socket_path" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do

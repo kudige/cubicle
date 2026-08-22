@@ -163,7 +163,7 @@ static void print_usage(const char *program)
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events poll [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events list [--workspace NAME_OR_ID]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] events follow [--iterations N] [--interval-ms N] [--workspace NAME_OR_ID]\n"
-            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] daemon [--foreground] [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N] [--max-clients N]\n"
+            "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] [daemon] [--foreground] [--control-socket PATH] [--listen URI] [--allow-insecure] [--event-interval-ms N] [--max-clients N]\n"
             "       %s [--state-dir dir] [--runtime-dir dir] [--log-dir dir] process list [--workspace NAME_OR_ID]\n",
             program, program, program, program, program, program, program,
             program, program, program);
@@ -7092,11 +7092,6 @@ int main(int argc, char **argv)
         break;
     }
 
-    if (command_index < 0) {
-        print_usage(argv[0]);
-        return 2;
-    }
-
     if (state_dir_overridden && !runtime_dir_overridden) {
         int result = snprintf(state.runtime_dir, sizeof(state.runtime_dir),
                               "%s", state.dir);
@@ -7142,7 +7137,16 @@ int main(int argc, char **argv)
     }
     cubicle_log(CUBICLE_LOG_INFO, "manager", state.identity.fingerprint);
 
-    int result = dispatch_command(&state, argc - command_index, &argv[command_index]);
+    int result = 0;
+    if (command_index < 0) {
+        result = command_daemon(&state, 0, NULL);
+    } else if (strncmp(argv[command_index], "--", 2) == 0) {
+        result = command_daemon(&state, argc - command_index,
+                                &argv[command_index]);
+    } else {
+        result = dispatch_command(&state, argc - command_index,
+                                  &argv[command_index]);
+    }
     if (result == 2) {
         print_usage(argv[0]);
     }
