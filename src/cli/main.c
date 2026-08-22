@@ -488,6 +488,8 @@ static int command_config(const cubicle_config_t *config,
                    : (config->desk_debug_library ? "" : "none"));
         printf("desk.automanager=%s\n",
                config->desk_automanager ? "true" : "false");
+        printf("desk.scrollback_lines=%u\n",
+               config->desk_scrollback_lines);
         printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         return 0;
     }
@@ -531,6 +533,8 @@ static int command_config(const cubicle_config_t *config,
                    : (config->desk_debug_library ? "" : "none"));
         printf("desk.automanager=%s\n",
                config->desk_automanager ? "true" : "false");
+        printf("desk.scrollback_lines=%u\n",
+               config->desk_scrollback_lines);
         printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         printf("desk.keys=%zu bindings\n", config->desk_key_binding_count);
         printf("client.manager=%s\n", config->client_manager_uri);
@@ -639,6 +643,11 @@ static int command_config(const cubicle_config_t *config,
                 break;
             case CUBICLE_CONFIG_DESK_AUTOMANAGER:
                 value = config->desk_automanager ? "true" : "false";
+                break;
+            case CUBICLE_CONFIG_DESK_SCROLLBACK_LINES:
+                snprintf(formatted, sizeof(formatted), "%u",
+                         config->desk_scrollback_lines);
+                value = formatted;
                 break;
             case CUBICLE_CONFIG_DESK_PREFIX:
                 snprintf(formatted, sizeof(formatted), "%s",

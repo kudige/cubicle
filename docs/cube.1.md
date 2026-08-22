@@ -539,12 +539,15 @@ automanager=true
 [desk]
 debug=none
 automanager=true
+scrollback_lines=10000
 prefix=Control-X
 
 [desk.keys]
 bind.1=Prefix-n pane.next
 bind.2=Prefix-p pane.previous
 bind.3=Prefix-Space layout.zoom
+bind.4=Prefix-PageUp scroll.page_up
+bind.5=Prefix-PageDown scroll.page_down
 
 [client]
 manager=unix:///run/cubicle/manager.sock
@@ -593,14 +596,17 @@ Desk key bindings can be configured with `[desk] prefix=KEY` and
 `M-PageUp`, `S-F5`, or a single printable character. Prefix shortcuts
 use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
 `Control-Shift-Right` are accepted and displayed as canonical tmux-style names.
+`desk.scrollback_lines` controls how many session-local scrolled-off lines each
+pane keeps while the current `desk` process is running.
 Supported command names are
 `pane.next`, `pane.previous`, `pane.left`, `pane.right`, `pane.above`,
 `pane.below`, `layout.zoom`, `layout.resize.toggle`,
 `layout.transpose`, `layout.split.horizontal`, `layout.split.vertical`,
 `layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
 `layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,
-`menu.open`, `mouse.toggle`, and `quit`. Use `none` to unbind a default
-shortcut.
+`scroll.page_up`, `scroll.page_down`, `scroll.line_up`, `scroll.line_down`,
+`scroll.top`, `scroll.bottom`, `menu.open`, `mouse.toggle`, and `quit`. Use
+`none` to unbind a default shortcut.
 
 Examples:
 

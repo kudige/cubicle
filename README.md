@@ -334,6 +334,10 @@ Prefix-Right  Select pane to the right
 Prefix-Up     Select pane above
 Prefix-Down   Select pane below
 Prefix-Space  Toggle full-pane zoom
+Prefix-PageUp Scroll active pane up one page
+Prefix-PageDown Scroll active pane down one page
+Prefix-Home   Scroll active pane to top
+Prefix-End    Return active pane to live output
 Prefix-q      Quit desk, leaving cubes running
 ```
 
@@ -429,12 +433,15 @@ Configure keys in `~/.config/cubicle/config.cfg`:
 ```ini
 [desk]
 prefix=Control-X
+scrollback_lines=10000
 
 [desk.keys]
 bind.1=Prefix-n pane.next
 bind.2=Prefix-p pane.previous
 bind.3=Prefix-Space layout.zoom
 bind.4=Prefix-? bindings.show
+bind.5=Prefix-PageUp scroll.page_up
+bind.6=Prefix-PageDown scroll.page_down
 ```
 
 Supported command names include:
@@ -458,6 +465,12 @@ layout.zoom.vertical
 layout.save
 layout.load
 bindings.show
+scroll.page_up
+scroll.page_down
+scroll.line_up
+scroll.line_down
+scroll.top
+scroll.bottom
 menu.open
 mouse.toggle
 quit
@@ -529,6 +542,7 @@ automanager=true
 [desk]
 debug=none
 automanager=true
+scrollback_lines=10000
 prefix=Control-X
 
 [defaults]

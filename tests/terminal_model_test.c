@@ -110,6 +110,43 @@ static void test_resize_growth_restores_scrollback(void)
     cubicle_terminal_model_destroy(model);
 }
 
+static void test_scrollback_capture_limit_and_take(void)
+{
+    cubicle_terminal_model_t *model = NULL;
+    cubicle_terminal_scrollback_line_t *lines = NULL;
+    size_t line_count = 0;
+
+    expect_true(cubicle_terminal_model_create(2, 6, &model) == 0,
+                "expected terminal model creation to succeed");
+    if (model == NULL) {
+        return;
+    }
+    expect_true(cubicle_terminal_model_set_scrollback_capture_limit(model, 2) == 0,
+                "expected scrollback capture limit to be set");
+    const char *input = "one\r\ntwo\r\nthree\r\nfour";
+    expect_true(cubicle_terminal_model_feed(model, input, strlen(input)) == 0,
+                "expected scrollback-producing input to succeed");
+    expect_true(cubicle_terminal_model_take_scrollback(model, &lines,
+                                                       &line_count) == 0,
+                "expected captured scrollback to be drained");
+    expect_true(line_count == 2, "expected capture to retain last two lines");
+    if (line_count == 2) {
+        expect_true(lines[0].cols == 6 && lines[0].cells != NULL,
+                    "expected older retained scrollback cells");
+        expect_true(lines[1].cols == 6 && lines[1].cells != NULL,
+                    "expected newest retained scrollback cells");
+    }
+    cubicle_terminal_scrollback_cleanup(lines, line_count);
+    lines = NULL;
+    line_count = 0;
+    expect_true(cubicle_terminal_model_take_scrollback(model, &lines,
+                                                       &line_count) == 0,
+                "expected empty second drain to succeed");
+    expect_true(line_count == 0 && lines == NULL,
+                "expected second drain to be empty");
+    cubicle_terminal_model_destroy(model);
+}
+
 static void test_dirty_rows(void)
 {
     cubicle_terminal_model_t *model = NULL;
@@ -158,6 +195,7 @@ int main(void)
     test_text_cursor_and_attrs();
     test_resize_and_terminal_response();
     test_resize_growth_restores_scrollback();
+    test_scrollback_capture_limit_and_take();
     test_dirty_rows();
     test_incomplete_utf8_is_discarded();
     return failures == 0 ? 0 : 1;

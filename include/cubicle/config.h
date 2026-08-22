@@ -35,6 +35,7 @@ typedef enum cubicle_config_key {
     CUBICLE_CONFIG_CUBE_AUTOMANAGER,
     CUBICLE_CONFIG_DESK_DEBUG,
     CUBICLE_CONFIG_DESK_AUTOMANAGER,
+    CUBICLE_CONFIG_DESK_SCROLLBACK_LINES,
     CUBICLE_CONFIG_CLIENT_MANAGER,
     CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY,
     CUBICLE_CONFIG_DEFAULTS_LAUNCH,
@@ -85,6 +86,7 @@ typedef struct cubicle_config {
     int desk_debug_library;
     int desk_debug_terminal;
     int desk_automanager;
+    unsigned int desk_scrollback_lines;
     unsigned char desk_prefix_key;
     unsigned char desk_prefix_sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
     size_t desk_prefix_sequence_length;

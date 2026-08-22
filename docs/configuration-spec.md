@@ -257,13 +257,16 @@ automanager=true
 [desk]
 debug=none
 automanager=true
+scrollback_lines=10000
 prefix=Control-X
 
 [desk.keys]
 bind.1=Prefix-n pane.next
 bind.2=Prefix-p pane.previous
 bind.3=Prefix-Space layout.zoom
-bind.4=Control-G quit
+bind.4=Prefix-PageUp scroll.page_up
+bind.5=Prefix-PageDown scroll.page_down
+bind.6=Control-G quit
 ```
 
 Keys:
@@ -278,6 +281,9 @@ Keys:
   is not accepting connections. Explicit process-level endpoint overrides, such
   as `cube --manager-socket` or `CUBICLE_MANAGER_SOCKET`, do not auto-start a
   manager.
+- `scrollback_lines`: number of session-local scrolled-off terminal lines kept
+  per `desk` pane. Defaults to `10000`. Valid range is `1` through `200000`.
+  This is not persisted and does not read historical controller logs.
 - `prefix`: Desk escape prefix key. It accepts tmux-style key names such as
   `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
   `Escape`, `Backspace`, `Tab`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
@@ -292,7 +298,9 @@ Keys:
   `layout.transpose`, `layout.split.horizontal`,
   `layout.split.vertical`, `layout.delete`, `layout.reset`,
   `layout.zoom.horizontal`, `layout.zoom.vertical`, `layout.save`,
-  `layout.load`, `bindings.show`, `menu.open`, `mouse.toggle`, or `quit`.
+  `layout.load`, `bindings.show`, `scroll.page_up`, `scroll.page_down`,
+  `scroll.line_up`, `scroll.line_down`, `scroll.top`, `scroll.bottom`,
+  `menu.open`, `mouse.toggle`, or `quit`.
   Use `none` as the command to unbind a default key. Duplicate active shortcuts
   are invalid.
 
