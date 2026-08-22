@@ -325,6 +325,75 @@ if [ "$(wc -c <"$project_b_restart_count")" -ne 6 ]; then
     echo "qualified restart did not rerun process" >&2
     exit 1
 fi
+
+wild_update_one_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name wild-update-one sleep 30 | json_id)
+wild_update_two_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name wild-update-two sleep 30 | json_id)
+cube update "wild-update-*" --restart >"$tmpdir/wild-update.out"
+grep -q '^Process Project A.wild-update-one updated (restart enabled)$' "$tmpdir/wild-update.out"
+grep -q '^Process Project A.wild-update-two updated (restart enabled)$' "$tmpdir/wild-update.out"
+cube inspect wild-update-one >"$tmpdir/wild-update-one-inspect.out"
+grep -q '^Restart:     yes$' "$tmpdir/wild-update-one-inspect.out"
+cube inspect wild-update-two >"$tmpdir/wild-update-two-inspect.out"
+grep -q '^Restart:     yes$' "$tmpdir/wild-update-two-inspect.out"
+set +e
+cube update "wild-update-*" --name wildcard-name >"$tmpdir/wild-update-name.out" 2>&1
+wild_update_name_status=$?
+set -e
+if [ "$wild_update_name_status" -eq 0 ]; then
+    echo "wildcard update should reject --name" >&2
+    exit 1
+fi
+grep -q 'wildcard update does not support --name' "$tmpdir/wild-update-name.out"
+api process-kill "$wild_update_one_id" >/dev/null
+api process-kill "$wild_update_two_id" >/dev/null
+api process-wait "$wild_update_one_id" --timeout-ms 2000 | grep -q '"success":true'
+api process-wait "$wild_update_two_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove wild-update-one >/dev/null
+cube remove wild-update-two >/dev/null
+
+project_b_wild_save_one_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-wild-save-one /bin/true | json_id)
+project_b_wild_save_two_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-wild-save-two /bin/true | json_id)
+api process-wait "$project_b_wild_save_one_id" --timeout-ms 2000 | grep -q '"success":true'
+api process-wait "$project_b_wild_save_two_id" --timeout-ms 2000 | grep -q '"success":true'
+cube save "*.project-b-wild-save-*" >"$tmpdir/wild-save.out"
+grep -q '^Saved 2 processes$' "$tmpdir/wild-save.out"
+cube inspect "Project B.project-b-wild-save-one" >"$tmpdir/wild-save-one.out"
+grep -q '^Saved:       yes$' "$tmpdir/wild-save-one.out"
+cube unsave "*.project-b-wild-save-*" >"$tmpdir/wild-unsave.out"
+grep -q '^Unsaved 2 processes$' "$tmpdir/wild-unsave.out"
+cube remove "Project B.project-b-wild-save-one" >/dev/null
+cube remove "Project B.project-b-wild-save-two" >/dev/null
+
+project_b_wild_restart_count="$tmpdir/project-b-wild-restart-count"
+project_b_wild_restart_one_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-wild-restart-one -- \
+    sh -c "printf one >> '$project_b_wild_restart_count'" | json_id)
+project_b_wild_restart_two_id=$(api process-start --workspace "$workspace_b_id" \
+    --friendly-name project-b-wild-restart-two -- \
+    sh -c "printf two >> '$project_b_wild_restart_count'" | json_id)
+api process-wait "$project_b_wild_restart_one_id" --timeout-ms 2000 | grep -q '"success":true'
+api process-wait "$project_b_wild_restart_two_id" --timeout-ms 2000 | grep -q '"success":true'
+cube restart "*.project-b-wild-restart-*" >"$tmpdir/wild-restart.out"
+grep -q '^Process project-b-wild-restart-one restarted$' "$tmpdir/wild-restart.out"
+grep -q '^Process project-b-wild-restart-two restarted$' "$tmpdir/wild-restart.out"
+for _ in $(seq 1 100); do
+    if [ -f "$project_b_wild_restart_count" ] &&
+        [ "$(wc -c <"$project_b_wild_restart_count")" -eq 12 ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ "$(wc -c <"$project_b_wild_restart_count")" -ne 12 ]; then
+    echo "wildcard restart did not rerun matching processes" >&2
+    exit 1
+fi
+cube remove "Project B.project-b-wild-restart-one" >/dev/null
+cube remove "Project B.project-b-wild-restart-two" >/dev/null
+
 cube remove "Project B.project-b-logs" >/dev/null
 cube remove "Project B.project-b-push" >/dev/null
 cube remove "Project B.project-b-restart" >/dev/null
@@ -631,6 +700,17 @@ if [ "$status" -eq 0 ]; then
     echo "unsaved killed process should be removable" >&2
     exit 1
 fi
+
+wild_kill_one_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name wild-kill-one sleep 30 | json_id)
+wild_kill_two_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name wild-kill-two sleep 30 | json_id)
+wild_kill_output=$(cube kill "wild-kill-*")
+printf "%s\n" "$wild_kill_output" | grep -q '^Killed 2 processes$'
+api process-wait "$wild_kill_one_id" --timeout-ms 2000 | grep -q '"success":true'
+api process-wait "$wild_kill_two_id" --timeout-ms 2000 | grep -q '"success":true'
+cube remove wild-kill-one >/dev/null
+cube remove wild-kill-two >/dev/null
 
 kill_all_one_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name kill-all-one sleep 30 | json_id)

@@ -14,6 +14,7 @@
 #include "cubicle/workspace.h"
 
 #include <errno.h>
+#include <fnmatch.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
@@ -43,6 +44,7 @@
 #define CUBE_CHANNEL_TTY 8U
 #define CUBE_ATTACH_POLL_MS 50
 #define CUBE_CONNECT_REPLAY_BYTES 16384ULL
+#define CUBE_MAX_PATTERN_TARGETS 512
 
 typedef struct cube_options {
     const char *manager_socket;
@@ -80,6 +82,15 @@ typedef struct cube_process_ref {
     int has_workspace;
     int from_selected_workspace;
 } cube_process_ref_t;
+
+typedef struct cube_process_target {
+    char id[CUBICLE_ID_STRING_LENGTH];
+    char workspace_id[CUBICLE_ID_STRING_LENGTH];
+    char workspace_name[CUBICLE_NAME_MAX];
+    char name[CUBICLE_NAME_MAX];
+    char mode[32];
+    char state[32];
+} cube_process_target_t;
 
 static struct termios cube_saved_terminal;
 static int cube_terminal_restore_active = 0;
@@ -140,13 +151,13 @@ static void print_usage(FILE *stream)
             "  cube events [--follow [--iterations N]]\n"
             "  cube connect [--ro] NAME\n"
             "  cube push [--eof] [--output] NAME\n"
-            "  cube update NAME [--restart|--no-restart|--name NAME]\n"
-            "  cube restart NAME\n"
+            "  cube update NAME|PATTERN [--restart|--no-restart|--name NAME]\n"
+            "  cube restart NAME|PATTERN\n"
             "  cube signal NAME SIGNAL\n"
             "  cube stop NAME\n"
-            "  cube kill [--all] [--cleanup] [NAME]\n"
-            "  cube save NAME\n"
-            "  cube unsave NAME\n"
+            "  cube kill [--all] [--cleanup] [NAME|PATTERN]\n"
+            "  cube save NAME|PATTERN\n"
+            "  cube unsave NAME|PATTERN\n"
             "  cube remove NAME\n"
             "  cube cleanup\n"
             "  cube shutdown [--manager-only]\n"
@@ -155,7 +166,8 @@ static void print_usage(FILE *stream)
             "  cube defaults show|set|reset ...\n"
             "\n"
             "Run and reconnect to persistent processes inside Cubicle workspaces.\n"
-            "Process NAME may be written as WORKSPACE.NAME to target an inactive workspace.\n");
+            "Process NAME may be written as WORKSPACE.NAME to target an inactive workspace.\n"
+            "Wildcard PATTERN is supported by restart, update restart policy, kill, save, and unsave.\n");
 }
 
 static int print_command_usage(const char *command, FILE *stream)
@@ -196,15 +208,15 @@ static int print_command_usage(const char *command, FILE *stream)
     }
     if (strcmp(command, "restart") == 0) {
         fprintf(stream,
-                "Usage:\n  cube restart NAME\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "Usage:\n  cube restart NAME|PATTERN\n"
+                "\nNAME may be WORKSPACE.NAME. PATTERN may be NAME or WORKSPACE.NAME with wildcards.\n");
         return 0;
     }
     if (strcmp(command, "update") == 0) {
         fprintf(stream,
                 "Usage:\n"
-                "  cube update NAME [--restart|--no-restart|--name NAME]\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "  cube update NAME|PATTERN [--restart|--no-restart|--name NAME]\n"
+                "\nNAME may be WORKSPACE.NAME. PATTERN may be NAME or WORKSPACE.NAME with wildcards for --restart and --no-restart.\n");
         return 0;
     }
     if (strcmp(command, "events") == 0) {
@@ -240,25 +252,25 @@ static int print_command_usage(const char *command, FILE *stream)
     if (strcmp(command, "kill") == 0) {
         fprintf(stream,
                 "Usage:\n"
-                "  cube kill [--cleanup] NAME\n"
+                "  cube kill [--cleanup] NAME|PATTERN\n"
                 "  cube kill --all [--cleanup]\n"
                 "\n"
                 "Options:\n"
                 "  --all       Kill all running processes in the selected workspace.\n"
                 "  --cleanup   Remove killed process records after they exit.\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "\nNAME may be WORKSPACE.NAME. PATTERN may be NAME or WORKSPACE.NAME with wildcards.\n");
         return 0;
     }
     if (strcmp(command, "save") == 0) {
         fprintf(stream,
-                "Usage:\n  cube save NAME\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "Usage:\n  cube save NAME|PATTERN\n"
+                "\nNAME may be WORKSPACE.NAME. PATTERN may be NAME or WORKSPACE.NAME with wildcards.\n");
         return 0;
     }
     if (strcmp(command, "unsave") == 0) {
         fprintf(stream,
-                "Usage:\n  cube unsave NAME\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "Usage:\n  cube unsave NAME|PATTERN\n"
+                "\nNAME may be WORKSPACE.NAME. PATTERN may be NAME or WORKSPACE.NAME with wildcards.\n");
         return 0;
     }
     if (strcmp(command, "remove") == 0) {
@@ -2095,6 +2107,199 @@ static int process_list_for_workspace(const char *manager_socket,
     return result;
 }
 
+static int process_ref_has_wildcards(const char *input)
+{
+    return input != NULL && strpbrk(input, "*?[") != NULL;
+}
+
+static int pattern_segment_matches(const char *pattern, const char *value)
+{
+    if (process_ref_has_wildcards(pattern)) {
+        return fnmatch(pattern, value, 0) == 0;
+    }
+    return strcmp(pattern, value) == 0;
+}
+
+static int append_process_pattern_target(cube_process_target_t *targets,
+                                         size_t *target_count,
+                                         const char *workspace_id,
+                                         const char *workspace_name,
+                                         yyjson_val *item)
+{
+    if (*target_count >= CUBE_MAX_PATTERN_TARGETS) {
+        fprintf(stderr, "cube: too many processes matched pattern\n");
+        return -1;
+    }
+
+    cube_process_target_t *target = &targets[*target_count];
+    if (json_string_field(item, "id", target->id, sizeof(target->id)) < 0 ||
+        json_string_field(item, "friendly_name", target->name,
+                          sizeof(target->name)) < 0 ||
+        json_string_field(item, "mode", target->mode,
+                          sizeof(target->mode)) < 0 ||
+        json_string_field(item, "state", target->state,
+                          sizeof(target->state)) < 0) {
+        fprintf(stderr, "cube: invalid process list response\n");
+        return -1;
+    }
+    snprintf(target->workspace_id, sizeof(target->workspace_id), "%s",
+             workspace_id);
+    snprintf(target->workspace_name, sizeof(target->workspace_name), "%s",
+             workspace_name);
+    ++(*target_count);
+    return 0;
+}
+
+static int collect_process_pattern_matches_in_workspace(
+    const char *manager_socket,
+    const char *workspace_id,
+    const char *workspace_name,
+    const char *process_pattern,
+    cube_process_target_t *targets,
+    size_t *target_count)
+{
+    cube_rpc_response_t response;
+    if (process_list_for_workspace(manager_socket, workspace_id,
+                                   &response) < 0) {
+        return print_rpc_error(&response);
+    }
+
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process list response\n");
+        return 2;
+    }
+
+    yyjson_val *processes = yyjson_obj_get(document.root, "processes");
+    if (!yyjson_is_arr(processes)) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        fprintf(stderr, "cube: invalid process list response\n");
+        return 2;
+    }
+
+    int result = 0;
+    size_t index;
+    size_t max;
+    yyjson_val *item;
+    yyjson_arr_foreach(processes, index, max, item) {
+        char id[CUBICLE_ID_STRING_LENGTH];
+        char name[CUBICLE_NAME_MAX];
+        if (json_string_field(item, "id", id, sizeof(id)) < 0 ||
+            json_string_field(item, "friendly_name", name,
+                              sizeof(name)) < 0) {
+            fprintf(stderr, "cube: invalid process list response\n");
+            result = 2;
+            break;
+        }
+        if (pattern_segment_matches(process_pattern, name) ||
+            pattern_segment_matches(process_pattern, id)) {
+            if (append_process_pattern_target(targets, target_count,
+                                              workspace_id, workspace_name,
+                                              item) < 0) {
+                result = 2;
+                break;
+            }
+        }
+    }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return result;
+}
+
+static int collect_process_pattern_matches(const char *manager_socket,
+                                           const cube_options_t *options,
+                                           const char *pattern,
+                                           cube_process_target_t *targets,
+                                           size_t *target_count)
+{
+    *target_count = 0;
+    cube_process_ref_t ref;
+    memset(&ref, 0, sizeof(ref));
+
+    int qualified = split_qualified_process_ref(pattern, &ref);
+    if (qualified < 0) {
+        return 2;
+    }
+
+    if (!qualified) {
+        int from_selected_workspace = 0;
+        if (resolve_workspace_selection(options, ref.workspace,
+                                        sizeof(ref.workspace),
+                                        &from_selected_workspace) < 0) {
+            fprintf(stderr, "cube: no workspace selected\n");
+            return 1;
+        }
+        snprintf(ref.process, sizeof(ref.process), "%s", pattern);
+        int result = collect_process_pattern_matches_in_workspace(
+            manager_socket, ref.workspace, ref.workspace, ref.process,
+            targets, target_count);
+        if (result != 0) {
+            return result;
+        }
+    } else {
+        cube_rpc_response_t workspace_response;
+        if (call_manager(manager_socket, "workspace.list", "{}",
+                         &workspace_response) < 0) {
+            return print_rpc_error(&workspace_response);
+        }
+
+        cubicle_json_doc_t document;
+        if (cubicle_json_parse(&document, workspace_response.result_json) < 0) {
+            cleanup_rpc_response(&workspace_response);
+            fprintf(stderr, "cube: invalid workspace list response\n");
+            return 2;
+        }
+
+        yyjson_val *workspaces = yyjson_obj_get(document.root, "workspaces");
+        if (!yyjson_is_arr(workspaces)) {
+            cubicle_json_cleanup(&document);
+            cleanup_rpc_response(&workspace_response);
+            fprintf(stderr, "cube: invalid workspace list response\n");
+            return 2;
+        }
+
+        int result = 0;
+        size_t index;
+        size_t max;
+        yyjson_val *item;
+        yyjson_arr_foreach(workspaces, index, max, item) {
+            char id[CUBICLE_ID_STRING_LENGTH];
+            char name[CUBICLE_NAME_MAX];
+            if (json_string_field(item, "id", id, sizeof(id)) < 0 ||
+                json_string_field(item, "name", name, sizeof(name)) < 0) {
+                fprintf(stderr, "cube: invalid workspace list response\n");
+                result = 2;
+                break;
+            }
+            if (!pattern_segment_matches(ref.workspace, name) &&
+                !pattern_segment_matches(ref.workspace, id)) {
+                continue;
+            }
+            result = collect_process_pattern_matches_in_workspace(
+                manager_socket, id, name, ref.process, targets,
+                target_count);
+            if (result != 0) {
+                break;
+            }
+        }
+
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&workspace_response);
+        if (result != 0) {
+            return result;
+        }
+    }
+
+    if (*target_count == 0) {
+        fprintf(stderr, "cube: no processes matched '%s'\n", pattern);
+        return 1;
+    }
+    return 0;
+}
+
 static int process_list_selected_workspace(const char *manager_socket,
                                            const cube_options_t *options)
 {
@@ -2867,19 +3072,12 @@ static int process_saved_by_id(const char *manager_socket,
     return 0;
 }
 
-static int process_save_command(const char *manager_socket,
-                                const cube_options_t *options,
-                                const char *process_name,
-                                int saved)
+static int process_save_by_id(const char *manager_socket,
+                              const cube_options_t *options,
+                              const char *process_id,
+                              const char *display_name,
+                              int saved)
 {
-    char process_id[CUBICLE_ID_STRING_LENGTH];
-    int resolve_result = resolve_process_id(manager_socket, options,
-                                            process_name, process_id,
-                                            sizeof(process_id));
-    if (resolve_result != 0) {
-        return resolve_result;
-    }
-
     char escaped_process_id[CUBICLE_ID_STRING_LENGTH * 2];
     if (cubicle_json_escape(escaped_process_id, sizeof(escaped_process_id),
                             process_id) < 0) {
@@ -2899,10 +3097,65 @@ static int process_save_command(const char *manager_socket,
     if (options->json) {
         printf("%s\n", response.result_json);
     } else {
-        printf("Process %s %s\n", process_name,
+        printf("Process %s %s\n", display_name,
                saved ? "saved" : "unsaved");
     }
     cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int process_save_command(const char *manager_socket,
+                                const cube_options_t *options,
+                                const char *process_name,
+                                int saved)
+{
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    int resolve_result = resolve_process_id(manager_socket, options,
+                                            process_name, process_id,
+                                            sizeof(process_id));
+    if (resolve_result != 0) {
+        return resolve_result;
+    }
+    return process_save_by_id(manager_socket, options, process_id,
+                              process_name, saved);
+}
+
+static int process_save_pattern_command(const char *manager_socket,
+                                        const cube_options_t *options,
+                                        const char *pattern,
+                                        int saved)
+{
+    cube_process_target_t targets[CUBE_MAX_PATTERN_TARGETS];
+    size_t target_count = 0;
+    int result = collect_process_pattern_matches(manager_socket, options,
+                                                 pattern, targets,
+                                                 &target_count);
+    if (result != 0) {
+        return result;
+    }
+
+    size_t changed = 0;
+    for (size_t i = 0; i < target_count; ++i) {
+        char display_name[CUBICLE_NAME_MAX * 2 + 2];
+        int length = snprintf(display_name, sizeof(display_name), "%s.%s",
+                              targets[i].workspace_name, targets[i].name);
+        if (length < 0 || (size_t)length >= sizeof(display_name)) {
+            fprintf(stderr, "cube: process name is too long\n");
+            return 2;
+        }
+        result = process_save_by_id(manager_socket, options, targets[i].id,
+                                    display_name, saved);
+        if (result != 0) {
+            return result;
+        }
+        ++changed;
+    }
+    if (options->json) {
+        fprintf(stderr,
+                "cube: warning: wildcard JSON output is emitted per process\n");
+    } else {
+        printf("%s %zu processes\n", saved ? "Saved" : "Unsaved", changed);
+    }
     return 0;
 }
 
@@ -2962,6 +3215,82 @@ static int process_kill_single(const char *manager_socket,
             printf("Process %s removed\n", process_name);
         } else if (skipped_saved) {
             printf("Process %s saved; cleanup skipped\n", process_name);
+        }
+    }
+    return 0;
+}
+
+static int process_kill_pattern(const char *manager_socket,
+                                const cube_options_t *options,
+                                const char *pattern,
+                                int cleanup_after_kill)
+{
+    cube_process_target_t targets[CUBE_MAX_PATTERN_TARGETS];
+    size_t target_count = 0;
+    int result = collect_process_pattern_matches(manager_socket, options,
+                                                 pattern, targets,
+                                                 &target_count);
+    if (result != 0) {
+        return result;
+    }
+
+    size_t killed_count = 0;
+    size_t removed_count = 0;
+    size_t skipped_saved_count = 0;
+    for (size_t i = 0; i < target_count; ++i) {
+        if (strcmp(targets[i].state, "running") != 0 &&
+            strcmp(targets[i].state, "starting") != 0 &&
+            strcmp(targets[i].state, "stopping") != 0 &&
+            strcmp(targets[i].state, "draining") != 0) {
+            continue;
+        }
+        result = process_action_by_id(manager_socket, targets[i].id,
+                                      "process.kill", 0);
+        if (result != 0) {
+            return result;
+        }
+        ++killed_count;
+    }
+
+    if (cleanup_after_kill) {
+        for (size_t i = 0; i < target_count; ++i) {
+            if (strcmp(targets[i].state, "running") != 0 &&
+                strcmp(targets[i].state, "starting") != 0 &&
+                strcmp(targets[i].state, "stopping") != 0 &&
+                strcmp(targets[i].state, "draining") != 0) {
+                continue;
+            }
+            result = wait_for_process_timeout(manager_socket, targets[i].id,
+                                              5000);
+            if (result != 0) {
+                return result;
+            }
+            int saved = 0;
+            result = process_saved_by_id(manager_socket, targets[i].id,
+                                         &saved);
+            if (result != 0) {
+                return result;
+            }
+            if (saved) {
+                ++skipped_saved_count;
+                continue;
+            }
+            result = remove_process_by_id(manager_socket, targets[i].id);
+            if (result != 0) {
+                return result;
+            }
+            ++removed_count;
+        }
+    }
+
+    if (options->json) {
+        printf("{\"killed_count\":%zu,\"removed_count\":%zu,\"skipped_saved_count\":%zu}\n",
+               killed_count, removed_count, skipped_saved_count);
+    } else {
+        printf("Killed %zu processes\n", killed_count);
+        if (cleanup_after_kill) {
+            printf("Removed %zu processes\n", removed_count);
+            printf("Skipped %zu saved processes\n", skipped_saved_count);
         }
     }
     return 0;
@@ -3126,6 +3455,10 @@ static int process_kill_command(const char *manager_socket,
         fprintf(stderr, "cube: kill requires a process name or --all\n");
         return 2;
     }
+    if (process_ref_has_wildcards(process_name)) {
+        return process_kill_pattern(manager_socket, options, process_name,
+                                    cleanup_after_kill);
+    }
     return process_kill_single(manager_socket, options, process_name,
                                cleanup_after_kill);
 }
@@ -3186,6 +3519,51 @@ static int process_update(const char *manager_socket,
     if (new_name != NULL && !valid_name(new_name)) {
         fprintf(stderr, "cube: invalid process name '%s'\n", new_name);
         return 2;
+    }
+
+    if (process_ref_has_wildcards(process_name)) {
+        if (new_name != NULL) {
+            fprintf(stderr,
+                    "cube: wildcard update does not support --name\n");
+            return 2;
+        }
+        cube_process_target_t targets[CUBE_MAX_PATTERN_TARGETS];
+        size_t target_count = 0;
+        int result = collect_process_pattern_matches(manager_socket, options,
+                                                     process_name, targets,
+                                                     &target_count);
+        if (result != 0) {
+            return result;
+        }
+        for (size_t i = 0; i < target_count; ++i) {
+            cubicle_json_builder_t params = {0};
+            if (cubicle_json_builder_append(&params, "{\"process\":") < 0 ||
+                cubicle_json_builder_append_string(&params,
+                                                   targets[i].id) < 0 ||
+                cubicle_json_builder_append(&params,
+                                            restart ? ",\"restart\":true}"
+                                                    : ",\"restart\":false}") < 0) {
+                cubicle_json_builder_cleanup(&params);
+                fprintf(stderr, "cube: failed to build process update request\n");
+                return 2;
+            }
+            cube_rpc_response_t response;
+            if (call_manager(manager_socket, "process.update", params.data,
+                             &response) < 0) {
+                cubicle_json_builder_cleanup(&params);
+                return print_rpc_error(&response);
+            }
+            cubicle_json_builder_cleanup(&params);
+            if (options->json) {
+                printf("%s\n", response.result_json);
+            } else {
+                printf("Process %s.%s updated (restart %s)\n",
+                       targets[i].workspace_name, targets[i].name,
+                       restart ? "enabled" : "disabled");
+            }
+            cleanup_rpc_response(&response);
+        }
+        return 0;
     }
 
     cube_process_ref_t ref;
@@ -3264,35 +3642,15 @@ static int process_update(const char *manager_socket,
     return 0;
 }
 
-static int process_restart(const char *manager_socket,
-                           const cube_options_t *options,
-                           const char *process_name)
+static int process_restart_from_get_params(const char *manager_socket,
+                                           const cube_options_t *options,
+                                           const char *get_params)
 {
-    cube_process_ref_t ref;
-    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
-    if (ref_result != 0) {
-        return ref_result;
-    }
-
-    cubicle_json_builder_t get_params = {0};
-    if (cubicle_json_builder_append(&get_params, "{\"process\":") < 0 ||
-        cubicle_json_builder_append_string(&get_params, ref.process) < 0 ||
-        cubicle_json_builder_append(&get_params, ",\"workspace_id\":") < 0 ||
-        cubicle_json_builder_append_string(&get_params, ref.workspace) < 0 ||
-        cubicle_json_builder_append(&get_params, "}") < 0) {
-        cubicle_json_builder_cleanup(&get_params);
-        fprintf(stderr, "cube: failed to encode process lookup\n");
-        return 2;
-    }
-
     cube_rpc_response_t response;
-    if (call_manager(manager_socket, "process.get", get_params.data,
+    if (call_manager(manager_socket, "process.get", get_params,
                      &response) < 0) {
-        cubicle_json_builder_cleanup(&get_params);
-        return print_workspace_rpc_error(&response, ref.workspace,
-                                         ref.from_selected_workspace);
+        return print_rpc_error(&response);
     }
-    cubicle_json_builder_cleanup(&get_params);
 
     cubicle_json_doc_t document;
     if (cubicle_json_parse(&document, response.result_json) < 0) {
@@ -3411,6 +3769,82 @@ static int process_restart(const char *manager_socket,
     }
     cleanup_rpc_response(&start_response);
     return 0;
+}
+
+static int process_restart_by_id(const char *manager_socket,
+                                 const cube_options_t *options,
+                                 const char *process_id)
+{
+    cubicle_json_builder_t get_params = {0};
+    if (cubicle_json_builder_append(&get_params, "{\"process\":") < 0 ||
+        cubicle_json_builder_append_string(&get_params, process_id) < 0 ||
+        cubicle_json_builder_append(&get_params, "}") < 0) {
+        cubicle_json_builder_cleanup(&get_params);
+        fprintf(stderr, "cube: failed to encode process lookup\n");
+        return 2;
+    }
+    int result = process_restart_from_get_params(manager_socket, options,
+                                                 get_params.data);
+    cubicle_json_builder_cleanup(&get_params);
+    return result;
+}
+
+static int process_restart_pattern(const char *manager_socket,
+                                   const cube_options_t *options,
+                                   const char *pattern)
+{
+    cube_process_target_t targets[CUBE_MAX_PATTERN_TARGETS];
+    size_t target_count = 0;
+    int result = collect_process_pattern_matches(manager_socket, options,
+                                                 pattern, targets,
+                                                 &target_count);
+    if (result != 0) {
+        return result;
+    }
+    for (size_t i = 0; i < target_count; ++i) {
+        result = process_restart_by_id(manager_socket, options,
+                                       targets[i].id);
+        if (result != 0) {
+            return result;
+        }
+    }
+    return 0;
+}
+
+static int process_restart(const char *manager_socket,
+                           const cube_options_t *options,
+                           const char *process_name)
+{
+    cube_process_ref_t ref;
+    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    if (ref_result != 0) {
+        return ref_result;
+    }
+
+    cubicle_json_builder_t get_params = {0};
+    if (cubicle_json_builder_append(&get_params, "{\"process\":") < 0 ||
+        cubicle_json_builder_append_string(&get_params, ref.process) < 0 ||
+        cubicle_json_builder_append(&get_params, ",\"workspace_id\":") < 0 ||
+        cubicle_json_builder_append_string(&get_params, ref.workspace) < 0 ||
+        cubicle_json_builder_append(&get_params, "}") < 0) {
+        cubicle_json_builder_cleanup(&get_params);
+        fprintf(stderr, "cube: failed to encode process lookup\n");
+        return 2;
+    }
+
+    cube_rpc_response_t probe;
+    if (call_manager(manager_socket, "process.get", get_params.data,
+                     &probe) < 0) {
+        cubicle_json_builder_cleanup(&get_params);
+        return print_workspace_rpc_error(&probe, ref.workspace,
+                                         ref.from_selected_workspace);
+    }
+    cleanup_rpc_response(&probe);
+
+    int result = process_restart_from_get_params(manager_socket, options,
+                                                 get_params.data);
+    cubicle_json_builder_cleanup(&get_params);
+    return result;
 }
 
 static int generated_process_name(char *buffer,
@@ -5256,6 +5690,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "cube: restart requires a process name\n");
             return 2;
         }
+        if (process_ref_has_wildcards(argv[command_index + 1])) {
+            return process_restart_pattern(manager_endpoint, &options,
+                                           argv[command_index + 1]);
+        }
         return process_restart(manager_endpoint, &options,
                                argv[command_index + 1]);
     }
@@ -5301,6 +5739,11 @@ int main(int argc, char **argv)
         if (command_index + 2 != argc) {
             fprintf(stderr, "cube: %s requires a process name\n", command);
             return 2;
+        }
+        if (process_ref_has_wildcards(argv[command_index + 1])) {
+            return process_save_pattern_command(manager_endpoint, &options,
+                                                argv[command_index + 1],
+                                                strcmp(command, "save") == 0);
         }
         return process_save_command(manager_endpoint, &options,
                                     argv[command_index + 1],

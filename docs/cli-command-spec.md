@@ -358,6 +358,11 @@ Any command that takes a process `NAME` accepts `WORKSPACE.NAME` to reference a
 cube outside the selected workspace, for example `cube connect Shogun.CScope`.
 The split is made at the last `.` in the argument.
 
+Multi-action commands accept shell-style wildcard `PATTERN` values in either
+`NAME` or `WORKSPACE.NAME` form. Examples: `bash-*`, `*.codex`, and `*.*`.
+Wildcard patterns are supported by `restart`, `kill`, `save`, `unsave`, and
+restart-policy-only `update`. `cube update PATTERN --name NAME` is invalid.
+
 ### 5.2 Inspect one process
 
 ```console
@@ -516,12 +521,12 @@ Core lifecycle commands:
 ```console
 cube signal NAME SIGNAL
 cube stop NAME
-cube kill [--all] [--cleanup] [NAME]
-cube restart NAME
-cube update NAME [--restart|--no-restart|--name NAME]
+cube kill [--all] [--cleanup] [NAME|PATTERN]
+cube restart NAME|PATTERN
+cube update NAME|PATTERN [--restart|--no-restart|--name NAME]
 cube push [--eof] [--output] NAME
-cube save NAME
-cube unsave NAME
+cube save NAME|PATTERN
+cube unsave NAME|PATTERN
 cube remove NAME
 cube cleanup
 cube shutdown [--manager-only]
@@ -548,7 +553,8 @@ Recommended semantics:
 - `update`: change retained process attributes without restarting the process.
   `--restart` enables manager-start restart, `--no-restart` disables it, and
   `--name NAME` renames the process within its workspace. The target may be
-  written as `WORKSPACE.NAME`.
+  written as `WORKSPACE.NAME`. Wildcard patterns may be used only with
+  `--restart` or `--no-restart`; wildcard rename is rejected.
 - `push`: copy local stdin into process stdin, optionally closing stdin after
   the write with `--eof` and printing new output with `--output`.
 - `save`: mark a process record so cleanup commands skip it.
@@ -815,9 +821,9 @@ Implement:
 - `cube inspect NAME`
 - `cube signal NAME SIGNAL`
 - `cube stop NAME`
-- `cube kill [--all] [--cleanup] [NAME]`
-- `cube save NAME`
-- `cube unsave NAME`
+- `cube kill [--all] [--cleanup] [NAME|PATTERN]`
+- `cube save NAME|PATTERN`
+- `cube unsave NAME|PATTERN`
 - `cube remove NAME`
 - `cube cleanup`
 - explicit `--workspace NAME`

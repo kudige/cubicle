@@ -63,11 +63,11 @@ grep -q 'cube logs \[--follow\] \[--stdout|--stderr\] \[--start N\] \[--end N\] 
 grep -q 'cube events \[--follow \[--iterations N\]\]' "$PWD/cube-help.out"
 grep -q 'cube signal NAME SIGNAL' "$PWD/cube-help.out"
 grep -q 'cube push \[--eof\] \[--output\] NAME' "$PWD/cube-help.out"
-grep -q 'cube update NAME \[--restart|--no-restart|--name NAME\]' "$PWD/cube-help.out"
-grep -q 'cube restart NAME' "$PWD/cube-help.out"
-grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME\]' "$PWD/cube-help.out"
-grep -q 'cube save NAME' "$PWD/cube-help.out"
-grep -q 'cube unsave NAME' "$PWD/cube-help.out"
+grep -q 'cube update NAME|PATTERN \[--restart|--no-restart|--name NAME\]' "$PWD/cube-help.out"
+grep -q 'cube restart NAME|PATTERN' "$PWD/cube-help.out"
+grep -q 'cube kill \[--all\] \[--cleanup\] \[NAME|PATTERN\]' "$PWD/cube-help.out"
+grep -q 'cube save NAME|PATTERN' "$PWD/cube-help.out"
+grep -q 'cube unsave NAME|PATTERN' "$PWD/cube-help.out"
 grep -q 'cube remove NAME' "$PWD/cube-help.out"
 grep -q 'cube config show|effective|paths|validate' "$PWD/cube-help.out"
 grep -q 'cube defaults show|set|reset' "$PWD/cube-help.out"
@@ -88,7 +88,7 @@ if [ -s "$PWD/cube-kill-help.err" ]; then
     echo "cube kill help should write to stdout only" >&2
     exit 1
 fi
-grep -q 'cube kill \[--cleanup\] NAME' "$PWD/cube-kill-help.out"
+grep -q 'cube kill \[--cleanup\] NAME|PATTERN' "$PWD/cube-kill-help.out"
 grep -q 'cube kill --all \[--cleanup\]' "$PWD/cube-kill-help.out"
 
 cube connect --help >"$PWD/cube-connect-help.out" 2>"$PWD/cube-connect-help.err"
@@ -117,14 +117,14 @@ if [ -s "$PWD/cube-restart-help.err" ]; then
     echo "cube restart help should write to stdout only" >&2
     exit 1
 fi
-grep -q 'cube restart NAME' "$PWD/cube-restart-help.out"
+grep -q 'cube restart NAME|PATTERN' "$PWD/cube-restart-help.out"
 
 cube update --help >"$PWD/cube-update-help.out" 2>"$PWD/cube-update-help.err"
 if [ -s "$PWD/cube-update-help.err" ]; then
     echo "cube update help should write to stdout only" >&2
     exit 1
 fi
-grep -q 'cube update NAME \[--restart|--no-restart|--name NAME\]' "$PWD/cube-update-help.out"
+grep -q 'cube update NAME|PATTERN \[--restart|--no-restart|--name NAME\]' "$PWD/cube-update-help.out"
 
 cube shutdown --help >"$PWD/cube-shutdown-help.out" 2>"$PWD/cube-shutdown-help.err"
 if [ -s "$PWD/cube-shutdown-help.err" ]; then
@@ -145,7 +145,7 @@ if [ -s "$PWD/cube-save-help.err" ]; then
     echo "cube save help should write to stdout only" >&2
     exit 1
 fi
-grep -q 'cube save NAME' "$PWD/cube-save-help.out"
+grep -q 'cube save NAME|PATTERN' "$PWD/cube-save-help.out"
 
 cube defaults --help >"$PWD/cube-defaults-help.out" 2>"$PWD/cube-defaults-help.err"
 if [ -s "$PWD/cube-defaults-help.err" ]; then

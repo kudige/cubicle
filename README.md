@@ -136,15 +136,21 @@ cube inspect NAME
 cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube connect [--ro] NAME
 cube push [--eof] [--output] NAME
-cube update NAME [--restart|--no-restart|--name NAME]
-cube restart NAME
+cube update NAME|PATTERN [--restart|--no-restart|--name NAME]
+cube restart NAME|PATTERN
 cube stop NAME
-cube kill [--all] [--cleanup] [NAME]
-cube save NAME
-cube unsave NAME
+cube kill [--all] [--cleanup] [NAME|PATTERN]
+cube save NAME|PATTERN
+cube unsave NAME|PATTERN
 cube cleanup
 cube shutdown [--manager-only]
 ```
+
+Process patterns use shell-style wildcards in either `NAME` or
+`WORKSPACE.NAME` form. Examples: `cube restart "bash-*"`,
+`cube restart "*.codex"`, and `cube kill --cleanup "*.*"`. Wildcards are
+available for `restart`, `kill`, `save`, `unsave`, and `cube update --restart`
+or `--no-restart`; wildcard rename is intentionally rejected.
 
 ### Workspaces
 

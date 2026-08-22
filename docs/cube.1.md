@@ -22,13 +22,13 @@ cube logs [--follow] [--stdout|--stderr] [--start N] [--end N] NAME
 cube events [--follow [--iterations N]]
 cube connect [--ro] NAME
 cube push [--eof] [--output] NAME
-cube update NAME [--restart|--no-restart|--name NAME]
-cube restart NAME
+cube update NAME|PATTERN [--restart|--no-restart|--name NAME]
+cube restart NAME|PATTERN
 cube stop NAME
-cube kill [--all] [--cleanup] [NAME]
+cube kill [--all] [--cleanup] [NAME|PATTERN]
 cube signal NAME SIGNAL
-cube save NAME
-cube unsave NAME
+cube save NAME|PATTERN
+cube unsave NAME|PATTERN
 cube remove NAME
 cube cleanup
 cube shutdown [--manager-only]
@@ -239,6 +239,12 @@ For commands that take a process `NAME`, use `WORKSPACE.NAME` to target a cube
 outside the currently selected workspace. If the workspace name contains spaces,
 quote the whole reference, for example `cube inspect "Project A.server"`.
 
+For multi-action commands, `PATTERN` may use shell-style wildcards in either
+`NAME` or `WORKSPACE.NAME` form. Examples: `cube restart "bash-*"`,
+`cube restart "*.codex"`, and `cube kill --cleanup "*.*"`. Wildcards are
+supported by `restart`, `kill`, `save`, `unsave`, and restart-policy-only
+`update`; `cube update PATTERN --name NAME` is rejected.
+
 ## Logs
 
 ```text
@@ -366,10 +372,10 @@ cube push --eof --output worker < input.txt
 `cube stop NAME`
 : Request graceful termination through the manager.
 
-`cube kill NAME`
+`cube kill NAME|PATTERN`
 : Request forceful termination through the manager.
 
-`cube kill --cleanup NAME`
+`cube kill --cleanup NAME|PATTERN`
 : Request forceful termination, wait briefly for the process to exit, then
   remove that process record unless it is saved.
 
@@ -382,26 +388,26 @@ cube push --eof --output worker < input.txt
   cleanup. This removes all unsaved non-live process records, including records
   that were already completed or lost before the kill command ran.
 
-`cube restart NAME`
+`cube restart NAME|PATTERN`
 : Kill the process if it is running, remove the old unsaved process record, and
   start a new background process with the same name, mode, directory, and stored
   command argv.
 
-`cube update NAME [--restart|--no-restart|--name NAME]`
+`cube update NAME|PATTERN [--restart|--no-restart|--name NAME]`
 : Change retained process attributes. `--restart` enables manager-start
   restart, `--no-restart` disables it, and `--name` renames the process within
-  its workspace.
+  its workspace. Wildcards may only be used with `--restart` or `--no-restart`.
 
 `cube signal NAME SIGNAL`
 : Send a signal. `SIGNAL` may be a number or one of `HUP`, `INT`, `QUIT`,
   `TERM`, `KILL`, `USR1`, or `USR2`; names may also include the `SIG` prefix,
   for example `SIGTERM`.
 
-`cube save NAME`
+`cube save NAME|PATTERN`
 : Mark a process record as saved. Saved records are skipped by `cube cleanup`
   and by `cube kill --cleanup`.
 
-`cube unsave NAME`
+`cube unsave NAME|PATTERN`
 : Clear a process record's saved flag so cleanup commands may remove it.
 
 `cube remove NAME`
