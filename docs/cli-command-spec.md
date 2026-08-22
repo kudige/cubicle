@@ -528,7 +528,7 @@ cube push [--eof] [--output] NAME
 cube save NAME|PATTERN
 cube unsave NAME|PATTERN
 cube remove NAME
-cube cleanup
+cube cleanup [NAME|PATTERN]
 cube shutdown [--manager-only]
 ```
 
@@ -560,8 +560,9 @@ Recommended semantics:
 - `save`: mark a process record so cleanup commands skip it.
 - `unsave`: clear the saved mark.
 - `remove`: remove retained process state; fail if running unless explicitly forced.
-- `cleanup`: remove retained terminal process state in the current workspace;
-  skip live and saved processes.
+- `cleanup`: without a selector, remove retained process state in the selected
+  workspace; skip live and saved processes. With `NAME` or wildcard `PATTERN`,
+  clean only matching non-live, unsaved process records.
 - `shutdown`: stop all managed processes and then stop the manager daemon.
   `--manager-only` preserves the older manager-only shutdown behavior.
 
@@ -825,7 +826,7 @@ Implement:
 - `cube save NAME|PATTERN`
 - `cube unsave NAME|PATTERN`
 - `cube remove NAME`
-- `cube cleanup`
+- `cube cleanup [NAME|PATTERN]`
 - explicit `--workspace NAME`
 - generated friendly names and collision handling
 - standard built-in defaults:

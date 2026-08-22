@@ -71,7 +71,7 @@ grep -q 'cube unsave NAME|PATTERN' "$PWD/cube-help.out"
 grep -q 'cube remove NAME' "$PWD/cube-help.out"
 grep -q 'cube config show|effective|paths|validate' "$PWD/cube-help.out"
 grep -q 'cube defaults show|set|reset' "$PWD/cube-help.out"
-grep -q 'cube cleanup' "$PWD/cube-help.out"
+grep -q 'cube cleanup \[NAME|PATTERN\]' "$PWD/cube-help.out"
 grep -q 'cube shutdown \[--manager-only\]' "$PWD/cube-help.out"
 grep -q 'cube access list|add|set-role|remove|revoke' "$PWD/cube-help.out"
 grep -q 'cube connect \[--ro\] NAME' "$PWD/cube-help.out"
@@ -146,6 +146,13 @@ if [ -s "$PWD/cube-save-help.err" ]; then
     exit 1
 fi
 grep -q 'cube save NAME|PATTERN' "$PWD/cube-save-help.out"
+
+cube cleanup --help >"$PWD/cube-cleanup-help.out" 2>"$PWD/cube-cleanup-help.err"
+if [ -s "$PWD/cube-cleanup-help.err" ]; then
+    echo "cube cleanup help should write to stdout only" >&2
+    exit 1
+fi
+grep -q 'cube cleanup \[NAME|PATTERN\]' "$PWD/cube-cleanup-help.out"
 
 cube defaults --help >"$PWD/cube-defaults-help.out" 2>"$PWD/cube-defaults-help.err"
 if [ -s "$PWD/cube-defaults-help.err" ]; then

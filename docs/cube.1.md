@@ -30,7 +30,7 @@ cube signal NAME SIGNAL
 cube save NAME|PATTERN
 cube unsave NAME|PATTERN
 cube remove NAME
-cube cleanup
+cube cleanup [NAME|PATTERN]
 cube shutdown [--manager-only]
 cube access list
 cube access add PUBLIC_KEY_OR_FILE [--role observer|operator|owner] [--label LABEL]
@@ -414,9 +414,10 @@ cube push --eof --output worker < input.txt
 : Remove a retained process record. This is for processes that have already
   completed, failed, or otherwise reached a removable state.
 
-`cube cleanup`
-: Remove completed/removable process records in the selected workspace and
-  report how many live and saved processes were skipped.
+`cube cleanup [NAME|PATTERN]`
+: Without an argument, remove completed/removable process records in the
+  selected workspace and report how many live and saved processes were skipped.
+  With `NAME` or `PATTERN`, only matching process records are considered.
 
 `cube shutdown`
 : Stop all managed processes and then ask the manager daemon to exit. Use

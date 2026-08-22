@@ -269,6 +269,7 @@ cube signal worker TERM
 cube save important-session
 cube unsave important-session
 cube cleanup
+cube cleanup "old-build-*"
 cube shutdown
 ```
 

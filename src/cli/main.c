@@ -117,6 +117,22 @@ static int json_string_field(yyjson_val *object,
                              const char *field,
                              char *buffer,
                              size_t buffer_size);
+static int manager_process_is_terminal(const char *manager_socket,
+                                       const char *process_id,
+                                       int *completed);
+static int process_state_is_live(const char *state);
+static int resolve_process_metadata(const char *manager_socket,
+                                    const cube_options_t *options,
+                                    const char *process_name,
+                                    char *process_id,
+                                    size_t process_id_size,
+                                    char *mode,
+                                    size_t mode_size);
+static int remove_process_by_id(const char *manager_socket,
+                                const char *process_id);
+static int process_saved_by_id(const char *manager_socket,
+                               const char *process_id,
+                               int *saved);
 
 static void cube_sleep_poll_interval(void)
 {
@@ -159,7 +175,7 @@ static void print_usage(FILE *stream)
             "  cube save NAME|PATTERN\n"
             "  cube unsave NAME|PATTERN\n"
             "  cube remove NAME\n"
-            "  cube cleanup\n"
+            "  cube cleanup [NAME|PATTERN]\n"
             "  cube shutdown [--manager-only]\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
             "  cube config show|effective|paths|validate\n"
@@ -280,7 +296,9 @@ static int print_command_usage(const char *command, FILE *stream)
         return 0;
     }
     if (strcmp(command, "cleanup") == 0) {
-        fprintf(stream, "Usage:\n  cube cleanup\n");
+        fprintf(stream,
+                "Usage:\n  cube cleanup [NAME|PATTERN]\n"
+                "\nWithout an argument, cleanup scans the selected workspace. With NAME or PATTERN, cleanup only considers matching processes.\n");
         return 0;
     }
     if (strcmp(command, "shutdown") == 0) {
@@ -2497,6 +2515,16 @@ typedef struct cleanup_counts {
     uint64_t skipped_saved_count;
 } cleanup_counts_t;
 
+static void print_cleanup_counts(const cleanup_counts_t *counts)
+{
+    printf("Removed %llu processes\n",
+           (unsigned long long)counts->removed_count);
+    printf("Skipped %llu live processes\n",
+           (unsigned long long)counts->skipped_live_count);
+    printf("Skipped %llu saved processes\n",
+           (unsigned long long)counts->skipped_saved_count);
+}
+
 static int manager_cleanup_workspace(const char *manager_socket,
                                      const char *workspace,
                                      int json_output,
@@ -2557,9 +2585,100 @@ static int manager_cleanup_workspace(const char *manager_socket,
     return 0;
 }
 
-static int process_cleanup(const char *manager_socket,
-                           const cube_options_t *options)
+static int process_cleanup_selector_by_id(const char *manager_socket,
+                                          const char *process_id,
+                                          cleanup_counts_t *counts)
 {
+    int saved = 0;
+    int result = process_saved_by_id(manager_socket, process_id, &saved);
+    if (result != 0) {
+        return result;
+    }
+    if (saved) {
+        ++counts->skipped_saved_count;
+        return 0;
+    }
+    result = remove_process_by_id(manager_socket, process_id);
+    if (result != 0) {
+        return result;
+    }
+    ++counts->removed_count;
+    return 0;
+}
+
+static int process_cleanup_selector(const char *manager_socket,
+                                    const cube_options_t *options,
+                                    const char *selector,
+                                    cleanup_counts_t *counts)
+{
+    memset(counts, 0, sizeof(*counts));
+    if (process_ref_has_wildcards(selector)) {
+        cube_process_target_t targets[CUBE_MAX_PATTERN_TARGETS];
+        size_t target_count = 0;
+        int result = collect_process_pattern_matches(manager_socket, options,
+                                                     selector, targets,
+                                                     &target_count);
+        if (result != 0) {
+            return result;
+        }
+        for (size_t i = 0; i < target_count; ++i) {
+            if (process_state_is_live(targets[i].state)) {
+                ++counts->skipped_live_count;
+                continue;
+            }
+            result = process_cleanup_selector_by_id(manager_socket,
+                                                    targets[i].id, counts);
+            if (result != 0) {
+                return result;
+            }
+        }
+        return 0;
+    }
+
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char mode[32];
+    int result = resolve_process_metadata(manager_socket, options, selector,
+                                          process_id, sizeof(process_id),
+                                          mode, sizeof(mode));
+    if (result != 0) {
+        return result;
+    }
+
+    int completed = 0;
+    result = manager_process_is_terminal(manager_socket, process_id,
+                                         &completed);
+    if (result != 0) {
+        return result;
+    }
+    if (!completed) {
+        ++counts->skipped_live_count;
+        return 0;
+    }
+    return process_cleanup_selector_by_id(manager_socket, process_id, counts);
+}
+
+static int process_cleanup(const char *manager_socket,
+                           const cube_options_t *options,
+                           const char *selector)
+{
+    if (selector != NULL) {
+        cleanup_counts_t counts = {0};
+        int result = process_cleanup_selector(manager_socket, options,
+                                              selector, &counts);
+        if (result != 0) {
+            return result;
+        }
+        if (options->json) {
+            printf("{\"removed_count\":%llu,\"skipped_live_count\":%llu,\"skipped_saved_count\":%llu}\n",
+                   (unsigned long long)counts.removed_count,
+                   (unsigned long long)counts.skipped_live_count,
+                   (unsigned long long)counts.skipped_saved_count);
+        } else {
+            print_cleanup_counts(&counts);
+        }
+        return 0;
+    }
+
     char workspace[CUBICLE_NAME_MAX];
     if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
@@ -2573,12 +2692,7 @@ static int process_cleanup(const char *manager_socket,
         return result;
     }
 
-    printf("Removed %llu processes\n",
-           (unsigned long long)counts.removed_count);
-    printf("Skipped %llu live processes\n",
-           (unsigned long long)counts.skipped_live_count);
-    printf("Skipped %llu saved processes\n",
-           (unsigned long long)counts.skipped_saved_count);
+    print_cleanup_counts(&counts);
     return 0;
 }
 
@@ -5639,11 +5753,14 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(command, "cleanup") == 0) {
-        if (command_index + 1 != argc) {
-            fprintf(stderr, "cube: cleanup does not take arguments\n");
+        if (command_index + 2 < argc) {
+            fprintf(stderr, "cube: cleanup takes at most one process selector\n");
             return 2;
         }
-        return process_cleanup(manager_endpoint, &options);
+        return process_cleanup(manager_endpoint, &options,
+                               command_index + 1 < argc
+                                   ? argv[command_index + 1]
+                                   : NULL);
     }
 
     if (strcmp(command, "shutdown") == 0) {
