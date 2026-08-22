@@ -72,8 +72,10 @@ static void test_defaults(void)
     assert(config.controller_debug_library == 0);
     assert(config.controller_debug_terminal == 0);
     assert(config.cube_debug_library == 0);
+    assert(config.cube_automanager == 1);
     assert(config.desk_debug_library == 0);
     assert(config.desk_debug_terminal == 0);
+    assert(config.desk_automanager == 1);
     assert(config.desk_prefix_key == 0x18);
     assert(config.desk_key_binding_count == 10);
     assert(config.desk_key_bindings[0].uses_prefix == 1);
@@ -146,9 +148,11 @@ static void test_override_file(void)
                "\n"
                "[cube]\n"
                "debug=library\n"
+               "automanager=false\n"
                "\n"
                "[desk]\n"
                "debug=library,terminal\n"
+               "automanager=false\n"
                "prefix=Control-Space\n"
                "\n"
                "[desk.keys]\n"
@@ -191,8 +195,10 @@ static void test_override_file(void)
     assert(config.controller_debug_library == 1);
     assert(config.controller_debug_terminal == 1);
     assert(config.cube_debug_library == 1);
+    assert(config.cube_automanager == 0);
     assert(config.desk_debug_library == 1);
     assert(config.desk_debug_terminal == 1);
+    assert(config.desk_automanager == 0);
     assert(config.desk_prefix_key == 0);
     assert(config.desk_key_binding_count == 11);
     int saw_rebound_prefix_n = 0;
@@ -300,8 +306,10 @@ static void test_user_config_file(void)
     assert(config.controller_debug_library == 0);
     assert(config.controller_debug_terminal == 1);
     assert(config.cube_debug_library == 1);
+    assert(config.cube_automanager == 1);
     assert(config.desk_debug_library == 0);
     assert(config.desk_debug_terminal == 0);
+    assert(config.desk_automanager == 1);
     const cubicle_config_origin_t *origin =
         cubicle_config_origin(&config, CUBICLE_CONFIG_MANAGER_STATE_DIR);
     assert(origin != NULL);
@@ -438,10 +446,22 @@ static void test_invalid_values(void)
     assert(strstr(error, "cube.debug") != NULL);
 
     write_file(path,
+               "[cube]\n"
+               "automanager=maybe\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "cube.automanager") != NULL);
+
+    write_file(path,
                "[desk]\n"
                "debug=input\n");
     assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
     assert(strstr(error, "desk.debug") != NULL);
+
+    write_file(path,
+               "[desk]\n"
+               "automanager=maybe\n");
+    assert(cubicle_config_load(&config, error, sizeof(error)) < 0);
+    assert(strstr(error, "desk.automanager") != NULL);
 
     write_file(path,
                "[desk]\n"

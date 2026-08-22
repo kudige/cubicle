@@ -446,6 +446,8 @@ static int command_config(const cubicle_config_t *config,
                           : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
+        printf("cube.automanager=%s\n",
+               config->cube_automanager ? "true" : "false");
         printf("desk.debug=%s%s%s\n",
                config->desk_debug_library ? "library" : "",
                config->desk_debug_library && config->desk_debug_terminal
@@ -454,6 +456,8 @@ static int command_config(const cubicle_config_t *config,
                config->desk_debug_terminal
                    ? "terminal"
                    : (config->desk_debug_library ? "" : "none"));
+        printf("desk.automanager=%s\n",
+               config->desk_automanager ? "true" : "false");
         printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         return 0;
     }
@@ -485,6 +489,8 @@ static int command_config(const cubicle_config_t *config,
                           : "none"));
         printf("cube.debug=%s\n",
                config->cube_debug_library ? "library" : "none");
+        printf("cube.automanager=%s\n",
+               config->cube_automanager ? "true" : "false");
         printf("desk.debug=%s%s%s\n",
                config->desk_debug_library ? "library" : "",
                config->desk_debug_library && config->desk_debug_terminal
@@ -493,6 +499,8 @@ static int command_config(const cubicle_config_t *config,
                config->desk_debug_terminal
                    ? "terminal"
                    : (config->desk_debug_library ? "" : "none"));
+        printf("desk.automanager=%s\n",
+               config->desk_automanager ? "true" : "false");
         printf("desk.prefix=%s\n", config->desk_prefix_key_name);
         printf("desk.keys=%zu bindings\n", config->desk_key_binding_count);
         printf("client.manager=%s\n", config->client_manager_uri);
@@ -584,6 +592,9 @@ static int command_config(const cubicle_config_t *config,
             case CUBICLE_CONFIG_CUBE_DEBUG:
                 value = config->cube_debug_library ? "library" : "none";
                 break;
+            case CUBICLE_CONFIG_CUBE_AUTOMANAGER:
+                value = config->cube_automanager ? "true" : "false";
+                break;
             case CUBICLE_CONFIG_DESK_DEBUG:
                 snprintf(formatted, sizeof(formatted), "%s%s%s",
                          config->desk_debug_library ? "library" : "",
@@ -595,6 +606,9 @@ static int command_config(const cubicle_config_t *config,
                              ? "terminal"
                              : (config->desk_debug_library ? "" : "none"));
                 value = formatted;
+                break;
+            case CUBICLE_CONFIG_DESK_AUTOMANAGER:
+                value = config->desk_automanager ? "true" : "false";
                 break;
             case CUBICLE_CONFIG_DESK_PREFIX:
                 snprintf(formatted, sizeof(formatted), "%s",
@@ -5160,6 +5174,18 @@ int main(int argc, char **argv)
         fprintf(stderr, "cube: manager endpoint is not configured\n");
         fprintf(stderr,
                 "hint: pass --manager-socket PATH, set CUBICLE_MANAGER_SOCKET, or configure client.manager\n");
+        return 2;
+    }
+    const char *manager_environment = getenv("CUBICLE_MANAGER_SOCKET");
+    int allow_automanager =
+        config.cube_automanager && options.manager_socket == NULL &&
+        (manager_environment == NULL || manager_environment[0] == '\0') &&
+        strcmp(command, "shutdown") != 0;
+    char automanager_error[256];
+    if (cubeui_autostart_manager(manager_endpoint, &config, allow_automanager,
+                                 automanager_error,
+                                 sizeof(automanager_error)) < 0) {
+        fprintf(stderr, "cube: %s\n", automanager_error);
         return 2;
     }
 

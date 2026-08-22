@@ -20,6 +20,11 @@ const char *cubeui_resolve_manager_endpoint(
     char *configured_endpoint,
     size_t configured_endpoint_size);
 int cubeui_endpoint_from_uri(cubicle_endpoint_t *endpoint, const char *uri);
+int cubeui_autostart_manager(const char *manager_uri,
+                             const cubicle_config_t *config,
+                             int enabled,
+                             char *error,
+                             size_t error_size);
 
 typedef struct cubeui_terminal {
     struct termios original;

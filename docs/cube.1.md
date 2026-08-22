@@ -500,6 +500,12 @@ Workspace creation bootstraps the creating authenticated key as an owner key.
 : Print each effective configuration value together with the source that
   supplied it.
 
+`cube` and `desk` auto-start `cubicle-manager` in daemon mode when their
+configured Unix manager socket is not accepting connections. Explicit
+`--manager-socket` and `CUBICLE_MANAGER_SOCKET` selections do not auto-start a
+manager. Set `cube.automanager=false` or `desk.automanager=false` to disable the
+behavior.
+
 Configuration keys currently read include:
 
 ```ini
@@ -521,9 +527,11 @@ debug=none
 
 [cube]
 debug=none
+automanager=true
 
 [desk]
 debug=none
+automanager=true
 prefix=Control-X
 
 [desk.keys]

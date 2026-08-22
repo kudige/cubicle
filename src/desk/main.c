@@ -1728,6 +1728,14 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
     char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
     const char *manager_uri = cubeui_resolve_manager_endpoint(
         NULL, &config, configured_endpoint, sizeof(configured_endpoint));
+    const char *manager_environment = getenv("CUBICLE_MANAGER_SOCKET");
+    int allow_automanager =
+        config.desk_automanager &&
+        (manager_environment == NULL || manager_environment[0] == '\0');
+    if (cubeui_autostart_manager(manager_uri, &config, allow_automanager,
+                                 error, error_size) < 0) {
+        return CUBICLE_ERR_MANAGER_UNAVAILABLE;
+    }
 
     cubicle_error_code_t code = cubicle_client_connect_uri(manager_uri, NULL,
                                                            client_out);
@@ -6585,7 +6593,7 @@ static int desk_run_workspace(const char *workspace_arg,
 static void print_usage(FILE *stream, const char *program)
 {
     fprintf(stream,
-            "Usage: %s [--workspace NAME|ID] [--prefix KEY] [--mouse|--no-mouse]\n",
+            "Usage: %s [--config PATH] [--workspace NAME|ID] [--prefix KEY] [--mouse|--no-mouse]\n",
             program);
     fprintf(stream, "Render the Cubicle desk terminal view.\n");
     fprintf(stream,
@@ -6698,6 +6706,18 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout, argv[0]);
             return 0;
+        }
+        if (strcmp(argv[i], "--config") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(stderr, argv[0]);
+                return 2;
+            }
+            if (setenv("CUBICLE_CONFIG", argv[++i], 1) < 0) {
+                fprintf(stderr, "desk: failed to set config override: %s\n",
+                        strerror(errno));
+                return 2;
+            }
+            continue;
         }
         if (strcmp(argv[i], "--workspace") == 0) {
             if (i + 1 >= argc) {

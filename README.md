@@ -108,6 +108,11 @@ cube config validate
 `cubicle-manager --foreground` under a supervisor or test harness. The explicit
 `cubicle-manager daemon ...` form is also accepted.
 
+`cube` and `desk` auto-start the per-user manager in daemon mode when the
+configured Unix manager socket is not accepting connections. Disable this with
+`cube.automanager=false` or `desk.automanager=false` when a supervisor should be
+the only process allowed to start the manager.
+
 For local-LAN experiments, the manager can listen on unauthenticated TCP only
 when explicitly allowed:
 
@@ -512,9 +517,11 @@ debug=none
 
 [cube]
 debug=none
+automanager=true
 
 [desk]
 debug=none
+automanager=true
 prefix=Control-X
 
 [defaults]

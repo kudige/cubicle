@@ -1022,8 +1022,10 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->controller_debug_library = 0;
     config->controller_debug_terminal = 0;
     config->cube_debug_library = 0;
+    config->cube_automanager = 1;
     config->desk_debug_library = 0;
     config->desk_debug_terminal = 0;
+    config->desk_automanager = 1;
     config->desk_prefix_key = 0x18;
     config->desk_prefix_sequence[0] = 0x18;
     config->desk_prefix_sequence_length = 1;
@@ -1109,6 +1111,7 @@ static int apply_econf_file(cubicle_config_t *config,
                             size_t error_size)
 {
     int present = 0;
+    char value[64];
     if (allow_manager_control_keys &&
         get_optional_string(file, "installation", "bindir",
                             config->bindir, sizeof(config->bindir),
@@ -1240,6 +1243,19 @@ static int apply_econf_file(cubicle_config_t *config,
         set_origin(config, CUBICLE_CONFIG_CUBE_DEBUG, source_kind, source);
     }
 
+    value[0] = '\0';
+    if (get_optional_string(file, "cube", "automanager", value,
+                            sizeof(value), &present, error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_bool(value, &config->cube_automanager,
+                    "cube.automanager", error, error_size) < 0)) {
+        return -1;
+    }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_CUBE_AUTOMANAGER, source_kind,
+                   source);
+    }
+
     char desk_debug[64];
     desk_debug[0] = '\0';
     if (get_optional_string(file, "desk", "debug", desk_debug,
@@ -1253,6 +1269,19 @@ static int apply_econf_file(cubicle_config_t *config,
     }
     if (desk_debug[0] != '\0') {
         set_origin(config, CUBICLE_CONFIG_DESK_DEBUG, source_kind, source);
+    }
+
+    value[0] = '\0';
+    if (get_optional_string(file, "desk", "automanager", value,
+                            sizeof(value), &present, error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_bool(value, &config->desk_automanager,
+                    "desk.automanager", error, error_size) < 0)) {
+        return -1;
+    }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DESK_AUTOMANAGER, source_kind,
+                   source);
     }
 
     char desk_prefix[64];
@@ -1318,7 +1347,6 @@ static int apply_econf_file(cubicle_config_t *config,
         econf_free(desk_keys);
     }
 
-    char value[64];
     value[0] = '\0';
     if (get_optional_string(file, "defaults", "launch", value, sizeof(value),
                             &present, error, error_size) < 0 ||
@@ -2007,8 +2035,12 @@ const char *cubicle_config_key_name(cubicle_config_key_t key)
         return "controller.debug";
     case CUBICLE_CONFIG_CUBE_DEBUG:
         return "cube.debug";
+    case CUBICLE_CONFIG_CUBE_AUTOMANAGER:
+        return "cube.automanager";
     case CUBICLE_CONFIG_DESK_DEBUG:
         return "desk.debug";
+    case CUBICLE_CONFIG_DESK_AUTOMANAGER:
+        return "desk.automanager";
     case CUBICLE_CONFIG_CLIENT_MANAGER:
         return "client.manager";
     case CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY:

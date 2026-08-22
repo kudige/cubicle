@@ -252,9 +252,11 @@ Keys:
 ```ini
 [cube]
 debug=none
+automanager=true
 
 [desk]
 debug=none
+automanager=true
 prefix=Control-X
 
 [desk.keys]
@@ -271,6 +273,11 @@ Keys:
   `manager.log_dir/client-library.log`, including connect/disconnect events,
   RPC method names, request/response sizes, return codes, and error messages.
   Payload contents are not logged.
+- `automanager`: boolean. Defaults to `true`. When enabled, `cube` and `desk`
+  start `cubicle-manager` in daemon mode if the configured Unix manager socket
+  is not accepting connections. Explicit process-level endpoint overrides, such
+  as `cube --manager-socket` or `CUBICLE_MANAGER_SOCKET`, do not auto-start a
+  manager.
 - `prefix`: Desk escape prefix key. It accepts tmux-style key names such as
   `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
   `Escape`, `Backspace`, `Tab`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
@@ -373,9 +380,11 @@ debug=none
 
 [cube]
 debug=none
+automanager=true
 
 [desk]
 debug=none
+automanager=true
 
 [client]
 manager=unix:///run/cubicle/manager.sock

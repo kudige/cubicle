@@ -81,6 +81,7 @@ target_compile_options(cubicle_client PRIVATE
 )
 
 add_library(cubeui
+    src/cubeui/automanager.c
     src/cubeui/endpoint.c
     src/cubeui/local_state.c
     src/cubeui/terminal.c
@@ -498,6 +499,16 @@ add_test(
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_runtime_test.sh
+)
+
+add_test(
+    NAME cubicle-automanager-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            DESK=$<TARGET_FILE:desk>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/automanager_test.sh
 )
 
 add_test(
