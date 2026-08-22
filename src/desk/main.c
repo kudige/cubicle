@@ -275,6 +275,7 @@ typedef struct desk_session {
     unsigned char pending_input[64];
     size_t pending_input_length;
     long long pending_input_since_ms;
+    bool redraw_requested;
     desk_open_menu_t open_menu;
     cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t key_binding_count;
@@ -2510,12 +2511,6 @@ static bool desk_pane_return_to_live(desk_pane_t *pane)
     }
     pane->scrollback_offset = 0;
     return true;
-}
-
-static bool desk_active_pane_return_to_live(desk_session_t *session)
-{
-    return desk_pane_return_to_live(
-        desk_pane_for_id(session, session->layout.active_pane_id));
 }
 
 static bool desk_scroll_active_pane(desk_session_t *session,
@@ -5150,6 +5145,9 @@ static int write_active_pane(desk_session_t *session,
         return -1;
     }
     desk_pane_t *pane = &session->panes[(size_t)active - 1];
+    if (desk_pane_return_to_live(pane)) {
+        session->redraw_requested = true;
+    }
     if (pane->attachment == NULL) {
         desk_debug_log("event=write_skipped pane=%d process=%s reason=detached",
                        active, pane->process.friendly_name);
@@ -5167,7 +5165,6 @@ static int flush_active_input(desk_session_t *session,
     if (end <= start) {
         return 0;
     }
-    (void)desk_active_pane_return_to_live(session);
     return write_active_pane(session, input + start, end - start);
 }
 
@@ -6724,6 +6721,10 @@ static int desk_run_workspace(const char *workspace_arg,
                                errno);
                 break;
             }
+            if (session.redraw_requested) {
+                session.redraw_requested = false;
+                render_all_panes(&terminal, &session);
+            }
         }
         if (ready > 0 && session.open_menu.level == DESK_MENU_CLOSED) {
             for (size_t i = 0; i < session.pane_count; ++i) {
@@ -6828,6 +6829,9 @@ static int desk_run_workspace(const char *workspace_arg,
                     render_all_panes(&terminal, &session);
                     desk_render_open_menu(&terminal, &session);
                 } else if (menu_closed) {
+                    render_all_panes(&terminal, &session);
+                } else if (session.redraw_requested) {
+                    session.redraw_requested = false;
                     render_all_panes(&terminal, &session);
                 } else {
                     desk_cursor_reset_blink(&session);

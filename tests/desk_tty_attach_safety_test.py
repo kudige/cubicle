@@ -2164,6 +2164,102 @@ def run_desk_echo_latency(desk, env):
         os.close(master_fd)
 
 
+def run_desk_scrollback_returns_to_live(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 80, 0, 0))
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_generate = False
+    sent_scroll = False
+    saw_history = False
+    sent_input = False
+    saw_live_restore = False
+    sent_quit = False
+    deadline = time.time() + 6
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_generate and b"READY_SCROLLBACK" in captured:
+                os.write(master_fd, b"g")
+                sent_generate = True
+
+            if sent_generate and not sent_scroll and b"LIVE_MARKER" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18\x1b[5~")
+                sent_scroll = True
+
+            if sent_scroll and not saw_history and b"HISTORY_00" in captured:
+                saw_history = True
+                captured.clear()
+                os.write(master_fd, b"x")
+                sent_input = True
+
+            if sent_input and not saw_live_restore and b"LIVE_MARKER" in captured:
+                saw_live_restore = True
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_generate:
+            raise AssertionError(
+                f"desk did not render scrollback generator pane: {captured!r}"
+            )
+        if not sent_scroll:
+            raise AssertionError(
+                f"desk did not render generated live screen: {captured!r}"
+            )
+        if not saw_history:
+            raise AssertionError(
+                f"desk did not scroll active pane into history: {captured!r}"
+            )
+        if not sent_input:
+            raise AssertionError("desk was not sent input to return to live")
+        if not saw_live_restore:
+            raise AssertionError(
+                f"desk did not restore latest live screen after input: {captured!r}"
+            )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk scrollback restore exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_cursor_overlay(desk, env, expect_cursor):
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
@@ -2986,6 +3082,41 @@ def main():
             env,
         )
         run_desk_echo_latency(desk, env)
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "scrollback-live",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY_SCROLLBACK\\r\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+8\n"
+                    "generated=False\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data=os.read(0,64)\n"
+                    "        if b'g' in data and not generated:\n"
+                    "            generated=True\n"
+                    "            for i in range(40):\n"
+                    "                sys.stdout.write('HISTORY_%02d\\r\\n' % i)\n"
+                    "            sys.stdout.write('\\x1b[2J\\x1b[H LIVE_MARKER')\n"
+                    "            sys.stdout.flush()\n"
+                    "time.sleep(1)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_scrollback_returns_to_live(desk, env)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked(
