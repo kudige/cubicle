@@ -2260,6 +2260,7 @@ def main():
         env["XDG_RUNTIME_DIR"] = os.path.join(tmpdir, "runtime")
         env["XDG_CONFIG_HOME"] = os.path.join(tmpdir, "config")
         env["CUBICLE_MANAGER_SOCKET"] = socket_path
+        env["TERM"] = "xterm-256color"
         os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
         os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
         os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)

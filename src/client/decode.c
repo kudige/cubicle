@@ -392,6 +392,42 @@ int parse_key_info(const char *json, cubicle_workspace_key_info_t *out)
     return result;
 }
 
+int parse_macro_info(const char *json, cubicle_workspace_macro_info_t *out)
+{
+    cubicle_json_doc_t parsed;
+    if (parse_object_root(json, &parsed) < 0) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    cubicle_validation_error_t error;
+    int result =
+        cubicle_json_get_required_string(parsed.root, "workspace_id",
+                                         out->workspace_id,
+                                         sizeof(out->workspace_id),
+                                         &error) == 0 &&
+                cubicle_json_get_required_string(parsed.root, "name",
+                                                 out->name, sizeof(out->name),
+                                                 &error) == 0 &&
+                cubicle_json_get_required_string(parsed.root, "text",
+                                                 out->text, sizeof(out->text),
+                                                 &error) == 0 &&
+                cubicle_json_get_required_u64(parsed.root, "ordinal",
+                                              &out->ordinal, &error) == 0
+            ? 0
+            : -1;
+    if (result == 0 &&
+        (cubicle_json_get_optional_u64(parsed.root, "target_pane",
+                                       &out->target_pane, NULL, &error) < 0 ||
+         cubicle_json_get_optional_string(parsed.root, "key_name",
+                                          out->key_name,
+                                          sizeof(out->key_name), NULL,
+                                          &error) < 0)) {
+        result = -1;
+    }
+    cubicle_json_cleanup(&parsed);
+    return result;
+}
+
 int parse_event(const char *json, cubicle_event_t *out)
 {
     char type[64];

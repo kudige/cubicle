@@ -183,6 +183,36 @@ printf "%s" "$workspace_list_response" | grep -q '"count": 2'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project A"'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
 
+# Endpoint tests for workspace macros
+macro_save_response=$(send_manager_rpc workspace.macro.save "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":1,\"name\":\"build\",\"text\":\"make test\",\"target_pane\":1,\"key_name\":\"C-B\"}")
+printf "%s" "$macro_save_response" | grep -q '"success": true'
+printf "%s" "$macro_save_response" | grep -q '"name": "build"'
+printf "%s" "$macro_save_response" | grep -q '"text": "make test"'
+macro_second_response=$(send_manager_rpc workspace.macro.save "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":2,\"name\":\"run gdb\",\"text\":\"gdb ./cube\",\"target_pane\":2}")
+printf "%s" "$macro_second_response" | grep -q '"success": true'
+macro_list_response=$(send_manager_rpc workspace.macro.list "{\"workspace_id\":\"$workspace_b_id\"}")
+printf "%s" "$macro_list_response" | grep -q '"name": "build"'
+printf "%s" "$macro_list_response" | grep -q '"key_name": "C-B"'
+printf "%s" "$macro_list_response" | grep -q '"name": "run gdb"'
+macro_reorder_response=$(send_manager_rpc workspace.macro.reorder "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":2,\"new_ordinal\":1}")
+printf "%s" "$macro_reorder_response" | grep -q '"success": true'
+macro_reordered_response=$(send_manager_rpc workspace.macro.list "{\"workspace_id\":\"$workspace_b_id\"}")
+python3 - "$macro_reordered_response" <<'PY'
+import json
+import sys
+macros = json.loads(sys.argv[1])["result"]["macros"]
+assert [m["name"] for m in macros] == ["run gdb", "build"], macros
+assert [m["ordinal"] for m in macros] == [1, 2], macros
+PY
+macro_delete_response=$(send_manager_rpc workspace.macro.delete "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":2}")
+printf "%s" "$macro_delete_response" | grep -q '"success": true'
+macro_deleted_response=$(send_manager_rpc workspace.macro.list "{\"workspace_id\":\"$workspace_b_id\"}")
+printf "%s" "$macro_deleted_response" | grep -q '"name": "run gdb"'
+if printf "%s" "$macro_deleted_response" | grep -q '"name": "build"'; then
+    echo "deleted macro still listed: $macro_deleted_response" >&2
+    exit 1
+fi
+
 # Endpoint test for workspace.create error response
 workspace_duplicate_response=$(python3 "$CUBICLE_API_CLIENT" "$socket_path" \
     --allow-error workspace-create "Project B")

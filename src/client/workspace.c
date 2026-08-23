@@ -239,6 +239,110 @@ cubicle_error_code_t cubicle_workspace_key_revoke(cubicle_client_t *client,
     cubicle_json_builder_cleanup(&params); free(response); return code;
 }
 
+static cubicle_error_code_t parse_macro_list(cubicle_client_t *client,
+    const char *result, cubicle_workspace_macro_info_t **macros_out,
+    size_t *count_out)
+{
+    const char *array = json_array_field(result, "macros");
+    if (array == NULL) return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "missing macros array");
+    size_t count = json_array_field_count(result, "macros");
+    cubicle_workspace_macro_info_t *items = count == 0 ? NULL : calloc(count, sizeof(*items));
+    if (count > 0 && items == NULL) return set_client_error(client, CUBICLE_ERR_INTERNAL, ENOMEM, "failed to allocate macros");
+    for (size_t i = 0; i < count; ++i) {
+        char *copy = json_array_field_object_copy(result, "macros", i);
+        if (copy == NULL || parse_macro_info(copy, &items[i]) < 0) {
+            free(copy); free(items);
+            return set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid macro item");
+        }
+        free(copy);
+    }
+    *macros_out = items;
+    *count_out = count;
+    return CUBICLE_OK;
+}
+
+cubicle_error_code_t cubicle_workspace_macro_list(cubicle_client_t *client,
+    const char *workspace_id, cubicle_workspace_macro_info_t **macros_out,
+    size_t *count_out)
+{
+    if (client == NULL || workspace_id == NULL || workspace_id[0] == '\0' ||
+        macros_out == NULL || count_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_append(&params, "}");
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, "workspace.macro.list", params.data, &response);
+    cubicle_json_builder_cleanup(&params);
+    if (code != CUBICLE_OK) return code;
+    code = parse_macro_list(client, result_object(client, response), macros_out, count_out);
+    free(response);
+    return code;
+}
+
+cubicle_error_code_t cubicle_workspace_macro_save(cubicle_client_t *client,
+    const cubicle_workspace_macro_save_options_t *options,
+    cubicle_workspace_macro_info_t *macro_out)
+{
+    if (client == NULL || options == NULL || options->workspace_id == NULL ||
+        options->workspace_id[0] == '\0' || options->ordinal == 0 ||
+        options->name == NULL || options->name[0] == '\0' ||
+        options->text == NULL || macro_out == NULL) return CUBICLE_ERR_INVALID_ARGUMENT;
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, options->workspace_id);
+    cubicle_json_builder_appendf(&params, ",\"ordinal\":%llu,\"name\":", (unsigned long long)options->ordinal);
+    cubicle_json_builder_append_string(&params, options->name);
+    cubicle_json_builder_append(&params, ",\"text\":");
+    cubicle_json_builder_append_string(&params, options->text);
+    cubicle_json_builder_appendf(&params, ",\"target_pane\":%llu", (unsigned long long)options->target_pane);
+    if (options->key_name != NULL) {
+        cubicle_json_builder_append(&params, ",\"key_name\":");
+        cubicle_json_builder_append_string(&params, options->key_name);
+    }
+    cubicle_json_builder_append(&params, "}");
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, "workspace.macro.save", params.data, &response);
+    cubicle_json_builder_cleanup(&params);
+    if (code != CUBICLE_OK) return code;
+    code = parse_macro_info(result_object(client, response), macro_out) == 0 ? CUBICLE_OK :
+           set_client_error(client, CUBICLE_ERR_PROTOCOL, 0, "invalid macro result");
+    free(response);
+    return code;
+}
+
+cubicle_error_code_t cubicle_workspace_macro_delete(cubicle_client_t *client,
+    const char *workspace_id, uint64_t ordinal)
+{
+    if (client == NULL || workspace_id == NULL || workspace_id[0] == '\0' ||
+        ordinal == 0) return CUBICLE_ERR_INVALID_ARGUMENT;
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_appendf(&params, ",\"ordinal\":%llu}", (unsigned long long)ordinal);
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, "workspace.macro.delete", params.data, &response);
+    cubicle_json_builder_cleanup(&params); free(response); return code;
+}
+
+cubicle_error_code_t cubicle_workspace_macro_reorder(cubicle_client_t *client,
+    const char *workspace_id, uint64_t ordinal, uint64_t new_ordinal)
+{
+    if (client == NULL || workspace_id == NULL || workspace_id[0] == '\0' ||
+        ordinal == 0 || new_ordinal == 0) return CUBICLE_ERR_INVALID_ARGUMENT;
+    cubicle_json_builder_t params = {0};
+    cubicle_json_builder_append(&params, "{\"workspace_id\":");
+    cubicle_json_builder_append_string(&params, workspace_id);
+    cubicle_json_builder_appendf(&params, ",\"ordinal\":%llu,\"new_ordinal\":%llu}",
+                                 (unsigned long long)ordinal,
+                                 (unsigned long long)new_ordinal);
+    char *response = NULL;
+    cubicle_error_code_t code = rpc_object(client, "workspace.macro.reorder", params.data, &response);
+    cubicle_json_builder_cleanup(&params); free(response); return code;
+}
+
 void cubicle_workspace_list_free(cubicle_workspace_info_t *workspaces) { free(workspaces); }
 
 void cubicle_workspace_key_list_free(cubicle_workspace_key_info_t *keys) { free(keys); }
+
+void cubicle_workspace_macro_list_free(cubicle_workspace_macro_info_t *macros) { free(macros); }

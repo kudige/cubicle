@@ -93,6 +93,7 @@ int parse_page(const char *json, cubicle_page_info_t *page);
 int parse_workspace_info(const char *json, cubicle_workspace_info_t *out);
 int parse_process_info(const char *json, cubicle_process_info_t *out);
 int parse_key_info(const char *json, cubicle_workspace_key_info_t *out);
+int parse_macro_info(const char *json, cubicle_workspace_macro_info_t *out);
 int parse_event(const char *json, cubicle_event_t *out);
 size_t json_array_field_count(const char *json, const char *key);
 char *json_array_field_object_copy(const char *json, const char *key,

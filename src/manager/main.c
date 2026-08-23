@@ -117,6 +117,15 @@ typedef struct workspace_key_record {
     char public_key_hex[512];
 } workspace_key_record_t;
 
+typedef struct workspace_macro_record {
+    char workspace_id[CUBICLE_ID_STRING_LENGTH];
+    uint64_t ordinal;
+    char name[CUBICLE_WORKSPACE_MACRO_NAME_MAX];
+    char text[CUBICLE_WORKSPACE_MACRO_TEXT_MAX];
+    uint64_t target_pane;
+    char key_name[CUBICLE_WORKSPACE_MACRO_KEY_MAX];
+} workspace_macro_record_t;
+
 #define CUBICLE_API_MAX_FRAME 65536
 #define CUBICLE_MANAGER_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_API_CAPABILITIES \
@@ -1336,6 +1345,163 @@ static int workspace_key_info_json(const workspace_key_record_t *record,
     return 0;
 }
 
+static int parse_workspace_macro_record(const char *line,
+                                        workspace_macro_record_t *record)
+{
+    char copy[1024];
+    int length = snprintf(copy, sizeof(copy), "%s", line);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        return -1;
+    }
+
+    char *fields[6];
+    char *cursor = copy;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        fields[i] = cursor;
+        char *separator = strpbrk(cursor, "\t\n");
+        if (separator == NULL && i + 1 < sizeof(fields) / sizeof(fields[0])) {
+            return -1;
+        }
+        if (separator != NULL) {
+            *separator = '\0';
+            cursor = separator + 1;
+        }
+    }
+
+    memset(record, 0, sizeof(*record));
+    snprintf(record->workspace_id, sizeof(record->workspace_id), "%s",
+             fields[0]);
+    record->ordinal = strtoull(fields[1], NULL, 10);
+    snprintf(record->name, sizeof(record->name), "%s", fields[2]);
+    snprintf(record->text, sizeof(record->text), "%s", fields[3]);
+    record->target_pane = strtoull(fields[4], NULL, 10);
+    snprintf(record->key_name, sizeof(record->key_name), "%s", fields[5]);
+    return record->workspace_id[0] != '\0' && record->ordinal > 0 &&
+                   record->name[0] != '\0'
+               ? 0
+               : -1;
+}
+
+static int write_workspace_macro_record(FILE *file,
+                                        const workspace_macro_record_t *record)
+{
+    return fprintf(file, "%s\t%llu\t%s\t%s\t%llu\t%s\n",
+                   record->workspace_id,
+                   (unsigned long long)record->ordinal, record->name,
+                   record->text, (unsigned long long)record->target_pane,
+                   record->key_name) < 0
+               ? -1
+               : 0;
+}
+
+static int workspace_macro_info_json(const workspace_macro_record_t *record,
+                                     char *buffer,
+                                     size_t buffer_size)
+{
+    char escaped_name[CUBICLE_WORKSPACE_MACRO_NAME_MAX * 2];
+    char escaped_text[CUBICLE_WORKSPACE_MACRO_TEXT_MAX * 2];
+    char escaped_key[CUBICLE_WORKSPACE_MACRO_KEY_MAX * 2];
+    if (cubicle_json_escape(escaped_name, sizeof(escaped_name),
+                            record->name) < 0 ||
+        cubicle_json_escape(escaped_text, sizeof(escaped_text),
+                            record->text) < 0 ||
+        cubicle_json_escape(escaped_key, sizeof(escaped_key),
+                            record->key_name) < 0) {
+        return -1;
+    }
+    int length = snprintf(
+        buffer, buffer_size,
+        "{\"workspace_id\":\"%s\",\"ordinal\":%llu,\"name\":\"%s\",\"text\":\"%s\",\"target_pane\":%llu,\"key_name\":\"%s\"}",
+        record->workspace_id, (unsigned long long)record->ordinal,
+        escaped_name, escaped_text, (unsigned long long)record->target_pane,
+        escaped_key);
+    if (length < 0 || (size_t)length >= buffer_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+static int rewrite_workspace_macro_records(const manager_state_t *state,
+                                           const workspace_macro_record_t *upsert,
+                                           const char *workspace_id,
+                                           uint64_t delete_ordinal,
+                                           uint64_t reorder_ordinal,
+                                           uint64_t reorder_target,
+                                           int *found)
+{
+    *found = 0;
+    char path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    if (state_path(path, state, "workspace-macros.tsv") < 0) {
+        return -1;
+    }
+    int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    if (length < 0 || (size_t)length >= sizeof(temp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    FILE *input = fopen(path, "r");
+    FILE *output = fopen(temp_path, "w");
+    if (output == NULL) {
+        if (input != NULL) {
+            fclose(input);
+        }
+        return -1;
+    }
+
+    if (input != NULL) {
+        char line[1024];
+        while (fgets(line, sizeof(line), input) != NULL) {
+            workspace_macro_record_t record;
+            if (parse_workspace_macro_record(line, &record) != 0) {
+                continue;
+            }
+            bool same_workspace = strcmp(record.workspace_id, workspace_id) == 0;
+            if (same_workspace && upsert != NULL &&
+                record.ordinal == upsert->ordinal) {
+                *found = 1;
+                record = *upsert;
+            } else if (same_workspace && delete_ordinal > 0 &&
+                       record.ordinal == delete_ordinal) {
+                *found = 1;
+                continue;
+            } else if (same_workspace && reorder_ordinal > 0) {
+                if (record.ordinal == reorder_ordinal) {
+                    *found = 1;
+                    record.ordinal = reorder_target;
+                } else if (reorder_target < reorder_ordinal &&
+                           record.ordinal >= reorder_target &&
+                           record.ordinal < reorder_ordinal) {
+                    record.ordinal++;
+                } else if (reorder_target > reorder_ordinal &&
+                           record.ordinal > reorder_ordinal &&
+                           record.ordinal <= reorder_target) {
+                    record.ordinal--;
+                }
+            }
+            if (write_workspace_macro_record(output, &record) < 0) {
+                if (input != NULL) {
+                    fclose(input);
+                }
+                fclose(output);
+                return -1;
+            }
+        }
+        fclose(input);
+    }
+    if (upsert != NULL && !*found &&
+        write_workspace_macro_record(output, upsert) < 0) {
+        fclose(output);
+        return -1;
+    }
+    if (fclose(output) != 0) {
+        return -1;
+    }
+    return rename(temp_path, path);
+}
+
 static cubicle_capability_mask_t role_owner_capabilities(void)
 {
     return CUBICLE_CAP_WORKSPACE_READ |
@@ -1343,6 +1509,7 @@ static cubicle_capability_mask_t role_owner_capabilities(void)
            CUBICLE_CAP_WORKSPACE_STOP |
            CUBICLE_CAP_WORKSPACE_DELETE |
            CUBICLE_CAP_WORKSPACE_MANAGE_KEYS |
+           CUBICLE_CAP_WORKSPACE_MANAGE_MACROS |
            CUBICLE_CAP_PROCESS_START |
            CUBICLE_CAP_PROCESS_READ |
            CUBICLE_CAP_PROCESS_OBSERVE |
@@ -4521,6 +4688,239 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 "workspace list response too large", false, 0));
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.macro.list") == 0) {
+        char workspace_ref[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "missing workspace id", false,
+                                             0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection, CUBICLE_CAP_WORKSPACE_READ)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace read access is required",
+                                             false, 0));
+        }
+
+        FILE *file = open_state_file_for_read(state, "workspace-macros.tsv");
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result), "{\"macros\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            MANAGER_RETURN(-1);
+        }
+        used = (size_t)written;
+        size_t count = 0;
+        if (file != NULL) {
+            char line[1024];
+            workspace_macro_record_t records[CUBICLE_WORKSPACE_MACRO_MAX];
+            size_t record_count = 0;
+            while (fgets(line, sizeof(line), file) != NULL &&
+                   record_count < sizeof(records) / sizeof(records[0])) {
+                workspace_macro_record_t record;
+                if (parse_workspace_macro_record(line, &record) == 0 &&
+                    strcmp(record.workspace_id, workspace.id) == 0) {
+                    records[record_count++] = record;
+                }
+            }
+            fclose(file);
+            for (size_t i = 0; i < record_count; ++i) {
+                for (size_t j = i + 1; j < record_count; ++j) {
+                    if (records[j].ordinal < records[i].ordinal) {
+                        workspace_macro_record_t temp = records[i];
+                        records[i] = records[j];
+                        records[j] = temp;
+                    }
+                }
+            }
+            for (size_t i = 0; i < record_count; ++i) {
+                char item[1400];
+                if (workspace_macro_info_json(&records[i], item,
+                                              sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "macro list response too large", false, 0));
+                }
+                used += (size_t)written;
+                ++count;
+            }
+        }
+        written = snprintf(result + used, sizeof(result) - used, "]}");
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "macro list response too large", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.macro.save") == 0) {
+        char workspace_ref[128];
+        workspace_macro_record_t macro;
+        memset(&macro, 0, sizeof(macro));
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "ordinal", &macro.ordinal,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "name", macro.name,
+                                             sizeof(macro.name),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "text", macro.text,
+                                             sizeof(macro.text),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_u64(params, "target_pane",
+                                          &macro.target_pane, NULL,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "key_name",
+                                             macro.key_name,
+                                             sizeof(macro.key_name), NULL,
+                                             &validation_error) < 0 ||
+            macro.ordinal == 0 || validate_field(macro.name, "macro name") < 0 ||
+            validate_field(macro.text, "macro text") < 0 ||
+            (macro.key_name[0] != '\0' &&
+             validate_field(macro.key_name, "macro key") < 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid macro save request",
+                                             false, 0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_MANAGE_MACROS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace macro management requires owner access",
+                                             false, 0));
+        }
+        snprintf(macro.workspace_id, sizeof(macro.workspace_id), "%s",
+                 workspace.id);
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        if (rewrite_workspace_macro_records(state, &macro, workspace.id, 0, 0,
+                                            0, &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to persist macro", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        char result[1400];
+        if (workspace_macro_info_json(&macro, result, sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode macro",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "workspace.macro.delete") == 0 ||
+        strcmp(method, "workspace.macro.reorder") == 0) {
+        char workspace_ref[128];
+        uint64_t ordinal = 0;
+        uint64_t new_ordinal = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "workspace_id",
+                                             workspace_ref,
+                                             sizeof(workspace_ref),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "ordinal", &ordinal,
+                                          &validation_error) < 0 ||
+            (strcmp(method, "workspace.macro.reorder") == 0 &&
+             cubicle_json_get_required_u64(params, "new_ordinal",
+                                           &new_ordinal,
+                                           &validation_error) < 0) ||
+            ordinal == 0 ||
+            (strcmp(method, "workspace.macro.reorder") == 0 &&
+             new_ordinal == 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid macro update request",
+                                             false, 0));
+        }
+        cubicle_workspace_record_t workspace;
+        if (find_workspace(state, workspace_ref, &workspace) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "workspace not found", false,
+                                             0));
+        }
+        if (!connection_has_workspace_capability(
+                state, workspace.id, connection,
+                CUBICLE_CAP_WORKSPACE_MANAGE_MACROS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "workspace macro management requires owner access",
+                                             false, 0));
+        }
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        int result = strcmp(method, "workspace.macro.delete") == 0
+                         ? rewrite_workspace_macro_records(
+                               state, NULL, workspace.id, ordinal, 0, 0, &found)
+                         : rewrite_workspace_macro_records(
+                               state, NULL, workspace.id, 0, ordinal,
+                               new_ordinal, &found);
+        if (result < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to update macro", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        if (!found) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "macro not found", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
     if (strcmp(method, "workspace.rename") == 0) {
