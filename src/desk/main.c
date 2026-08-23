@@ -208,7 +208,8 @@ typedef enum desk_menu_item_kind {
     DESK_MENU_ITEM_LAYOUT,
     DESK_MENU_ITEM_BINDING,
     DESK_MENU_ITEM_MACRO,
-    DESK_MENU_ITEM_MACRO_NEW
+    DESK_MENU_ITEM_MACRO_NEW,
+    DESK_MENU_ITEM_MACRO_TARGET
 } desk_menu_item_kind_t;
 
 typedef struct desk_menu_item {
@@ -221,6 +222,7 @@ typedef struct desk_menu_item {
     char description[96];
     char key_text[128];
     size_t macro_index;
+    uint64_t target_pane;
 } desk_menu_item_t;
 
 typedef struct desk_open_menu {
@@ -3783,46 +3785,44 @@ static void desk_begin_macro_target_prompt(desk_session_t *session)
     memset(menu->command, 0, sizeof(menu->command));
     menu->command_length = 0;
     menu->level = DESK_MENU_MACRO_TARGET;
-    if (menu->edit_macro_index < session->macro_count &&
-        session->macros[menu->edit_macro_index].target_pane > 0) {
-        snprintf(menu->command, sizeof(menu->command), "%llu",
-                 (unsigned long long)
-                     session->macros[menu->edit_macro_index].target_pane);
-    } else {
-        snprintf(menu->command, sizeof(menu->command), "current");
+    menu->item_count = 0;
+    menu->selected = 0;
+    menu->scroll_offset = 0;
+
+    if (menu->item_count < DESK_MENU_MAX_ITEMS) {
+        desk_menu_item_t *item = &menu->items[menu->item_count++];
+        memset(item, 0, sizeof(*item));
+        item->kind = DESK_MENU_ITEM_MACRO_TARGET;
+        item->target_pane = 0;
+        snprintf(item->description, sizeof(item->description), "Active Pane");
     }
-    menu->command_length = strlen(menu->command);
-    snprintf(menu->status, sizeof(menu->status),
-             "Target pane: current or 1-%zu", session->pane_count);
+    uint64_t selected_target =
+        menu->edit_macro_index < session->macro_count
+            ? session->macros[menu->edit_macro_index].target_pane
+            : 0;
+    for (size_t i = 0; i < session->pane_count &&
+                       menu->item_count < DESK_MENU_MAX_ITEMS;
+         ++i) {
+        desk_menu_item_t *item = &menu->items[menu->item_count++];
+        memset(item, 0, sizeof(*item));
+        item->kind = DESK_MENU_ITEM_MACRO_TARGET;
+        item->target_pane = (uint64_t)(i + 1);
+        const char *name = session->panes[i].process.friendly_name[0] != '\0'
+                               ? session->panes[i].process.friendly_name
+                               : session->panes[i].process.id;
+        snprintf(item->description, sizeof(item->description), "%llu. %.80s",
+                 (unsigned long long)item->target_pane, name);
+        if (selected_target == item->target_pane) {
+            menu->selected = menu->item_count - 1;
+        }
+    }
+    snprintf(menu->status, sizeof(menu->status), "Select macro target");
 }
 
-static int desk_apply_macro_target_prompt(desk_session_t *session)
+static int desk_apply_macro_target_selection(desk_session_t *session,
+                                             uint64_t target_pane)
 {
     desk_open_menu_t *menu = &session->open_menu;
-    const char *target = menu->command;
-    while (*target != '\0' && isspace((unsigned char)*target)) {
-        ++target;
-    }
-    uint64_t target_pane = 0;
-    if (desk_string_equals_case(target, "current") ||
-        desk_string_equals_case(target, "active")) {
-        target_pane = 0;
-    } else {
-        char *end = NULL;
-        unsigned long long parsed = strtoull(target, &end, 10);
-        while (end != NULL && *end != '\0' &&
-               isspace((unsigned char)*end)) {
-            ++end;
-        }
-        if (target[0] == '\0' || end == NULL || *end != '\0' ||
-            parsed == 0 || parsed > session->pane_count) {
-            snprintf(menu->status, sizeof(menu->status),
-                     "use current or a pane number from 1-%zu",
-                     session->pane_count);
-            return 0;
-        }
-        target_pane = (uint64_t)parsed;
-    }
     if (menu->macro_name[0] == '\0' || menu->macro_text[0] == '\0') {
         snprintf(menu->status, sizeof(menu->status),
                  "macro name and text are required");
@@ -4926,9 +4926,10 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                           : menu->level == DESK_MENU_MACROS
                           ? "Enter edits. u/n reorders. d deletes. q closes."
                           : menu->level == DESK_MENU_MACRO_NAME ||
-                                    menu->level == DESK_MENU_MACRO_TEXT ||
-                                    menu->level == DESK_MENU_MACRO_TARGET
+                                    menu->level == DESK_MENU_MACRO_TEXT
                                 ? "Enter continues. Esc cancels."
+                          : menu->level == DESK_MENU_MACRO_TARGET
+                          ? "Enter selects target. j/k or arrows scroll."
                           : menu->level == DESK_MENU_LAYOUT_PICKER
                           ? "Type to filter. Enter loads. q closes."
                           : menu->level == DESK_MENU_ROOT
@@ -4943,8 +4944,7 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         menu->level == DESK_MENU_SAVE_LAYOUT ||
         menu->level == DESK_MENU_BINDING_EDIT ||
         menu->level == DESK_MENU_MACRO_NAME ||
-        menu->level == DESK_MENU_MACRO_TEXT ||
-        menu->level == DESK_MENU_MACRO_TARGET) {
+        menu->level == DESK_MENU_MACRO_TEXT) {
         int prompt_cols = inner_cols > 9 ? inner_cols - 9 : 0;
         const char *command = menu->command;
         size_t command_length = strlen(command);
@@ -4958,11 +4958,8 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                       ? "Key:"
                       : menu->level == DESK_MENU_MACRO_NAME
                             ? "Name:"
-                            : menu->level == DESK_MENU_MACRO_TEXT
-                                  ? "Text:"
-                                  : menu->level == DESK_MENU_MACRO_TARGET
-                                        ? "Target:"
-                                        : "Command:";
+                            : menu->level == DESK_MENU_MACRO_TEXT ? "Text:"
+                                                                  : "Command:";
         length = snprintf(line, sizeof(line),
                           "\x1b[%d;%dH\x1b[48;5;236m%s %.*s\x1b[0m",
                           row, box_col + 3, prompt, prompt_cols, command);
@@ -5054,6 +5051,19 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                               "\x1b[%d;%dH%s%.*s\x1b[0m",
                               row, box_col + 5, style, name_cols,
                               macro_text);
+        } else if (item->kind == DESK_MENU_ITEM_MACRO_TARGET) {
+            int name_cols = inner_cols > 2 ? inner_cols - 2 : 0;
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 3, style, inner_cols,
+                              marker);
+            if (length > 0 && (size_t)length < sizeof(line)) {
+                append_text(frame, sizeof(frame), &used, line);
+            }
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH%s%.*s\x1b[0m",
+                              row, box_col + 5, style, name_cols,
+                              item->description);
         } else if (item->kind == DESK_MENU_ITEM_PROCESS) {
             const char *name = item->process.friendly_name[0] != '\0'
                                    ? item->process.friendly_name
@@ -5636,6 +5646,10 @@ static int desk_open_menu_select(desk_session_t *session,
         desk_begin_macro_name_prompt(session, selected.macro_index);
         return 0;
     }
+    if (selected.kind == DESK_MENU_ITEM_MACRO_TARGET) {
+        return desk_apply_macro_target_selection(session,
+                                                 selected.target_pane);
+    }
     if (selected.kind == DESK_MENU_ITEM_LAYOUT) {
         char error[256];
         if (desk_apply_named_layout(session, terminal, selected.layout_name,
@@ -5851,8 +5865,7 @@ static int handle_open_menu_input(desk_session_t *session,
             session->open_menu.level == DESK_MENU_SAVE_LAYOUT ||
             session->open_menu.level == DESK_MENU_BINDING_EDIT ||
             session->open_menu.level == DESK_MENU_MACRO_NAME ||
-            session->open_menu.level == DESK_MENU_MACRO_TEXT ||
-            session->open_menu.level == DESK_MENU_MACRO_TARGET) {
+            session->open_menu.level == DESK_MENU_MACRO_TEXT) {
             unsigned char ch = input[i];
             if (ch == '\r' || ch == '\n') {
                 int result = 0;
@@ -5868,9 +5881,6 @@ static int handle_open_menu_input(desk_session_t *session,
                 } else if (session->open_menu.level ==
                            DESK_MENU_MACRO_TEXT) {
                     desk_begin_macro_target_prompt(session);
-                } else if (session->open_menu.level ==
-                           DESK_MENU_MACRO_TARGET) {
-                    result = desk_apply_macro_target_prompt(session);
                 } else {
                     result = desk_open_menu_select(session, terminal,
                                                   menu_closed);

@@ -50,7 +50,7 @@ on `New macro`, then enter:
 
 1. the macro name, such as `build`
 2. the macro text, such as `make test`
-3. the target, either `current` or a pane number such as `1`
+3. the target selected from `Active Pane` or one of the listed cube names
 
 Desk saves the macro in the current workspace.
 
@@ -59,7 +59,7 @@ Example macro:
 ```text
 name: build
 text: make test
-target: current
+target: Active Pane
 ```
 
 When run, this sends:
@@ -100,22 +100,23 @@ saved target are preserved unless changed in the target prompt.
 
 ## Target Panes
 
-At the target prompt, enter:
+After entering macro text, Desk shows a target list. Use Up/Down arrows or
+`j`/`k` to select an entry, then press Enter.
 
 ```text
-current
+Active Pane
 ```
 
-to send the macro to whichever pane is active when the macro runs.
+selects whichever pane is active when the macro runs.
 
-Enter a pane number:
+The remaining entries are the cube names currently open in the workspace:
 
 ```text
-1
+1. build-shell
+2. test-runner
 ```
 
-to preset the macro to that pane in the current workspace. The pane number must
-exist in the current Desk layout when the macro is saved. If that pane is later
+Selecting a cube name presets the macro to that pane. If that pane is later
 missing or detached, Desk falls back to the current active pane.
 
 ## Deleting Macros
