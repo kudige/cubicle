@@ -167,6 +167,11 @@ typedef struct desk_grid {
     size_t utf8_expected;
 } desk_grid_t;
 
+typedef struct desk_scrollback_line {
+    int cols;
+    desk_cell_t *cells;
+} desk_scrollback_line_t;
+
 typedef struct desk_attachment {
     cubicle_client_t *manager;
     cubicle_attachment_t *attachment;
@@ -181,6 +186,12 @@ typedef struct desk_pane {
     desk_grid_t grid;
     cubicle_resize_tracker_t resize;
     cubicle_terminal_model_t *terminal_model;
+    desk_scrollback_line_t *scrollback;
+    size_t scrollback_head;
+    size_t scrollback_count;
+    size_t scrollback_capacity;
+    size_t scrollback_offset;
+    size_t scrollback_limit;
     unsigned int rows;
     unsigned int cols;
     bool ended_notice_shown;
@@ -277,6 +288,7 @@ typedef struct desk_session {
     unsigned char pending_input[64];
     size_t pending_input_length;
     long long pending_input_since_ms;
+    bool redraw_requested;
     desk_open_menu_t open_menu;
     cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t key_binding_count;
@@ -288,13 +300,13 @@ typedef struct desk_session {
     long long notice_until_ms;
     long long next_process_refresh_ms;
     char last_opened_workspace_id[CUBICLE_ID_STRING_LENGTH];
+    size_t scrollback_limit;
 } desk_session_t;
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_pane_layout_t *panes,
                                   int pane_id,
-                                  desk_grid_t *grid,
-                                  const char *title,
+                                  desk_pane_t *pane,
                                   bool mouse_titles);
 static long long desk_monotonic_ms(void);
 static bool desk_string_equals_case(const char *left, const char *right);
@@ -313,6 +325,7 @@ static void desk_macro_command_name(uint64_t ordinal,
                                     size_t size);
 static int desk_run_macro(desk_session_t *session,
                           const cubicle_workspace_macro_info_t *macro);
+static desk_pane_t *desk_pane_for_id(desk_session_t *session, int pane_id);
 static int parse_prefix_key(const char *text, unsigned char *key);
 static void desk_apply_pane_labels(desk_session_t *session);
 static int resize_all_panes(desk_session_t *session,
@@ -2417,6 +2430,159 @@ static void grid_cleanup(desk_grid_t *grid)
     memset(grid, 0, sizeof(*grid));
 }
 
+static void desk_scrollback_clear(desk_pane_t *pane)
+{
+    if (pane == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < pane->scrollback_count; ++i) {
+        size_t index = (pane->scrollback_head + i) %
+                       pane->scrollback_capacity;
+        free(pane->scrollback[index].cells);
+        pane->scrollback[index].cells = NULL;
+        pane->scrollback[index].cols = 0;
+    }
+    free(pane->scrollback);
+    pane->scrollback = NULL;
+    pane->scrollback_head = 0;
+    pane->scrollback_count = 0;
+    pane->scrollback_capacity = 0;
+    pane->scrollback_offset = 0;
+}
+
+static int desk_scrollback_set_limit(desk_pane_t *pane, size_t limit)
+{
+    if (pane == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (pane->scrollback_capacity == limit) {
+        pane->scrollback_limit = limit;
+        return 0;
+    }
+    desk_scrollback_clear(pane);
+    pane->scrollback_limit = limit;
+    if (limit == 0) {
+        return 0;
+    }
+    pane->scrollback = calloc(limit, sizeof(*pane->scrollback));
+    if (pane->scrollback == NULL) {
+        pane->scrollback_limit = 0;
+        return -1;
+    }
+    pane->scrollback_capacity = limit;
+    return 0;
+}
+
+static int desk_scrollback_append(desk_pane_t *pane,
+                                  const cubicle_terminal_scrollback_line_t *line)
+{
+    if (pane == NULL || line == NULL || line->cells == NULL ||
+        line->cols == 0 || pane->scrollback_capacity == 0) {
+        return 0;
+    }
+    desk_cell_t *cells = calloc(line->cols, sizeof(*cells));
+    if (cells == NULL) {
+        return -1;
+    }
+    for (unsigned int col = 0; col < line->cols; ++col) {
+        snprintf(cells[col].text, sizeof(cells[col].text), "%s",
+                 line->cells[col].text[0] == '\0' ? " "
+                                                  : line->cells[col].text);
+        snprintf(cells[col].sgr, sizeof(cells[col].sgr), "%s",
+                 line->cells[col].sgr);
+    }
+
+    size_t slot = 0;
+    if (pane->scrollback_count == pane->scrollback_capacity) {
+        slot = pane->scrollback_head;
+        free(pane->scrollback[slot].cells);
+        pane->scrollback_head =
+            (pane->scrollback_head + 1) % pane->scrollback_capacity;
+        if (pane->scrollback_offset > pane->scrollback_count) {
+            pane->scrollback_offset = pane->scrollback_count;
+        }
+    } else {
+        slot = (pane->scrollback_head + pane->scrollback_count) %
+               pane->scrollback_capacity;
+        pane->scrollback_count++;
+    }
+    pane->scrollback[slot].cols = (int)line->cols;
+    pane->scrollback[slot].cells = cells;
+    return 0;
+}
+
+static int desk_drain_model_scrollback(desk_pane_t *pane)
+{
+    if (pane == NULL || pane->terminal_model == NULL ||
+        pane->scrollback_limit == 0) {
+        return 0;
+    }
+    cubicle_terminal_scrollback_line_t *lines = NULL;
+    size_t line_count = 0;
+    if (cubicle_terminal_model_take_scrollback(pane->terminal_model, &lines,
+                                               &line_count) < 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < line_count; ++i) {
+        if (desk_scrollback_append(pane, &lines[i]) < 0) {
+            cubicle_terminal_scrollback_cleanup(lines, line_count);
+            return -1;
+        }
+    }
+    cubicle_terminal_scrollback_cleanup(lines, line_count);
+    return 0;
+}
+
+static bool desk_pane_return_to_live(desk_pane_t *pane)
+{
+    if (pane == NULL || pane->scrollback_offset == 0) {
+        return false;
+    }
+    pane->scrollback_offset = 0;
+    return true;
+}
+
+static bool desk_scroll_active_pane(desk_session_t *session,
+                                    const desk_terminal_t *terminal,
+                                    const char *command)
+{
+    desk_pane_t *pane = desk_pane_for_id(session,
+                                         session->layout.active_pane_id);
+    if (pane == NULL) {
+        return false;
+    }
+    size_t max_offset = pane->scrollback_count;
+    size_t page = pane->grid.rows > 1 ? (size_t)(pane->grid.rows - 1) : 1;
+    size_t before = pane->scrollback_offset;
+    if (strcmp(command, "scroll.page_up") == 0) {
+        pane->scrollback_offset =
+            pane->scrollback_offset + page > max_offset
+                ? max_offset
+                : pane->scrollback_offset + page;
+    } else if (strcmp(command, "scroll.page_down") == 0) {
+        pane->scrollback_offset =
+            pane->scrollback_offset > page ? pane->scrollback_offset - page
+                                           : 0;
+    } else if (strcmp(command, "scroll.line_up") == 0) {
+        if (pane->scrollback_offset < max_offset) {
+            pane->scrollback_offset++;
+        }
+    } else if (strcmp(command, "scroll.line_down") == 0) {
+        if (pane->scrollback_offset > 0) {
+            pane->scrollback_offset--;
+        }
+    } else if (strcmp(command, "scroll.top") == 0) {
+        pane->scrollback_offset = max_offset;
+    } else if (strcmp(command, "scroll.bottom") == 0) {
+        pane->scrollback_offset = 0;
+    } else {
+        return false;
+    }
+    (void)terminal;
+    return pane->scrollback_offset != before;
+}
+
 static void grid_apply_snapshot(desk_grid_t *grid,
                                 const cubicle_terminal_snapshot_t *snapshot)
 {
@@ -2515,6 +2681,8 @@ static int reload_pane_snapshot(desk_pane_t *pane)
     }
     if (cubicle_terminal_model_load_snapshot(pane->terminal_model,
                                              &snapshot) < 0 ||
+        cubicle_terminal_model_set_scrollback_capture_limit(
+            pane->terminal_model, pane->scrollback_limit) < 0 ||
         grid_resize(&pane->grid, (int)snapshot.rows,
                     (int)snapshot.cols) < 0) {
         desk_debug_log("event=snapshot_apply_failed process=%s rows=%u cols=%u offset=%llu errno=%d",
@@ -2525,6 +2693,13 @@ static int reload_pane_snapshot(desk_pane_t *pane)
         return -1;
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_scrollback_line_t *discarded = NULL;
+    size_t discarded_count = 0;
+    if (cubicle_terminal_model_take_scrollback(pane->terminal_model,
+                                               &discarded,
+                                               &discarded_count) == 0) {
+        cubicle_terminal_scrollback_cleanup(discarded, discarded_count);
+    }
     cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
     uint64_t after_offset =
         cubicle_attachment_read_offset(pane->attachment, CUBICLE_STREAM_TTY);
@@ -2573,7 +2748,8 @@ static bool desk_cursor_target(const desk_terminal_t *terminal,
     int active = session->layout.active_pane_id;
     desk_pane_t *pane = desk_pane_for_id(session, active);
     desk_rect_t rect;
-    if (pane == NULL || !pane->grid.cursor_visible ||
+    if (pane == NULL || pane->scrollback_offset > 0 ||
+        !pane->grid.cursor_visible ||
         !pane_content_rect_for_pane(&session->layout, terminal, active,
                                     &rect)) {
         return false;
@@ -2745,17 +2921,32 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
 static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const desk_pane_layout_t *panes,
                                        int pane_id,
-                                       desk_grid_t *grid,
-                                       const char *title,
+                                       desk_pane_t *pane,
                                        bool mouse_titles,
                                        bool dirty_only)
 {
     char frame[65536];
     size_t used = 0;
     desk_rect_t rect;
+    desk_grid_t *grid = &pane->grid;
+    bool scrollback_view = pane->scrollback_offset > 0;
 
     if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect)) {
         return;
+    }
+
+    if (scrollback_view) {
+        dirty_only = false;
+    }
+
+    size_t total_rows = pane->scrollback_count +
+                        (grid->rows > 0 ? (size_t)grid->rows : 0);
+    size_t start_row = 0;
+    if (scrollback_view && total_rows > (size_t)grid->rows) {
+        size_t live_start = total_rows - (size_t)grid->rows;
+        start_row = pane->scrollback_offset > live_start
+                        ? 0
+                        : live_start - pane->scrollback_offset;
     }
 
     for (int row = 0; row < grid->rows; ++row) {
@@ -2774,7 +2965,29 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
         for (int col = 0; col < rect.cols; ++col) {
             const char *text = " ";
             const char *sgr = "";
-            if (row < grid->rows && col < grid->cols) {
+            if (scrollback_view) {
+                size_t virtual_row = start_row + (size_t)row;
+                if (virtual_row < pane->scrollback_count) {
+                    size_t index = (pane->scrollback_head + virtual_row) %
+                                   pane->scrollback_capacity;
+                    const desk_scrollback_line_t *line =
+                        &pane->scrollback[index];
+                    if (col < line->cols) {
+                        const desk_cell_t *cell = &line->cells[col];
+                        text = cell->text;
+                        sgr = cell->sgr;
+                    }
+                } else {
+                    size_t grid_row = virtual_row - pane->scrollback_count;
+                    if (grid_row < (size_t)grid->rows && col < grid->cols) {
+                        const desk_cell_t *cell =
+                            &grid->cells[grid_row * (size_t)grid->cols +
+                                         (size_t)col];
+                        text = cell->text;
+                        sgr = cell->sgr;
+                    }
+                }
+            } else if (row < grid->rows && col < grid->cols) {
                 const desk_cell_t *cell =
                     &grid->cells[(size_t)row * (size_t)grid->cols +
                                  (size_t)col];
@@ -2799,29 +3012,36 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
-    desk_render_pane_title(terminal, panes, pane_id, title, mouse_titles);
+    char title[160];
+    snprintf(title, sizeof(title), "%.96s%s%zu/%zu",
+             pane->process.friendly_name,
+             scrollback_view ? " scroll " : "",
+             scrollback_view ? pane->scrollback_offset : 0,
+             scrollback_view ? pane->scrollback_count : 0);
+    desk_render_pane_title(terminal, panes, pane_id,
+                           scrollback_view ? title
+                                           : pane->process.friendly_name,
+                           mouse_titles);
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   const desk_pane_layout_t *panes,
                                   int pane_id,
-                                  desk_grid_t *grid,
-                                  const char *title,
+                                  desk_pane_t *pane,
                                   bool mouse_titles)
 {
-    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title,
-                               mouse_titles, false);
+    desk_render_cube_grid_rows(terminal, panes, pane_id, pane, mouse_titles,
+                               false);
 }
 
 static void desk_render_dirty_cube_grid(const desk_terminal_t *terminal,
                                         const desk_pane_layout_t *panes,
                                         int pane_id,
-                                        desk_grid_t *grid,
-                                        const char *title,
+                                        desk_pane_t *pane,
                                         bool mouse_titles)
 {
-    desk_render_cube_grid_rows(terminal, panes, pane_id, grid, title,
-                               mouse_titles, true);
+    desk_render_cube_grid_rows(terminal, panes, pane_id, pane, mouse_titles,
+                               true);
 }
 
 static int pane_content_size(const desk_terminal_t *terminal,
@@ -3154,6 +3374,10 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
                                         size_t error_size)
 {
     desk_pane_t *pane = &session->panes[pane_index];
+    if (desk_scrollback_set_limit(pane, session->scrollback_limit) < 0) {
+        snprintf(error, error_size, "failed to initialize pane scrollback");
+        return CUBICLE_ERR_INTERNAL;
+    }
     desk_debug_log("event=attach_start pane=%zu process=%s id=%s rows=%u cols=%u",
                    pane_index + 1, pane->process.friendly_name,
                    pane->process.id, pane->rows, pane->cols);
@@ -3257,6 +3481,7 @@ static void desk_cleanup_pane(desk_pane_t *pane)
     cubicle_terminal_model_destroy(pane->terminal_model);
     pane->terminal_model = NULL;
     grid_cleanup(&pane->grid);
+    desk_scrollback_clear(pane);
     memset(pane, 0, sizeof(*pane));
 }
 
@@ -4038,6 +4263,24 @@ static const char *desk_command_description(const char *command)
     if (strcmp(command, "bindings.show") == 0) {
         return "Show key bindings";
     }
+    if (strcmp(command, "scroll.page_up") == 0) {
+        return "Scroll active pane up one page";
+    }
+    if (strcmp(command, "scroll.page_down") == 0) {
+        return "Scroll active pane down one page";
+    }
+    if (strcmp(command, "scroll.line_up") == 0) {
+        return "Scroll active pane up one line";
+    }
+    if (strcmp(command, "scroll.line_down") == 0) {
+        return "Scroll active pane down one line";
+    }
+    if (strcmp(command, "scroll.top") == 0) {
+        return "Scroll active pane to top";
+    }
+    if (strcmp(command, "scroll.bottom") == 0) {
+        return "Return active pane to live output";
+    }
     if (strcmp(command, "menu.open") == 0) {
         return "Open cube menu";
     }
@@ -4151,6 +4394,12 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "layout.save");
     desk_add_bindings_item(session, "layout.load");
     desk_add_bindings_item(session, "bindings.show");
+    desk_add_bindings_item(session, "scroll.page_up");
+    desk_add_bindings_item(session, "scroll.page_down");
+    desk_add_bindings_item(session, "scroll.line_up");
+    desk_add_bindings_item(session, "scroll.line_down");
+    desk_add_bindings_item(session, "scroll.top");
+    desk_add_bindings_item(session, "scroll.bottom");
     desk_add_bindings_item(session, "menu.open");
     desk_add_bindings_item(session, "mouse.toggle");
     desk_add_bindings_item(session, "quit");
@@ -4534,6 +4783,7 @@ static int desk_replace_active_pane_process(desk_session_t *session,
     cubicle_terminal_model_destroy(pane->terminal_model);
     pane->terminal_model = NULL;
     grid_cleanup(&pane->grid);
+    desk_scrollback_clear(pane);
     memset(&pane->grid, 0, sizeof(pane->grid));
     memset(&pane->resize, 0, sizeof(pane->resize));
     pane->rows = 0;
@@ -4722,8 +4972,7 @@ static void render_all_panes(const desk_terminal_t *terminal,
     desk_render_layout(terminal, &session->layout);
     for (size_t i = 0; i < session->pane_count; ++i) {
         desk_render_cube_grid(terminal, &session->layout, (int)i + 1,
-                              &session->panes[i].grid,
-                              session->panes[i].process.friendly_name,
+                              &session->panes[i],
                               session->mouse_titles);
     }
     desk_cursor_reset_blink(session);
@@ -5230,6 +5479,11 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
             }
             break;
         }
+        if (desk_drain_model_scrollback(pane) < 0) {
+            desk_debug_log("event=scrollback_drain_failed pane=%zu process=%s errno=%d",
+                           pane_index + 1, pane->process.friendly_name, errno);
+            return -1;
+        }
         pane_changed = true;
         if (output_seen != NULL) {
             *output_seen = true;
@@ -5245,8 +5499,7 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
     if (pane_changed) {
         desk_cursor_erase(terminal, session);
         desk_render_dirty_cube_grid(terminal, &session->layout,
-                                    (int)pane_index + 1, &pane->grid,
-                                    pane->process.friendly_name,
+                                    (int)pane_index + 1, pane,
                                     session->mouse_titles);
         desk_cursor_reset_blink(session);
         desk_cursor_render(terminal, session);
@@ -5264,6 +5517,9 @@ static int write_active_pane(desk_session_t *session,
         return -1;
     }
     desk_pane_t *pane = &session->panes[(size_t)active - 1];
+    if (desk_pane_return_to_live(pane)) {
+        session->redraw_requested = true;
+    }
     if (pane->attachment == NULL) {
         desk_debug_log("event=write_skipped pane=%d process=%s reason=detached",
                        active, pane->process.friendly_name);
@@ -6524,6 +6780,12 @@ static bool desk_execute_command(desk_session_t *session,
                                  bool *layout_changed,
                                  bool *quit_requested)
 {
+    if (strncmp(command, "scroll.", 7) == 0) {
+        if (desk_scroll_active_pane(session, terminal, command)) {
+            render_all_panes(terminal, session);
+        }
+        return true;
+    }
     bool keep_zoom = session->zoomed;
     desk_zoom_t previous_zoom = session->layout.zoom;
     cubicle_workspace_macro_info_t *macro =
@@ -6967,6 +7229,7 @@ static void desk_session_cleanup(desk_session_t *session)
         cubicle_terminal_model_destroy(session->panes[i].terminal_model);
         session->panes[i].terminal_model = NULL;
         grid_cleanup(&session->panes[i].grid);
+        desk_scrollback_clear(&session->panes[i]);
     }
     cubicle_client_disconnect(session->manager);
     session->manager = NULL;
@@ -7000,6 +7263,7 @@ static int desk_run_workspace(const char *workspace_arg,
         session.prefix_sequence_length = config.desk_prefix_sequence_length;
     }
     session.key_binding_count = config.desk_key_binding_count;
+    session.scrollback_limit = config.desk_scrollback_lines;
     memcpy(session.key_bindings, config.desk_key_bindings,
            session.key_binding_count * sizeof(session.key_bindings[0]));
     session.startup_key_binding_count = session.key_binding_count;
@@ -7148,6 +7412,10 @@ static int desk_run_workspace(const char *workspace_arg,
                                errno);
                 break;
             }
+            if (session.redraw_requested) {
+                session.redraw_requested = false;
+                render_all_panes(&terminal, &session);
+            }
         }
         if (ready > 0 && session.open_menu.level == DESK_MENU_CLOSED) {
             for (size_t i = 0; i < session.pane_count; ++i) {
@@ -7253,6 +7521,9 @@ static int desk_run_workspace(const char *workspace_arg,
                     desk_render_open_menu(&terminal, &session);
                 } else if (menu_closed) {
                     render_all_panes(&terminal, &session);
+                } else if (session.redraw_requested) {
+                    session.redraw_requested = false;
+                    render_all_panes(&terminal, &session);
                 } else {
                     desk_cursor_reset_blink(&session);
                     desk_cursor_render(&terminal, &session);
@@ -7298,6 +7569,7 @@ static void print_usage(FILE *stream, const char *program)
     fprintf(stream, "  Prefix-:      Save the current layout by name.\n");
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
     fprintf(stream, "  Prefix-?      Show or edit configured key bindings.\n");
+    fprintf(stream, "  Prefix-PageUp/PageDown scroll the active pane.\n");
 }
 
 static bool desk_string_equals_case(const char *left, const char *right)

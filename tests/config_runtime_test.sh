@@ -91,6 +91,7 @@ grep -q "^manager.log_dir=$log_dir$" "$tmpdir/config-paths.out"
 grep -q '^manager.socket_mode=0664$' "$tmpdir/config-paths.out"
 grep -q '^cube.automanager=true$' "$tmpdir/config-paths.out"
 grep -q '^desk.automanager=true$' "$tmpdir/config-paths.out"
+grep -q '^desk.scrollback_lines=10000$' "$tmpdir/config-paths.out"
 
 XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" config effective \
     >"$tmpdir/config-effective.out"
@@ -104,6 +105,7 @@ grep -q "^      source: $config_file.d/90-cube-debug.cfg (override)$" "$tmpdir/c
 grep -q '^  cube.automanager .* true$' "$tmpdir/config-effective.out"
 grep -q '^  desk.debug .* none$' "$tmpdir/config-effective.out"
 grep -q '^  desk.automanager .* true$' "$tmpdir/config-effective.out"
+grep -q '^  desk.scrollback_lines .* 10000$' "$tmpdir/config-effective.out"
 grep -q '^      source: built-in defaults (built-in)$' "$tmpdir/config-effective.out"
 
 XDG_STATE_HOME="$xdg_state" "$CUBE" --config "$config_file" workspace "Project A" \

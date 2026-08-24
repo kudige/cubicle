@@ -482,6 +482,13 @@
   - added help/runtime coverage for explicit config override usage
   - manager startup now logs resolved non-sensitive configuration settings
   - added runtime coverage for manager startup config diagnostics
+- Added session-local desk scrollback:
+  - desk captures libvterm scrollback lines per pane while the current desk process is running
+  - desk.scrollback_lines config controls per-pane retained history, defaulting to 10000 lines
+  - Prefix-PageUp, Prefix-PageDown, Prefix-Home, and Prefix-End scroll the active pane without replaying controller logs
+  - scroll.page_up, scroll.page_down, scroll.line_up, scroll.line_down, scroll.top, and scroll.bottom are configurable desk commands
+  - desk hides the live cursor while a pane is scrolled back and returns to live output before forwarding process input
+  - terminal model and config tests cover scrollback capture/drain and configuration parsing
 
 ## Next
 

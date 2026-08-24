@@ -165,6 +165,33 @@ static int parse_bool(const char *value,
     return -1;
 }
 
+static int parse_uint_range(const char *value,
+                            unsigned int *parsed,
+                            unsigned int min_value,
+                            unsigned int max_value,
+                            const char *name,
+                            char *error,
+                            size_t error_size)
+{
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long result = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        result < min_value || result > max_value) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size,
+                     "%s must be between %u and %u",
+                     name, min_value, max_value);
+        }
+        return -1;
+    }
+    *parsed = (unsigned int)result;
+    return 0;
+}
+
 static int string_equals_case(const char *left, const char *right)
 {
     while (*left != '\0' && *right != '\0') {
@@ -622,6 +649,12 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "layout.save") == 0 ||
            strcmp(command, "layout.load") == 0 ||
            strcmp(command, "bindings.show") == 0 ||
+           strcmp(command, "scroll.page_up") == 0 ||
+           strcmp(command, "scroll.page_down") == 0 ||
+           strcmp(command, "scroll.line_up") == 0 ||
+           strcmp(command, "scroll.line_down") == 0 ||
+           strcmp(command, "scroll.top") == 0 ||
+           strcmp(command, "scroll.bottom") == 0 ||
            strcmp(command, "menu.open") == 0 ||
            strcmp(command, "mouse.toggle") == 0 ||
            strcmp(command, "quit") == 0;
@@ -1026,6 +1059,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
     config->desk_debug_library = 0;
     config->desk_debug_terminal = 0;
     config->desk_automanager = 1;
+    config->desk_scrollback_lines = 10000;
     config->desk_prefix_key = 0x18;
     config->desk_prefix_sequence[0] = 0x18;
     config->desk_prefix_sequence_length = 1;
@@ -1062,6 +1096,14 @@ void cubicle_config_defaults(cubicle_config_t *config)
     (void)add_desk_key_binding(config, "Prefix-:", "layout.save", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-;", "layout.load", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-?", "bindings.show", 1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-PageUp", "scroll.page_up", 1,
+                               NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-PageDown", "scroll.page_down",
+                               1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-Home", "scroll.top", 1, NULL,
+                               0);
+    (void)add_desk_key_binding(config, "Prefix-End", "scroll.bottom", 1, NULL,
+                               0);
     (void)add_desk_key_binding(config, "Prefix-q", "quit", 1, NULL, 0);
     snprintf(config->source, sizeof(config->source), "built-in defaults");
     set_all_origins(config, CUBICLE_CONFIG_SOURCE_BUILTIN,
@@ -1281,6 +1323,19 @@ static int apply_econf_file(cubicle_config_t *config,
     }
     if (value[0] != '\0') {
         set_origin(config, CUBICLE_CONFIG_DESK_AUTOMANAGER, source_kind,
+                   source);
+    }
+
+    value[0] = '\0';
+    if (get_optional_string(file, "desk", "scrollback_lines", value,
+                            sizeof(value), &present, error, error_size) < 0 ||
+        (value[0] != '\0' &&
+         parse_uint_range(value, &config->desk_scrollback_lines, 1, 200000,
+                          "desk.scrollback_lines", error, error_size) < 0)) {
+        return -1;
+    }
+    if (value[0] != '\0') {
+        set_origin(config, CUBICLE_CONFIG_DESK_SCROLLBACK_LINES, source_kind,
                    source);
     }
 
@@ -2041,6 +2096,8 @@ const char *cubicle_config_key_name(cubicle_config_key_t key)
         return "desk.debug";
     case CUBICLE_CONFIG_DESK_AUTOMANAGER:
         return "desk.automanager";
+    case CUBICLE_CONFIG_DESK_SCROLLBACK_LINES:
+        return "desk.scrollback_lines";
     case CUBICLE_CONFIG_CLIENT_MANAGER:
         return "client.manager";
     case CUBICLE_CONFIG_CLIENT_SERVER_IDENTITY:

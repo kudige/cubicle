@@ -25,7 +25,17 @@ struct cubicle_terminal_model {
     terminal_scrollback_line_t *scrollback;
     size_t scrollback_count;
     size_t scrollback_capacity;
+    cubicle_terminal_scrollback_line_t *captured_scrollback;
+    size_t captured_scrollback_head;
+    size_t captured_scrollback_count;
+    size_t captured_scrollback_capacity;
+    size_t scrollback_capture_limit;
 };
+
+static void cell_text_from_vterm(const VTermScreenCell *source,
+                                 cubicle_terminal_cell_t *target);
+static int cell_sgr_from_vterm(const VTermScreenCell *source,
+                               cubicle_terminal_cell_t *target);
 
 static int track_damage(VTermRect rect, void *user)
 {
@@ -93,6 +103,78 @@ static void clear_scrollback(cubicle_terminal_model_t *model)
     model->scrollback_capacity = 0;
 }
 
+static void clear_captured_scrollback(cubicle_terminal_model_t *model)
+{
+    if (model == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < model->captured_scrollback_count; ++i) {
+        size_t index = (model->captured_scrollback_head + i) %
+                       model->captured_scrollback_capacity;
+        free(model->captured_scrollback[index].cells);
+        model->captured_scrollback[index].cells = NULL;
+        model->captured_scrollback[index].cols = 0;
+    }
+    model->captured_scrollback_head = 0;
+    model->captured_scrollback_count = 0;
+}
+
+static void free_captured_scrollback(cubicle_terminal_model_t *model)
+{
+    if (model == NULL) {
+        return;
+    }
+    clear_captured_scrollback(model);
+    free(model->captured_scrollback);
+    model->captured_scrollback = NULL;
+    model->captured_scrollback_capacity = 0;
+    model->scrollback_capture_limit = 0;
+}
+
+static int capture_scrollback_line(cubicle_terminal_model_t *model,
+                                   int cols,
+                                   const VTermScreenCell *cells)
+{
+    if (model == NULL || model->scrollback_capture_limit == 0 ||
+        cols <= 0 || cells == NULL) {
+        return 1;
+    }
+    if (model->captured_scrollback_capacity == 0) {
+        errno = EINVAL;
+        return 0;
+    }
+    cubicle_terminal_cell_t *copy =
+        calloc((size_t)cols, sizeof(*copy));
+    if (copy == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < cols; ++i) {
+        cell_text_from_vterm(&cells[i], &copy[i]);
+        if (cell_sgr_from_vterm(&cells[i], &copy[i]) < 0) {
+            free(copy);
+            return 0;
+        }
+    }
+
+    size_t slot = 0;
+    if (model->captured_scrollback_count ==
+        model->captured_scrollback_capacity) {
+        slot = model->captured_scrollback_head;
+        free(model->captured_scrollback[slot].cells);
+        model->captured_scrollback_head =
+            (model->captured_scrollback_head + 1) %
+            model->captured_scrollback_capacity;
+    } else {
+        slot = (model->captured_scrollback_head +
+                model->captured_scrollback_count) %
+               model->captured_scrollback_capacity;
+        model->captured_scrollback_count++;
+    }
+    model->captured_scrollback[slot].cols = (unsigned int)cols;
+    model->captured_scrollback[slot].cells = copy;
+    return 1;
+}
+
 static int save_scrollback_line(cubicle_terminal_model_t *model,
                                 int cols,
                                 const VTermScreenCell *cells)
@@ -150,7 +232,10 @@ static int restore_scrollback_line(cubicle_terminal_model_t *model,
 static int track_scrollback_push(int cols, const VTermScreenCell *cells,
                                  void *user)
 {
-    return save_scrollback_line(user, cols, cells);
+    cubicle_terminal_model_t *model = user;
+    int saved = save_scrollback_line(model, cols, cells);
+    int captured = capture_scrollback_line(model, cols, cells);
+    return saved && captured;
 }
 
 static int track_scrollback_pop(int cols, VTermScreenCell *cells, void *user)
@@ -401,6 +486,7 @@ void cubicle_terminal_model_destroy(cubicle_terminal_model_t *model)
 {
     if (model != NULL) {
         clear_scrollback(model);
+        free_captured_scrollback(model);
         vterm_free(model->term);
         free(model);
     }
@@ -444,6 +530,76 @@ int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
     }
     vterm_screen_flush_damage(model->screen);
     return 0;
+}
+
+int cubicle_terminal_model_set_scrollback_capture_limit(
+    cubicle_terminal_model_t *model,
+    size_t line_limit)
+{
+    if (model == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (line_limit == 0) {
+        free_captured_scrollback(model);
+        return 0;
+    }
+    cubicle_terminal_scrollback_line_t *next =
+        calloc(line_limit, sizeof(*next));
+    if (next == NULL) {
+        return -1;
+    }
+    free_captured_scrollback(model);
+    model->captured_scrollback = next;
+    model->captured_scrollback_capacity = line_limit;
+    model->scrollback_capture_limit = line_limit;
+    return 0;
+}
+
+int cubicle_terminal_model_take_scrollback(
+    cubicle_terminal_model_t *model,
+    cubicle_terminal_scrollback_line_t **lines_out,
+    size_t *line_count_out)
+{
+    if (model == NULL || lines_out == NULL || line_count_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *lines_out = NULL;
+    *line_count_out = 0;
+    if (model->captured_scrollback_count == 0) {
+        return 0;
+    }
+    cubicle_terminal_scrollback_line_t *lines =
+        calloc(model->captured_scrollback_count, sizeof(*lines));
+    if (lines == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < model->captured_scrollback_count; ++i) {
+        size_t index = (model->captured_scrollback_head + i) %
+                       model->captured_scrollback_capacity;
+        lines[i] = model->captured_scrollback[index];
+        model->captured_scrollback[index].cells = NULL;
+        model->captured_scrollback[index].cols = 0;
+    }
+    *lines_out = lines;
+    *line_count_out = model->captured_scrollback_count;
+    model->captured_scrollback_head = 0;
+    model->captured_scrollback_count = 0;
+    return 0;
+}
+
+void cubicle_terminal_scrollback_cleanup(
+    cubicle_terminal_scrollback_line_t *lines,
+    size_t line_count)
+{
+    if (lines == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < line_count; ++i) {
+        free(lines[i].cells);
+    }
+    free(lines);
 }
 
 int cubicle_terminal_model_get_dirty_rows(cubicle_terminal_model_t *model,
@@ -542,6 +698,7 @@ int cubicle_terminal_model_load_snapshot(
         return -1;
     }
     clear_scrollback(model);
+    clear_captured_scrollback(model);
     if (cubicle_terminal_model_resize(model, snapshot->rows,
                                       snapshot->cols) < 0) {
         return -1;

@@ -815,6 +815,55 @@ json_cleanup_output=$(cube --workspace "Cleanup Workspace" --json cleanup)
 printf "%s" "$json_cleanup_output" | grep -q '"removed_count":0'
 printf "%s" "$json_cleanup_output" | grep -q '"skipped_live_count":1'
 printf "%s" "$json_cleanup_output" | grep -q '"skipped_saved_count":1'
+
+cleanup_exact_process_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-exact /bin/true | json_id)
+api process-wait "$cleanup_exact_process_id" --timeout-ms 2000 | grep -q '"success":true'
+cleanup_exact_output=$(cube cleanup "Cleanup Workspace.cleanup-exact")
+printf "%s\n" "$cleanup_exact_output" | grep -q '^Removed 1 processes$'
+printf "%s\n" "$cleanup_exact_output" | grep -q '^Skipped 0 live processes$'
+printf "%s\n" "$cleanup_exact_output" | grep -q '^Skipped 0 saved processes$'
+set +e
+api process-get "$cleanup_exact_process_id" >"$tmpdir/cleanup-exact-get.out" 2>&1
+cleanup_exact_status=$?
+set -e
+if [ "$cleanup_exact_status" -eq 0 ]; then
+    echo "qualified cleanup should remove matching completed process" >&2
+    exit 1
+fi
+
+cleanup_wild_done_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-wild-done /bin/true | json_id)
+api process-wait "$cleanup_wild_done_id" --timeout-ms 2000 | grep -q '"success":true'
+cleanup_wild_saved_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-wild-saved /bin/true | json_id)
+api process-wait "$cleanup_wild_saved_id" --timeout-ms 2000 | grep -q '"success":true'
+cube --workspace "Cleanup Workspace" save cleanup-wild-saved >/dev/null
+cleanup_wild_live_id=$(api process-start --workspace "$cleanup_workspace_id" \
+    --friendly-name cleanup-wild-live sleep 30 | json_id)
+cleanup_wild_output=$(cube cleanup "*.cleanup-wild-*")
+printf "%s\n" "$cleanup_wild_output" | grep -q '^Removed 1 processes$'
+printf "%s\n" "$cleanup_wild_output" | grep -q '^Skipped 1 live processes$'
+printf "%s\n" "$cleanup_wild_output" | grep -q '^Skipped 1 saved processes$'
+set +e
+api process-get "$cleanup_wild_done_id" >"$tmpdir/cleanup-wild-done-get.out" 2>&1
+cleanup_wild_done_status=$?
+set -e
+if [ "$cleanup_wild_done_status" -eq 0 ]; then
+    echo "wildcard cleanup should remove matching completed process" >&2
+    exit 1
+fi
+api process-get "$cleanup_wild_saved_id" >/dev/null
+api process-get "$cleanup_wild_live_id" >/dev/null
+json_selector_cleanup_output=$(cube --workspace "Cleanup Workspace" --json cleanup "cleanup-wild-*")
+printf "%s" "$json_selector_cleanup_output" | grep -q '"removed_count":0'
+printf "%s" "$json_selector_cleanup_output" | grep -q '"skipped_live_count":1'
+printf "%s" "$json_selector_cleanup_output" | grep -q '"skipped_saved_count":1'
+api process-kill "$cleanup_wild_live_id" >/dev/null
+api process-wait "$cleanup_wild_live_id" --timeout-ms 2000 | grep -q '"success":true'
+cube --workspace "Cleanup Workspace" unsave cleanup-wild-saved >/dev/null
+cube --workspace "Cleanup Workspace" cleanup >/dev/null
+
 api process-kill "$cleanup_live_process_id" >/dev/null
 api process-wait "$cleanup_live_process_id" --timeout-ms 2000 | grep -q '"success":true'
 cube --workspace "Cleanup Workspace" unsave cleanup-saved >/dev/null

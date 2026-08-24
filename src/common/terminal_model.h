@@ -10,6 +10,11 @@
 
 typedef struct cubicle_terminal_model cubicle_terminal_model_t;
 
+typedef struct cubicle_terminal_scrollback_line {
+    unsigned int cols;
+    cubicle_terminal_cell_t *cells;
+} cubicle_terminal_scrollback_line_t;
+
 int cubicle_terminal_model_create(unsigned int rows, unsigned int cols,
                                   cubicle_terminal_model_t **model_out);
 void cubicle_terminal_model_destroy(cubicle_terminal_model_t *model);
@@ -17,6 +22,16 @@ int cubicle_terminal_model_resize(cubicle_terminal_model_t *model,
                                   unsigned int rows, unsigned int cols);
 int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
                                 const void *data, size_t length);
+int cubicle_terminal_model_set_scrollback_capture_limit(
+    cubicle_terminal_model_t *model,
+    size_t line_limit);
+int cubicle_terminal_model_take_scrollback(
+    cubicle_terminal_model_t *model,
+    cubicle_terminal_scrollback_line_t **lines_out,
+    size_t *line_count_out);
+void cubicle_terminal_scrollback_cleanup(
+    cubicle_terminal_scrollback_line_t *lines,
+    size_t line_count);
 int cubicle_terminal_model_get_dirty_rows(cubicle_terminal_model_t *model,
                                           bool *rows,
                                           size_t row_count);
