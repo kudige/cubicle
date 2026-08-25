@@ -24,6 +24,10 @@ static uint64_t attachment_stream_offset_value(
 static uint64_t *attachment_stream_offset(cubicle_attachment_t *attachment,
                                           cubicle_stream_kind_t stream);
 static cubicle_channel_mask_t channel_for_stream(cubicle_stream_kind_t stream);
+static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
+                                           const char *method,
+                                           const char *params,
+                                           char **response_out);
 
 static uint64_t attachment_now_ms(void)
 {
@@ -319,10 +323,8 @@ static cubicle_error_code_t attach_controller(cubicle_attachment_t *attachment)
     }
 
     char *response = NULL;
-    code = rpc_object(attachment->controller, "controller.attach", params,
-                      &response);
+    code = attachment_rpc(attachment, "controller.attach", params, &response);
     if (code != CUBICLE_OK) {
-        attachment->last_error = *cubicle_client_last_error(attachment->controller);
         free(response);
         return code;
     }
@@ -343,6 +345,15 @@ static cubicle_error_code_t attach_controller(cubicle_attachment_t *attachment)
 static cubicle_error_code_t ensure_controller_client(
     cubicle_attachment_t *attachment)
 {
+    if (attachment->relay) {
+        if (attachment->manager == NULL) {
+            return attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE,
+                                        0,
+                                        "relay attachment has no manager client");
+        }
+        return CUBICLE_OK;
+    }
+
     uint64_t now = attachment_now_ms();
     if (attachment->controller != NULL && attachment->idle_timeout_ms > 0 &&
         now > 0 && attachment->last_activity_ms > 0 &&
@@ -438,6 +449,56 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
                                            const char *params,
                                            char **response_out)
 {
+    if (attachment->relay) {
+        cubicle_json_builder_t builder = {0};
+        if (cubicle_json_builder_append(&builder, "{\"grant_id\":") < 0 ||
+            cubicle_json_builder_append_string(&builder,
+                                               attachment->grant.grant_id) <
+                0 ||
+            cubicle_json_builder_append(&builder, ",\"process_id\":") < 0 ||
+            cubicle_json_builder_append_string(&builder,
+                                               attachment->grant.process_id) <
+                0 ||
+            cubicle_json_builder_append(&builder, ",\"token\":") < 0 ||
+            cubicle_json_builder_append_string(&builder,
+                                               attachment->grant.token) <
+                0 ||
+            cubicle_json_builder_appendf(
+                &builder, ",\"channels\":%u,\"mode\":",
+                (unsigned int)attachment->grant.granted_channels) < 0 ||
+            cubicle_json_builder_append_string(
+                &builder,
+                attachment->grant.mode == CUBICLE_ATTACHMENT_INTERACTIVE
+                    ? "interactive"
+                    : "observer") < 0 ||
+            cubicle_json_builder_append(&builder, ",\"method\":") < 0 ||
+            cubicle_json_builder_append_string(&builder, method) < 0 ||
+            cubicle_json_builder_append(&builder, ",\"params\":") < 0 ||
+            cubicle_json_builder_append(&builder,
+                                        params == NULL ? "{}" : params) < 0 ||
+            cubicle_json_builder_append(&builder, "}") < 0) {
+            cubicle_json_builder_cleanup(&builder);
+            return attachment_set_error(attachment,
+                                        CUBICLE_ERR_RESOURCE_LIMIT, 0,
+                                        "relay request is too large");
+        }
+
+        cubicle_error_code_t code = rpc_object(
+            attachment->manager, "attachment.proxy", builder.data,
+            response_out);
+        cubicle_json_builder_cleanup(&builder);
+        if (code != CUBICLE_OK) {
+            const cubicle_error_t *error =
+                cubicle_client_last_error(attachment->manager);
+            if (error != NULL) {
+                attachment->last_error = *error;
+            }
+            return code;
+        }
+        attachment->last_activity_ms = attachment_now_ms();
+        return CUBICLE_OK;
+    }
+
     if (attachment->persistent_unsupported) {
         cubicle_client_t *client = NULL;
         cubicle_error_code_t code = create_controller_client(
@@ -555,6 +616,41 @@ cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t
     return CUBICLE_OK;
 }
 
+cubicle_error_code_t cubicle_attachment_connect_relay(
+    cubicle_client_t *manager,
+    const cubicle_attachment_grant_t *grant,
+    const cubicle_attachment_options_t *options,
+    cubicle_attachment_t **attachment_out)
+{
+    if (manager == NULL || grant == NULL || attachment_out == NULL ||
+        grant->grant_id[0] == '\0') {
+        return CUBICLE_ERR_INVALID_ARGUMENT;
+    }
+
+    cubicle_attachment_t *attachment = calloc(1, sizeof(*attachment));
+    if (attachment == NULL) {
+        return CUBICLE_ERR_INTERNAL;
+    }
+
+    attachment->stream_fd = -1;
+    attachment->grant = *grant;
+    attachment->manager = manager;
+    attachment->relay = 1;
+    attachment->idle_timeout_ms =
+        options != NULL && options->io_timeout_ms > 0
+            ? options->io_timeout_ms
+            : CUBICLE_ATTACHMENT_DEFAULT_IDLE_TIMEOUT_MS;
+
+    cubicle_error_code_t code = attach_controller(attachment);
+    if (code != CUBICLE_OK) {
+        cubicle_attachment_disconnect(attachment);
+        return code;
+    }
+
+    *attachment_out = attachment;
+    return CUBICLE_OK;
+}
+
 cubicle_channel_mask_t cubicle_attachment_channels(
     const cubicle_attachment_t *attachment)
 {
@@ -601,6 +697,9 @@ cubicle_error_code_t cubicle_attachment_stream_start(
     }
 
     if (attachment->stream_fd >= 0 && attachment->stream_fd_stream == stream) {
+        return CUBICLE_OK;
+    }
+    if (attachment->relay) {
         return CUBICLE_OK;
     }
 

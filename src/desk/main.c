@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -68,6 +69,105 @@ static int g_desk_debug_terminal = 0;
 static char g_desk_debug_log_path[CUBICLE_PATH_MAX];
 
 typedef cubeui_terminal_t desk_terminal_t;
+
+static const char *desk_user_home_directory(void)
+{
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        return home;
+    }
+    struct passwd *entry = getpwuid(geteuid());
+    return entry != NULL ? entry->pw_dir : NULL;
+}
+
+static int desk_remote_registry_path(char path[CUBICLE_PATH_MAX])
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    int length;
+    if (config_home != NULL && config_home[0] != '\0') {
+        length = snprintf(path, CUBICLE_PATH_MAX, "%s/cubicle/remotes.tsv",
+                          config_home);
+    } else {
+        const char *home = desk_user_home_directory();
+        if (home == NULL || home[0] == '\0') {
+            errno = ENOENT;
+            return -1;
+        }
+        length = snprintf(path, CUBICLE_PATH_MAX,
+                          "%s/.config/cubicle/remotes.tsv", home);
+    }
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int desk_remote_uri_for_name(const char *name,
+                                    char uri[CUBICLE_ENDPOINT_URI_MAX])
+{
+    char path[CUBICLE_PATH_MAX];
+    if (desk_remote_registry_path(path) < 0) {
+        return -1;
+    }
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return -1;
+    }
+
+    char line[4096];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        line[strcspn(line, "\n")] = '\0';
+        char *remote_name = line;
+        char *remote_uri = strchr(remote_name, '\t');
+        if (remote_uri == NULL) {
+            continue;
+        }
+        *remote_uri++ = '\0';
+        char *tab = strchr(remote_uri, '\t');
+        if (tab != NULL) {
+            *tab = '\0';
+        }
+        if (strcmp(remote_name, name) == 0) {
+            int length = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "%s",
+                                  remote_uri);
+            fclose(file);
+            if (length < 0 || (size_t)length >= CUBICLE_ENDPOINT_URI_MAX) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            return 0;
+        }
+    }
+    fclose(file);
+    errno = ENOENT;
+    return -1;
+}
+
+static int desk_split_remote_workspace(const char *input,
+                                       char workspace[CUBICLE_NAME_MAX],
+                                       char remote[CUBICLE_NAME_MAX])
+{
+    const char *separator = strrchr(input, '@');
+    if (separator == NULL) {
+        return 0;
+    }
+    if (separator == input || separator[1] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t workspace_length = (size_t)(separator - input);
+    size_t remote_length = strlen(separator + 1);
+    if (workspace_length >= CUBICLE_NAME_MAX ||
+        remote_length >= CUBICLE_NAME_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(workspace, input, workspace_length);
+    workspace[workspace_length] = '\0';
+    memcpy(remote, separator + 1, remote_length + 1);
+    return 1;
+}
 
 typedef struct desk_layout {
     int rows;
@@ -265,6 +365,8 @@ typedef struct desk_menu_geometry {
 
 typedef struct desk_session {
     cubicle_client_t *manager;
+    char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    bool manager_relay_attachments;
     cubicle_workspace_info_t workspace;
     desk_pane_t panes[32];
     size_t pane_count;
@@ -1730,6 +1832,7 @@ static int desk_load_named_layout_file(const char *path,
 
 static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
                                            cubicle_config_t *config_out,
+                                           const char *manager_override,
                                            char *error,
                                            size_t error_size)
 {
@@ -1769,10 +1872,15 @@ static cubicle_error_code_t connect_client(cubicle_client_t **client_out,
     }
 
     char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
-    const char *manager_uri = cubeui_resolve_manager_endpoint(
-        NULL, &config, configured_endpoint, sizeof(configured_endpoint));
+    const char *manager_uri =
+        manager_override != NULL && manager_override[0] != '\0'
+            ? manager_override
+            : cubeui_resolve_manager_endpoint(NULL, &config,
+                                              configured_endpoint,
+                                              sizeof(configured_endpoint));
     const char *manager_environment = getenv("CUBICLE_MANAGER_SOCKET");
     int allow_automanager =
+        manager_override == NULL &&
         config.desk_automanager &&
         (manager_environment == NULL || manager_environment[0] == '\0');
     if (cubeui_autostart_manager(manager_uri, &config, allow_automanager,
@@ -1803,8 +1911,8 @@ static cubicle_error_code_t DESK_UNUSED resolve_attachment_target(
         return CUBICLE_ERR_NOT_FOUND;
     }
 
-    cubicle_error_code_t code = connect_client(&target->manager, NULL, error,
-                                               error_size);
+    cubicle_error_code_t code = connect_client(&target->manager, NULL, NULL,
+                                               error, error_size);
     if (code != CUBICLE_OK) {
         return code;
     }
@@ -3407,12 +3515,23 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
 
     cubicle_attachment_options_t options;
     memset(&options, 0, sizeof(options));
-    code = cubicle_attachment_connect(&grant, &options, &pane->attachment);
+    code = session->manager_relay_attachments
+               ? cubicle_attachment_connect_relay(session->manager, &grant,
+                                                  &options, &pane->attachment)
+               : cubicle_attachment_connect(&grant, &options,
+                                            &pane->attachment);
     if (code != CUBICLE_OK) {
+        const cubicle_error_t *last =
+            pane->attachment != NULL
+                ? cubicle_attachment_last_error(pane->attachment)
+                : cubicle_client_last_error(session->manager);
         desk_debug_log("event=attach_connect_failed pane=%zu process=%s code=%d",
                        pane_index + 1, pane->process.friendly_name,
                        (int)code);
-        snprintf(error, error_size, "controller attachment failed");
+        snprintf(error, error_size, "%s",
+                 last != NULL && last->message[0] != '\0'
+                     ? last->message
+                     : "controller attachment failed");
         return code;
     }
     desk_debug_log("event=attach_connected pane=%zu process=%s endpoint=%s",
@@ -7246,12 +7365,50 @@ static int desk_run_workspace(const char *workspace_arg,
     session.mouse_titles = mouse_titles;
     session.terminal_size_dirty = true;
 
+    const char *effective_workspace_arg = workspace_arg;
+    char remote_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_workspace[CUBICLE_NAME_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
+    if (workspace_arg != NULL && workspace_arg[0] != '\0') {
+        int remote_result = desk_split_remote_workspace(
+            workspace_arg, remote_workspace, remote_name);
+        if (remote_result < 0) {
+            fprintf(stderr, "desk: invalid remote workspace reference\n");
+            return 2;
+        }
+        if (remote_result > 0) {
+            if (desk_remote_uri_for_name(remote_name, remote_manager_uri) < 0) {
+                fprintf(stderr, "desk: remote '%s' is not configured\n",
+                        remote_name);
+                return 2;
+            }
+            effective_workspace_arg = remote_workspace;
+            snprintf(session.manager_uri, sizeof(session.manager_uri), "%s",
+                     remote_manager_uri);
+            session.manager_relay_attachments =
+                strncmp(remote_manager_uri, "tls://", 6) == 0;
+        }
+    }
+
     cubicle_config_t config;
-    cubicle_error_code_t code = connect_client(&session.manager, &config,
-                                               error, sizeof(error));
+    cubicle_error_code_t code = connect_client(
+        &session.manager, &config,
+        session.manager_uri[0] == '\0' ? NULL : session.manager_uri,
+        error, sizeof(error));
     if (code != CUBICLE_OK) {
         fprintf(stderr, "desk: %s\n", error);
         return 2;
+    }
+    if (session.manager_uri[0] == '\0') {
+        char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
+        const char *resolved = cubeui_resolve_manager_endpoint(
+            NULL, &config, configured_endpoint, sizeof(configured_endpoint));
+        if (resolved != NULL) {
+            snprintf(session.manager_uri, sizeof(session.manager_uri), "%s",
+                     resolved);
+            session.manager_relay_attachments =
+                strncmp(resolved, "tls://", 6) == 0;
+        }
     }
     session.prefix_key = prefix_override ? prefix_key : config.desk_prefix_key;
     if (prefix_override) {
@@ -7270,10 +7427,11 @@ static int desk_run_workspace(const char *workspace_arg,
     memcpy(session.startup_key_bindings, session.key_bindings,
            session.startup_key_binding_count *
                sizeof(session.startup_key_bindings[0]));
-    desk_debug_log("event=run_start workspace_arg=%s",
-                   workspace_arg != NULL ? workspace_arg : "");
+    desk_debug_log("event=run_start workspace_arg=%s manager=%s relay=%d",
+                   effective_workspace_arg != NULL ? effective_workspace_arg : "",
+                   session.manager_uri, session.manager_relay_attachments);
 
-    int result = resolve_workspace(&session, workspace_arg, error,
+    int result = resolve_workspace(&session, effective_workspace_arg, error,
                                    sizeof(error));
     if (result == 0) {
         snprintf(session.last_opened_workspace_id,

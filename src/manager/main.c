@@ -121,6 +121,8 @@ typedef struct manager_connection {
 
 static _Thread_local SSL *g_manager_tls = NULL;
 
+static int read_all_fd(int fd, void *buffer, size_t length);
+
 typedef struct workspace_key_record {
     char workspace_id[CUBICLE_ID_STRING_LENGTH];
     char key_id[CUBICLE_ID_STRING_LENGTH];
@@ -4026,6 +4028,137 @@ static int manager_api_success(int client_fd, const char *request_id,
     return write_api_frame(client_fd, response);
 }
 
+static int connect_controller_socket(const char *socket_path)
+{
+    if (socket_path == NULL ||
+        strlen(socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    return fd;
+}
+
+static int controller_rpc_call(const char *socket_path,
+                               const char *method,
+                               const char *params,
+                               char **response_out)
+{
+    int fd = connect_controller_socket(socket_path);
+    if (fd < 0) {
+        return -1;
+    }
+
+    char request[CUBICLE_API_MAX_FRAME];
+    if (cubicle_rpc_request(request, sizeof(request), "relay-1",
+                            "manager-relay", method,
+                            params == NULL ? "{}" : params) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    size_t length = strlen(request);
+    uint32_t length_network = htonl((uint32_t)length);
+    if (cubicle_write_all(fd, (const char *)&length_network,
+                          sizeof(length_network)) < 0 ||
+        cubicle_write_all(fd, request, length) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    uint32_t response_length_network = 0;
+    if (read_all_fd(fd, &response_length_network,
+                    sizeof(response_length_network)) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    uint32_t response_length = ntohl(response_length_network);
+    if (response_length == 0 || response_length > CUBICLE_API_MAX_FRAME) {
+        close(fd);
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    char *response = calloc((size_t)response_length + 1, 1);
+    if (response == NULL) {
+        close(fd);
+        errno = ENOMEM;
+        return -1;
+    }
+    if (read_all_fd(fd, response, response_length) < 0) {
+        int saved_errno = errno;
+        free(response);
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    close(fd);
+    response[response_length] = '\0';
+    *response_out = response;
+    return 0;
+}
+
+static int manager_proxy_controller_response(int client_fd,
+                                             const char *request_id,
+                                             char *controller_response)
+{
+    cubicle_rpc_response_envelope_t envelope;
+    if (cubicle_rpc_decode_response(&envelope, controller_response,
+                                    "relay-1") < 0) {
+        return manager_api_error(client_fd, request_id, CUBICLE_ERR_PROTOCOL,
+                                 "invalid controller response", false, 0);
+    }
+
+    int result = 0;
+    if (envelope.success) {
+        char *result_json = cubicle_json_copy_value(envelope.result);
+        if (result_json == NULL) {
+            result = manager_api_error(client_fd, request_id,
+                                       CUBICLE_ERR_RESOURCE_LIMIT,
+                                       "controller response too large", false,
+                                       errno);
+        } else {
+            result = manager_api_success(client_fd, request_id, result_json);
+            free(result_json);
+        }
+    } else {
+        cubicle_error_t error;
+        if (cubicle_rpc_decode_error_value(envelope.error, &error) < 0) {
+            result = manager_api_error(client_fd, request_id,
+                                       CUBICLE_ERR_PROTOCOL,
+                                       "invalid controller error", false, 0);
+        } else {
+            result = manager_api_error(client_fd, request_id, error.code,
+                                       error.message, error.retryable,
+                                       error.system_errno);
+        }
+    }
+
+    cubicle_rpc_response_envelope_cleanup(&envelope);
+    return result;
+}
+
 static void load_peer_credentials(int client_fd, manager_connection_t *connection)
 {
     memset(connection, 0, sizeof(*connection));
@@ -6655,6 +6788,129 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              "key not found", false, 0));
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "attachment.proxy") == 0) {
+        char process_id[128];
+        char grant_id[CUBICLE_ID_STRING_LENGTH];
+        char token[CUBICLE_TOKEN_MAX];
+        char attachment_mode[32];
+        char controller_method[128];
+        uint64_t channels = 0;
+        yyjson_val *controller_params = NULL;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id",
+                                             process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "grant_id", grant_id,
+                                             sizeof(grant_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "token", token,
+                                             sizeof(token),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "channels", &channels,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "mode",
+                                             attachment_mode,
+                                             sizeof(attachment_mode),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "method",
+                                             controller_method,
+                                             sizeof(controller_method),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_object(params, "params",
+                                             &controller_params,
+                                             &validation_error) < 0 ||
+            channels == 0 ||
+            (channels & ~(uint64_t)(CUBICLE_CHANNEL_STDIN |
+                                    CUBICLE_CHANNEL_STDOUT |
+                                    CUBICLE_CHANNEL_STDERR |
+                                    CUBICLE_CHANNEL_TTY)) != 0 ||
+            (strcmp(attachment_mode, "observer") != 0 &&
+             strcmp(attachment_mode, "interactive") != 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid attachment proxy request",
+                                             false, 0));
+        }
+
+        if (strcmp(controller_method, "controller.attach") != 0 &&
+            strcmp(controller_method, "controller.read") != 0 &&
+            strcmp(controller_method, "controller.write") != 0 &&
+            strcmp(controller_method, "controller.resize") != 0 &&
+            strcmp(controller_method, "controller.close_input") != 0 &&
+            strcmp(controller_method, "controller.status") != 0 &&
+            strcmp(controller_method, "controller.snapshot") != 0 &&
+            strcmp(controller_method, "controller.detach") != 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "unsupported attachment proxy method",
+                                             false, 0));
+        }
+
+        char expected_token[CUBICLE_TOKEN_MAX];
+        int token_length = snprintf(expected_token, sizeof(expected_token),
+                                    "local:%s:%s", grant_id, process_id);
+        if (token_length < 0 ||
+            (size_t)token_length >= sizeof(expected_token) ||
+            strcmp(expected_token, token) != 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "invalid attachment token",
+                                             false, 0));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        cubicle_capability_mask_t attachment_capability =
+            strcmp(attachment_mode, "interactive") == 0 ||
+                    (channels & CUBICLE_CHANNEL_STDIN) != 0
+                ? (CUBICLE_CAP_PROCESS_OBSERVE | CUBICLE_CAP_PROCESS_INPUT)
+                : CUBICLE_CAP_PROCESS_OBSERVE;
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                attachment_capability)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "attachment access is required",
+                                             false, 0));
+        }
+
+        char *controller_params_json =
+            cubicle_json_copy_value(controller_params);
+        if (controller_params_json == NULL) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "attachment proxy params too large",
+                                             false, errno));
+        }
+
+        char *controller_response = NULL;
+        if (controller_rpc_call(process.control_socket, controller_method,
+                                controller_params_json,
+                                &controller_response) < 0) {
+            int saved_errno = errno;
+            free(controller_params_json);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_CONTROLLER_UNAVAILABLE,
+                                             "controller proxy failed", true,
+                                             saved_errno));
+        }
+        free(controller_params_json);
+
+        int proxy_result = manager_proxy_controller_response(
+            client_fd, request_id, controller_response);
+        free(controller_response);
+        MANAGER_RETURN(proxy_result);
     }
 
     if (strcmp(method, "attachment.request") == 0) {

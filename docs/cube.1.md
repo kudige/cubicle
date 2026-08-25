@@ -37,6 +37,10 @@ cube access add PUBLIC_KEY_OR_FILE [--role observer|operator|owner] [--label LAB
 cube access set-role KEY_ID observer|operator|owner
 cube access remove KEY_ID
 cube access revoke KEY_ID
+cube remote list
+cube remote add NAME tls://host:port [--yes]
+cube remote inspect NAME
+cube remote remove NAME
 cube config show
 cube config effective
 cube config paths
@@ -339,7 +343,13 @@ Examples:
 ```sh
 cube connect shell
 cube connect --ro build
+cube --workspace Project@lab connect shell
+cube connect Project@lab.shell
 ```
+
+Remote-qualified workspace names use remotes configured by `cube remote add`.
+For remote attachments, `cube` relays controller I/O through the authenticated
+TLS manager connection.
 
 ## Pushing Input
 
@@ -652,11 +662,14 @@ the command supports it.
   `cube run COMMAND...`.
 - `cube config` is read-only today; it validates and displays effective
   configuration but does not edit files.
-- `cube connect` supports controller attachment through the manager-issued
-  Unix controller endpoint. For terminal processes it restores the current
-  controller snapshot first and falls back to bounded replay only when snapshot
-  data is unavailable. TCP manager connections are supported only when the
-  manager is explicitly configured/listening for TCP.
+- `cube connect` supports local controller attachment through manager-issued
+  Unix controller endpoints and remote attachment relay through TLS manager
+  connections. For terminal processes it restores the current controller
+  snapshot first and falls back to bounded replay only when snapshot data is
+  unavailable. Plain TCP manager connections remain development/test-only.
+- `desk --workspace WORKSPACE@REMOTE` can open a remote workspace through the
+  configured remote. A single Desk session still targets one manager, so mixed
+  local and remote panes in the same layout are not implemented yet.
 - JSON output is broad but not uniform across every command; lifecycle success
   commands often print `{}`.
 - User configuration drop-ins and config-editing commands described in

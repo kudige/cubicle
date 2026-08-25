@@ -43,7 +43,8 @@ cube() {
 
 client_key=$(cube identity pub)
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
+"$CUBICLE_MANAGER" --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" daemon \
     --foreground --control-socket "$unix_socket" --event-interval-ms 50 &
 manager_pid=$!
 
@@ -71,7 +72,8 @@ PY
 endpoint="tls://127.0.0.1:$port"
 tls_local_socket="$state_dir/manager.sock"
 
-"$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
+"$CUBICLE_MANAGER" --state-dir "$state_dir" \
+    --controller-bin "$CUBICLE_CONTROLLER" daemon \
     --foreground --listen "$endpoint" --event-interval-ms 50 &
 manager_pid=$!
 
@@ -94,6 +96,20 @@ grep -q 'Remote' "$tmpdir/tls-local-list.out"
 test -f "$state_dir/tls/server.crt"
 test -f "$state_dir/tls/server.key"
 
+CUBICLE_MANAGER_SOCKET="$endpoint" cube --workspace Remote run --bg --stream \
+    --name relay-echo sh -c 'printf relay-ok; sleep 30' \
+    >"$tmpdir/relay-run.out"
+CUBICLE_MANAGER_SOCKET="$endpoint" cube --workspace Remote connect --ro \
+    relay-echo >"$tmpdir/relay-connect.out" &
+relay_connect_pid=$!
+for _ in $(seq 1 100); do
+    grep -q 'relay-ok' "$tmpdir/relay-connect.out" && break
+    sleep 0.05
+done
+kill "$relay_connect_pid" 2>/dev/null || true
+wait "$relay_connect_pid" 2>/dev/null || true
+grep -q 'relay-ok' "$tmpdir/relay-connect.out"
+
 cube remote add lab "$endpoint" --yes >"$tmpdir/remote-add.out"
 grep -q 'Manager public key:' "$tmpdir/remote-add.out"
 cube remote list >"$tmpdir/remote-list.out"
@@ -104,6 +120,16 @@ cube remote remove lab
 cube remote list >"$tmpdir/remote-list-empty.out"
 grep -q 'No remotes configured' "$tmpdir/remote-list-empty.out"
 cube remote add lab "$endpoint" --yes >"$tmpdir/remote-add-again.out"
+cube --workspace Remote@lab connect --ro relay-echo \
+    >"$tmpdir/relay-connect-registered.out" &
+relay_registered_pid=$!
+for _ in $(seq 1 100); do
+    grep -q 'relay-ok' "$tmpdir/relay-connect-registered.out" && break
+    sleep 0.05
+done
+kill "$relay_registered_pid" 2>/dev/null || true
+wait "$relay_registered_pid" 2>/dev/null || true
+grep -q 'relay-ok' "$tmpdir/relay-connect-registered.out"
 
 local_state_dir="$tmpdir/local-manager"
 local_socket="$tmpdir/local-manager.sock"

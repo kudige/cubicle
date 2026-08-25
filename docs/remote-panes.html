@@ -167,21 +167,21 @@
   <main>
     <header>
       <h1>Remote Panes</h1>
-      <p class="lead">How to expose a Cubicle manager over TLS, trust it from another machine, list remote workspaces, and understand the current state of remote pane attachment.</p>
+      <p class="lead">How to expose a Cubicle manager over TLS, trust it from another machine, list remote workspaces, and attach to remote panes.</p>
     </header>
 
     <section class="summary" aria-label="Status summary">
       <div>
         <strong>Works today</strong>
-        <span class="muted">TLS manager connections, remote registration, and <code>cube ps -a</code> listing.</span>
+        <span class="muted">TLS manager connections, remote registration, <code>cube ps -a</code>, and remote <code>cube connect</code>.</span>
       </div>
       <div>
-        <strong>Partly available</strong>
-        <span class="muted">Desk can target one manager endpoint, including a TLS endpoint.</span>
+        <strong>Desk</strong>
+        <span class="muted"><code>desk --workspace name@remote</code> opens a remote workspace through the saved remote.</span>
       </div>
       <div>
         <strong>Not complete yet</strong>
-        <span class="muted">Seamless local Desk panes attached to remote controllers still need a controller relay or remote controller listener.</span>
+        <span class="muted">One Desk session still targets one manager; mixed local and remote panes in the same Desk layout are future work.</span>
       </div>
     </section>
 
@@ -230,15 +230,28 @@ Workspace Project@lab
     </section>
 
     <section>
-      <h2>Use Desk With A Remote Manager</h2>
-      <p>Desk currently connects to one manager endpoint for a session. To point Desk directly at a remote TLS manager, start it with <code>CUBICLE_MANAGER_SOCKET</code> set to that endpoint:</p>
+      <h2>Connect To A Remote Cube</h2>
+      <p>After the remote is registered, use the remote-qualified workspace name with <code>cube connect</code>:</p>
+      <pre><code>cube --workspace Project@lab connect build</code></pre>
+      <p>You can also put the workspace and cube in one selector:</p>
+      <pre><code>cube connect Project@lab.build</code></pre>
+      <p><code>cube</code> connects to the remote manager over TLS and relays controller I/O through that manager connection, so the client does not need direct access to controller Unix sockets on the remote host.</p>
+      <p>Direct manager selection also works:</p>
+      <pre><code>cube --manager-socket tls://lab.example.com:7443 --workspace Project connect build</code></pre>
+    </section>
+
+    <section>
+      <h2>Use Desk With A Remote Workspace</h2>
+      <p>After the remote is registered, open a remote workspace by suffixing the workspace with the remote name:</p>
+      <pre><code>desk --workspace Project@lab</code></pre>
+      <p>Desk connects to the saved TLS manager for <code>lab</code> and relays pane attachment through that manager.</p>
+      <p>You can also point Desk directly at a remote TLS manager:</p>
       <pre><code>CUBICLE_MANAGER_SOCKET=tls://lab.example.com:7443 desk --workspace Project</code></pre>
       <p>You can also put the remote endpoint in client configuration as <code>client.manager</code>, then run <code>desk --workspace Project</code>.</p>
 
       <div class="warning">
-        <h3>Current attachment limitation</h3>
-        <p>The remote registry is enough for discovery, and Desk can connect to a TLS manager when explicitly pointed at it. Seamless mixed local and remote panes in one Desk session are not complete yet.</p>
-        <p>Process attachment still depends on the controller endpoint returned by the manager. Today that endpoint is commonly a Unix socket path on the manager host, which a different machine cannot open. Full remote panes need either manager-relayed attachment streams or remotely reachable authenticated controller endpoints.</p>
+        <h3>Current Desk limitation</h3>
+        <p>A Desk session currently targets one manager. <code>desk --workspace Project@lab</code> opens remote panes from <code>lab</code>, but the same Desk layout cannot yet mix local panes with panes from another remote.</p>
       </div>
     </section>
 
@@ -252,7 +265,7 @@ Workspace Project@lab
       </ul>
 
       <h3>The remote workspace is listed but attachment fails</h3>
-      <p>This is expected with the current remote implementation when the controller endpoint is a remote Unix socket. Use the remote machine directly, or start Desk on the remote manager endpoint and keep this limitation in mind until controller relay support lands.</p>
+      <p>Make sure both client and manager are from a build that includes remote attachment relay support. Older managers return only remote Unix controller socket paths, which clients on another host cannot open.</p>
 
       <h3>The local socket is missing after starting TLS</h3>
       <p>Recent builds keep the local Unix socket when the manager is started with <code>--listen tls://...</code>. Rebuild and restart the manager if an older daemon is still running.</p>

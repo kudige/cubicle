@@ -246,7 +246,7 @@ static int print_command_usage(const char *command, FILE *stream)
     if (strcmp(command, "connect") == 0) {
         fprintf(stream,
                 "Usage:\n  cube connect [--ro] NAME\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "\nNAME may be WORKSPACE.NAME or WORKSPACE@REMOTE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "push") == 0) {
@@ -1296,6 +1296,54 @@ static int cube_remote_find(const cube_remote_record_t *records, size_t count,
         }
     }
     return -1;
+}
+
+static int cube_split_remote_workspace(const char *input,
+                                       char *workspace,
+                                       size_t workspace_size,
+                                       char *remote,
+                                       size_t remote_size)
+{
+    const char *separator = strrchr(input, '@');
+    if (separator == NULL) {
+        return 0;
+    }
+    if (separator == input || separator[1] == '\0') {
+        fprintf(stderr, "cube: invalid remote workspace reference\n");
+        return -1;
+    }
+
+    size_t workspace_length = (size_t)(separator - input);
+    size_t remote_length = strlen(separator + 1);
+    if (workspace_length >= workspace_size || remote_length >= remote_size) {
+        fprintf(stderr, "cube: remote workspace reference is too long\n");
+        return -1;
+    }
+    memcpy(workspace, input, workspace_length);
+    workspace[workspace_length] = '\0';
+    memcpy(remote, separator + 1, remote_length + 1);
+    return 1;
+}
+
+static int cube_remote_uri_for_name(const char *name,
+                                    char uri[CUBICLE_ENDPOINT_URI_MAX])
+{
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int index = cube_remote_find(records, count, name);
+    if (index < 0) {
+        fprintf(stderr, "cube: remote '%s' is not configured\n", name);
+        free(records);
+        return 1;
+    }
+    snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "%s", records[index].uri);
+    free(records);
+    return 0;
 }
 
 static int command_remote_list(void)
@@ -5576,15 +5624,28 @@ static int attach_to_process_id(const char *manager_socket,
         cubicle_client_disconnect(client);
         return 2;
     }
-    cubicle_client_disconnect(client);
-
     cubicle_attachment_t *attachment = NULL;
     cubicle_attachment_options_t attachment_options;
     memset(&attachment_options, 0, sizeof(attachment_options));
-    code = cubicle_attachment_connect(&grant, &attachment_options,
-                                      &attachment);
+    int relay_attachment = strncmp(manager_socket, "tls://", 6) == 0;
+    code = relay_attachment
+               ? cubicle_attachment_connect_relay(client, &grant,
+                                                  &attachment_options,
+                                                  &attachment)
+               : cubicle_attachment_connect(&grant, &attachment_options,
+                                            &attachment);
     if (code != CUBICLE_OK) {
-        fprintf(stderr, "cube: failed to attach to process\n");
+        const cubicle_error_t *error =
+            attachment != NULL ? cubicle_attachment_last_error(attachment)
+                               : NULL;
+        if (error == NULL || error->message[0] == '\0') {
+            error = cubicle_client_last_error(client);
+        }
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "failed to attach to process");
+        cubicle_client_disconnect(client);
         return 2;
     }
 
@@ -5594,6 +5655,7 @@ static int attach_to_process_id(const char *manager_socket,
         fprintf(stderr,
                 "cube: attachment grant did not include requested channels\n");
         cubicle_attachment_disconnect(attachment);
+        cubicle_client_disconnect(client);
         return 2;
     }
 
@@ -5601,6 +5663,7 @@ static int attach_to_process_id(const char *manager_socket,
                                  mode, read_only, replay_bytes);
     (void)cubicle_attachment_detach(attachment);
     cubicle_attachment_disconnect(attachment);
+    cubicle_client_disconnect(client);
     return result;
 }
 
@@ -5853,17 +5916,77 @@ static int process_connect(const char *manager_socket,
         return 2;
     }
 
+    const char *effective_manager_socket = manager_socket;
+    cube_options_t effective_options = *options;
+    char remote_manager_socket[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_workspace[CUBICLE_NAME_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
+    char remote_process[CUBICLE_NAME_MAX];
+    const char *process_selector = argv[argument_index];
+    int selected_remote = 0;
+
+    int split_process_workspace = split_qualified_process_ref(
+        argv[argument_index],
+        &(cube_process_ref_t){0});
+    if (split_process_workspace < 0) {
+        return 2;
+    }
+    const char *separator = strrchr(argv[argument_index], '.');
+    if (separator != NULL) {
+        cube_process_ref_t ref;
+        memset(&ref, 0, sizeof(ref));
+        if (split_qualified_process_ref(argv[argument_index], &ref) < 0) {
+            return 2;
+        }
+        int remote_result = cube_split_remote_workspace(
+            ref.workspace, remote_workspace, sizeof(remote_workspace),
+            remote_name, sizeof(remote_name));
+        if (remote_result < 0) {
+            return 2;
+        }
+        if (remote_result > 0) {
+            int lookup_result =
+                cube_remote_uri_for_name(remote_name, remote_manager_socket);
+            if (lookup_result != 0) {
+                return lookup_result;
+            }
+            snprintf(remote_process, sizeof(remote_process), "%s",
+                     ref.process);
+            effective_manager_socket = remote_manager_socket;
+            effective_options.workspace = remote_workspace;
+            process_selector = remote_process;
+            selected_remote = 1;
+        }
+    }
+    if (!selected_remote && options->workspace != NULL) {
+        int remote_result = cube_split_remote_workspace(
+            options->workspace, remote_workspace, sizeof(remote_workspace),
+            remote_name, sizeof(remote_name));
+        if (remote_result < 0) {
+            return 2;
+        }
+        if (remote_result > 0) {
+            int lookup_result =
+                cube_remote_uri_for_name(remote_name, remote_manager_socket);
+            if (lookup_result != 0) {
+                return lookup_result;
+            }
+            effective_manager_socket = remote_manager_socket;
+            effective_options.workspace = remote_workspace;
+        }
+    }
+
     char process_id[CUBICLE_ID_STRING_LENGTH];
     char mode[32];
     int resolve_result = resolve_process_metadata(
-        manager_socket, options, argv[argument_index], process_id,
+        effective_manager_socket, &effective_options, process_selector, process_id,
         sizeof(process_id), mode, sizeof(mode));
     if (resolve_result != 0) {
         return resolve_result;
     }
 
-    return attach_to_process_id(manager_socket, process_id,
-                                argv[argument_index], mode, read_only,
+    return attach_to_process_id(effective_manager_socket, process_id,
+                                process_selector, mode, read_only,
                                 CUBE_CONNECT_REPLAY_BYTES);
 }
 
