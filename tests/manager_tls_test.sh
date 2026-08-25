@@ -110,6 +110,17 @@ kill "$relay_connect_pid" 2>/dev/null || true
 wait "$relay_connect_pid" 2>/dev/null || true
 grep -q 'relay-ok' "$tmpdir/relay-connect.out"
 
+CUBICLE_MANAGER_SOCKET="$endpoint" cube --json --workspace Remote run --bg --tty \
+    --name relay-snapshot sh -c 'printf "\033[2J\033[2;3Hhello"; sleep 30' \
+    >"$tmpdir/relay-snapshot-run.out"
+relay_snapshot_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' \
+    "$tmpdir/relay-snapshot-run.out")
+XDG_CONFIG_HOME="$tmpdir/config" \
+    XDG_STATE_HOME="$tmpdir/client-state" \
+    XDG_RUNTIME_DIR="$tmpdir/runtime" \
+    "$CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT" --relay "$endpoint" \
+    "$relay_snapshot_id"
+
 cube remote add lab "$endpoint" --yes >"$tmpdir/remote-add.out"
 grep -q 'Manager public key:' "$tmpdir/remote-add.out"
 cube remote list >"$tmpdir/remote-list.out"

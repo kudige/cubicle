@@ -144,6 +144,7 @@ typedef struct workspace_macro_record {
 } workspace_macro_record_t;
 
 #define CUBICLE_API_MAX_FRAME 65536
+#define CUBICLE_CONTROLLER_PROXY_MAX_FRAME (4U * 1024U * 1024U)
 #define CUBICLE_MANAGER_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_API_CAPABILITIES \
     (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
@@ -3982,10 +3983,11 @@ static int read_api_frame(int client_fd, char *request, size_t request_size)
     return 0;
 }
 
-static int write_api_frame(int client_fd, const char *response)
+static int write_api_frame_with_limit(int client_fd, const char *response,
+                                      size_t max_frame_size)
 {
     size_t length = strlen(response);
-    if (length > CUBICLE_API_MAX_FRAME) {
+    if (length > max_frame_size) {
         errno = EMSGSIZE;
         return -1;
     }
@@ -4003,6 +4005,12 @@ static int write_api_frame(int client_fd, const char *response)
                    cubicle_write_all(client_fd, response, length) == 0
                ? 0
                : -1;
+}
+
+static int write_api_frame(int client_fd, const char *response)
+{
+    return write_api_frame_with_limit(client_fd, response,
+                                      CUBICLE_API_MAX_FRAME);
 }
 
 static int manager_api_error(int client_fd, const char *request_id,
@@ -4026,6 +4034,35 @@ static int manager_api_success(int client_fd, const char *request_id,
         return -1;
     }
     return write_api_frame(client_fd, response);
+}
+
+static int manager_api_success_large(int client_fd,
+                                     const char *request_id,
+                                     const char *result)
+{
+    size_t result_length = strlen(result);
+    size_t response_size = result_length + strlen(request_id) + 256;
+    if (response_size > CUBICLE_CONTROLLER_PROXY_MAX_FRAME) {
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_RESOURCE_LIMIT,
+                                 "response too large", false, 0);
+    }
+    char *response = malloc(response_size);
+    if (response == NULL) {
+        return manager_api_error(client_fd, request_id, CUBICLE_ERR_INTERNAL,
+                                 "failed to allocate response", false, ENOMEM);
+    }
+    if (cubicle_rpc_success(response, response_size, request_id, result) < 0) {
+        int saved_errno = errno;
+        free(response);
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_RESOURCE_LIMIT,
+                                 "response too large", false, saved_errno);
+    }
+    int write_result = write_api_frame_with_limit(
+        client_fd, response, CUBICLE_CONTROLLER_PROXY_MAX_FRAME);
+    free(response);
+    return write_result;
 }
 
 static int connect_controller_socket(const char *socket_path)
@@ -4094,7 +4131,8 @@ static int controller_rpc_call(const char *socket_path,
         return -1;
     }
     uint32_t response_length = ntohl(response_length_network);
-    if (response_length == 0 || response_length > CUBICLE_API_MAX_FRAME) {
+    if (response_length == 0 ||
+        response_length > CUBICLE_CONTROLLER_PROXY_MAX_FRAME) {
         close(fd);
         errno = EMSGSIZE;
         return -1;
@@ -4139,7 +4177,8 @@ static int manager_proxy_controller_response(int client_fd,
                                        "controller response too large", false,
                                        errno);
         } else {
-            result = manager_api_success(client_fd, request_id, result_json);
+            result = manager_api_success_large(client_fd, request_id,
+                                               result_json);
             free(result_json);
         }
     } else {

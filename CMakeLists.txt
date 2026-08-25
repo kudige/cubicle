@@ -586,6 +586,7 @@ add_test(
             CUBE=$<TARGET_FILE:cube>
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
             CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT=$<TARGET_FILE:cubicle-attachment-snapshot-client>
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_tls_test.sh
 )
 
