@@ -79,9 +79,16 @@ typedef struct manager_runtime manager_runtime_t;
 typedef struct manager_worker_slot {
     int active;
     int fd;
+    int is_tls;
     SSL *ssl;
     manager_runtime_t *runtime;
 } manager_worker_slot_t;
+
+typedef struct manager_listener {
+    int fd;
+    int is_tls;
+    char cleanup_path[PATH_MAX];
+} manager_listener_t;
 
 struct manager_runtime {
     const manager_state_t *state;
@@ -901,6 +908,43 @@ static int open_manager_listener(const manager_state_t *state, const char *uri,
 
     errno = EINVAL;
     return -1;
+}
+
+static void close_manager_listeners(manager_listener_t *listeners,
+                                    size_t listener_count)
+{
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (listeners[i].fd >= 0) {
+            close(listeners[i].fd);
+            listeners[i].fd = -1;
+        }
+        if (listeners[i].cleanup_path[0] != '\0') {
+            unlink(listeners[i].cleanup_path);
+            listeners[i].cleanup_path[0] = '\0';
+        }
+    }
+}
+
+static int add_manager_listener(const manager_state_t *state,
+                                manager_listener_t *listeners,
+                                size_t *listener_count,
+                                const char *uri,
+                                int allow_insecure)
+{
+    if (*listener_count >= 2) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    manager_listener_t *listener = &listeners[*listener_count];
+    listener->fd = open_manager_listener(state, uri, allow_insecure,
+                                         listener->cleanup_path);
+    if (listener->fd < 0) {
+        return -1;
+    }
+    listener->is_tls = strncmp(uri, "tls://", 6) == 0;
+    ++*listener_count;
+    return 0;
 }
 
 static int manager_id(const manager_state_t *state, char id[CUBICLE_MANAGER_ID_LENGTH + 1])
@@ -7189,10 +7233,15 @@ static void *manager_worker_main(void *argument)
     manager_worker_slot_t *slot = argument;
     manager_runtime_t *runtime = slot->runtime;
     int client_fd = slot->fd;
-    int is_tls = runtime->tls_ctx != NULL;
+    int is_tls = slot->is_tls;
     SSL *ssl = NULL;
 
     if (is_tls) {
+        if (runtime->tls_ctx == NULL) {
+            manager_log_error(EPROTO);
+            close(client_fd);
+            goto done;
+        }
         ssl = SSL_new(runtime->tls_ctx);
         if (ssl == NULL) {
             manager_log_error(EIO);
@@ -7223,6 +7272,7 @@ static void *manager_worker_main(void *argument)
 done:
     pthread_mutex_lock(&runtime->workers_mutex);
     slot->fd = -1;
+    slot->is_tls = 0;
     slot->active = 0;
     if (runtime->active_workers > 0) {
         --runtime->active_workers;
@@ -7233,7 +7283,8 @@ done:
 }
 
 static int manager_runtime_start_worker(manager_runtime_t *runtime,
-                                        int client_fd)
+                                        int client_fd,
+                                        int is_tls)
 {
     pthread_mutex_lock(&runtime->workers_mutex);
     if (runtime->shutdown_requested ||
@@ -7258,6 +7309,7 @@ static int manager_runtime_start_worker(manager_runtime_t *runtime,
 
     slot->active = 1;
     slot->fd = client_fd;
+    slot->is_tls = is_tls;
     slot->runtime = runtime;
     ++runtime->active_workers;
     pthread_mutex_unlock(&runtime->workers_mutex);
@@ -7268,6 +7320,7 @@ static int manager_runtime_start_worker(manager_runtime_t *runtime,
         pthread_mutex_lock(&runtime->workers_mutex);
         slot->active = 0;
         slot->fd = -1;
+        slot->is_tls = 0;
         if (runtime->active_workers > 0) {
             --runtime->active_workers;
         }
@@ -7383,66 +7436,99 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 CUBICLE_MANAGER_MAX_CLIENTS);
         return 2;
     }
-    if (requested_socket != NULL && requested_uri != NULL) {
-        fprintf(stderr,
-                "daemon accepts only one of --control-socket or --listen\n");
-        return 2;
-    }
-
     int daemon_lock_fd = lock_daemon(state);
     if (daemon_lock_fd < 0) {
         manager_log_error(errno);
         return 1;
     }
 
+    manager_listener_t listeners[2];
+    for (size_t i = 0; i < 2; ++i) {
+        listeners[i].fd = -1;
+        listeners[i].is_tls = 0;
+        listeners[i].cleanup_path[0] = '\0';
+    }
+    size_t listener_count = 0;
     char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
-    if (manager_listen_uri(listen_uri, state, requested_socket,
-                           requested_uri) < 0) {
-        manager_log_error(errno);
-        unlock_state(daemon_lock_fd);
-        return 1;
+
+    if (requested_uri != NULL) {
+        if (manager_listen_uri(listen_uri, state, NULL, requested_uri) < 0) {
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+        if (add_manager_listener(state, listeners, &listener_count,
+                                 listen_uri, allow_insecure) < 0) {
+            if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
+                fprintf(stderr,
+                        "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
+                        listen_uri);
+            }
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+
+        if (strncmp(listen_uri, "tcp://", 6) == 0 ||
+            strncmp(listen_uri, "tls://", 6) == 0) {
+            char local_uri[CUBICLE_ENDPOINT_URI_MAX];
+            if (manager_listen_uri(local_uri, state, requested_socket,
+                                   NULL) < 0) {
+                manager_log_error(errno);
+                close_manager_listeners(listeners, listener_count);
+                unlock_state(daemon_lock_fd);
+                return 1;
+            }
+            if (strncmp(local_uri, "unix://", 7) == 0 &&
+                strcmp(local_uri, listen_uri) != 0) {
+                if (add_manager_listener(state, listeners, &listener_count,
+                                         local_uri, 0) < 0) {
+                    manager_log_error(errno);
+                    close_manager_listeners(listeners, listener_count);
+                    unlock_state(daemon_lock_fd);
+                    return 1;
+                }
+            }
+        }
+    } else {
+        if (manager_listen_uri(listen_uri, state, requested_socket,
+                               NULL) < 0) {
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+        if (add_manager_listener(state, listeners, &listener_count,
+                                 listen_uri, allow_insecure) < 0) {
+            if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
+                fprintf(stderr,
+                        "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
+                        listen_uri);
+            }
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
     }
 
-    char cleanup_path[PATH_MAX];
-    int listen_fd = open_manager_listener(state, listen_uri, allow_insecure,
-                                          cleanup_path);
-    if (listen_fd < 0) {
-        if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
-            fprintf(stderr,
-                    "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
-                    listen_uri);
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (set_fd_nonblocking(listeners[i].fd) < 0) {
+            manager_log_error(errno);
+            close_manager_listeners(listeners, listener_count);
+            unlock_state(daemon_lock_fd);
+            return 1;
         }
-        manager_log_error(errno);
-        unlock_state(daemon_lock_fd);
-        return 1;
-    }
-
-    if (set_fd_nonblocking(listen_fd) < 0) {
-        manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
-        unlock_state(daemon_lock_fd);
-        return 1;
     }
 
     if (reconcile_process_records(state) < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
 
     if (!foreground && daemonize_manager() < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
@@ -7451,22 +7537,23 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     manager_runtime_t runtime;
     if (manager_runtime_init(&runtime, state, max_clients) < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
-    if (strncmp(listen_uri, "tls://", 6) == 0) {
+    int has_tls_listener = 0;
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (listeners[i].is_tls) {
+            has_tls_listener = 1;
+            break;
+        }
+    }
+    if (has_tls_listener) {
         runtime.tls_ctx = manager_tls_context_create(state);
         if (runtime.tls_ctx == NULL) {
             manager_log_error(errno);
             manager_runtime_destroy(&runtime);
-            close(listen_fd);
-            if (cleanup_path[0] != '\0') {
-                unlink(cleanup_path);
-            }
+            close_manager_listeners(listeners, listener_count);
             unlock_state(daemon_lock_fd);
             return 1;
         }
@@ -7475,10 +7562,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     if (autostart_restart_processes(state) < 0) {
         manager_log_error(errno);
         manager_runtime_destroy(&runtime);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
@@ -7491,8 +7575,13 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             manager_log_error(errno);
         }
 
-        struct pollfd daemon_fd = {.fd = listen_fd, .events = POLLIN};
-        int ready = poll(&daemon_fd, 1, poll_interval_ms);
+        struct pollfd daemon_fds[2];
+        for (size_t i = 0; i < listener_count; ++i) {
+            daemon_fds[i].fd = listeners[i].fd;
+            daemon_fds[i].events = POLLIN;
+            daemon_fds[i].revents = 0;
+        }
+        int ready = poll(daemon_fds, listener_count, poll_interval_ms);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -7502,45 +7591,48 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             break;
         }
 
-        if (ready == 0 || (daemon_fd.revents & POLLIN) == 0) {
+        if (ready == 0) {
             continue;
         }
 
-        for (;;) {
-            int client_fd = accept(listen_fd, NULL, NULL);
-            if (client_fd < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        for (size_t i = 0; i < listener_count; ++i) {
+            if ((daemon_fds[i].revents & POLLIN) == 0) {
+                continue;
+            }
+            for (;;) {
+                int client_fd = accept(listeners[i].fd, NULL, NULL);
+                if (client_fd < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        break;
+                    }
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    manager_log_error(errno);
+                    result = 1;
                     break;
                 }
-                if (errno == EINTR) {
-                    continue;
+                if (set_fd_cloexec(client_fd) < 0) {
+                    manager_log_error(errno);
+                    close(client_fd);
+                    result = 1;
+                    break;
                 }
-                manager_log_error(errno);
-                result = 1;
-                break;
-            }
-            if (set_fd_cloexec(client_fd) < 0) {
-                manager_log_error(errno);
-                close(client_fd);
-                result = 1;
-                break;
-            }
 
-            if (manager_runtime_start_worker(&runtime, client_fd) < 0) {
-                manager_log_error(errno);
-                shutdown(client_fd, SHUT_RDWR);
-                close(client_fd);
+                if (manager_runtime_start_worker(&runtime, client_fd,
+                                                 listeners[i].is_tls) < 0) {
+                    manager_log_error(errno);
+                    shutdown(client_fd, SHUT_RDWR);
+                    close(client_fd);
+                }
             }
         }
     }
 
-    close(listen_fd);
+    close_manager_listeners(listeners, listener_count);
     manager_runtime_shutdown_worker_sockets(&runtime);
     manager_runtime_wait_workers(&runtime);
     manager_runtime_destroy(&runtime);
-    if (cleanup_path[0] != '\0') {
-        unlink(cleanup_path);
-    }
     unlock_state(daemon_lock_fd);
     return result;
 }

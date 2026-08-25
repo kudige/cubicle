@@ -69,12 +69,17 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 )
 endpoint="tls://127.0.0.1:$port"
+tls_local_socket="$state_dir/manager.sock"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon \
     --foreground --listen "$endpoint" --event-interval-ms 50 &
 manager_pid=$!
 
 for _ in $(seq 1 100); do
+    [ -S "$tls_local_socket" ] || {
+        sleep 0.05
+        continue
+    }
     if CUBICLE_MANAGER_SOCKET="$endpoint" cube workspace list \
         >"$tmpdir/tls-list.out" 2>"$tmpdir/tls-list.err"; then
         break
@@ -83,6 +88,9 @@ for _ in $(seq 1 100); do
 done
 
 grep -q 'Remote' "$tmpdir/tls-list.out"
+CUBICLE_MANAGER_SOCKET="$tls_local_socket" cube workspace list \
+    >"$tmpdir/tls-local-list.out"
+grep -q 'Remote' "$tmpdir/tls-local-list.out"
 test -f "$state_dir/tls/server.crt"
 test -f "$state_dir/tls/server.key"
 
