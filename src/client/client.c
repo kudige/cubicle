@@ -4,6 +4,7 @@
 #include "../common/auth_protocol.h"
 
 #include "cubicle/transport_tcp.h"
+#include "cubicle/transport_tls.h"
 #include "cubicle/transport_unix.h"
 #include "cubicle/util.h"
 
@@ -333,10 +334,9 @@ static cubicle_error_code_t bootstrap_local_session(cubicle_client_t *client)
     return code;
 }
 
-static int endpoint_is_unix(const cubicle_endpoint_t *endpoint)
+static int endpoint_is_plain_tcp(const cubicle_endpoint_t *endpoint)
 {
-    return strncmp(endpoint->uri, "unix://", 7) == 0 ||
-           strncmp(endpoint->uri, "tcp://", 6) != 0;
+    return strncmp(endpoint->uri, "tcp://", 6) == 0;
 }
 
 static cubicle_error_code_t resume_unix_session(cubicle_client_t *client)
@@ -426,7 +426,7 @@ static cubicle_error_code_t resume_unix_session(cubicle_client_t *client)
 
 static cubicle_error_code_t authenticate_unix_session(cubicle_client_t *client)
 {
-    if (!endpoint_is_unix(&client->endpoint)) {
+    if (endpoint_is_plain_tcp(&client->endpoint)) {
         return bootstrap_local_session(client);
     }
 
@@ -657,7 +657,9 @@ cubicle_error_code_t cubicle_client_connect_uri(
 
     cubicle_transport_t *transport = NULL;
     cubicle_error_code_t code;
-    if (strncmp(endpoint.uri, "tcp://", 6) == 0) {
+    if (strncmp(endpoint.uri, "tls://", 6) == 0) {
+        code = cubicle_transport_tls_create(&transport);
+    } else if (strncmp(endpoint.uri, "tcp://", 6) == 0) {
         code = cubicle_transport_tcp_create(&transport);
     } else {
         code = cubicle_transport_unix_create(&transport);

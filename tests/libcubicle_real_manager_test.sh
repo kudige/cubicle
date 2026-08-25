@@ -8,6 +8,7 @@ trap cleanup EXIT
 
 src_dir=${CUBICLE_SOURCE_DIR:?}
 libcrypto_flags=$(${PKG_CONFIG:-pkg-config} --libs libcrypto)
+libssl_flags=$(${PKG_CONFIG:-pkg-config} --libs libssl)
 
 ${CC:-cc} -std=c17 -Wall -Wextra -Wpedantic \
     -I "$src_dir/include" \
@@ -21,6 +22,7 @@ ${CC:-cc} -std=c17 -Wall -Wextra -Wpedantic \
     "$src_dir/src/common/rpc.c" \
     "$src_dir/src/common/util.c" \
     "$src_dir/third_party/yyjson/yyjson.c" \
+    $libssl_flags \
     $libcrypto_flags \
     -o "$tmpdir/libcubicle-real-manager-test"
 

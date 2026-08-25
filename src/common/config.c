@@ -1636,10 +1636,10 @@ int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
     return 0;
 }
 
-static int validate_tcp_uri(const char *uri)
+static int validate_host_port_uri(const char *uri, const char *prefix)
 {
-    const char prefix[] = "tcp://";
-    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+    if (uri == NULL || prefix == NULL ||
+        strncmp(uri, prefix, strlen(prefix)) != 0) {
         errno = EINVAL;
         return -1;
     }
@@ -1682,7 +1682,14 @@ static int validate_endpoint_uri(const char *uri)
                                      sizeof(endpoint_path)) == 0) {
         return 0;
     }
-    return validate_tcp_uri(uri);
+    if (strncmp(uri, "tcp://", 6) == 0) {
+        return validate_host_port_uri(uri, "tcp://");
+    }
+    if (strncmp(uri, "tls://", 6) == 0) {
+        return validate_host_port_uri(uri, "tls://");
+    }
+    errno = EINVAL;
+    return -1;
 }
 
 int cubicle_config_validate(const cubicle_config_t *config,
@@ -1706,14 +1713,14 @@ int cubicle_config_validate(const cubicle_config_t *config,
         validate_endpoint_uri(config->manager_listen_uri) < 0) {
         if (error != NULL && error_size > 0 && error[0] == '\0') {
             snprintf(error, error_size,
-                     "manager.listen must be an absolute unix:// endpoint or tcp://host:port endpoint");
+                     "manager.listen must be an absolute unix:// endpoint, tcp://host:port endpoint, or tls://host:port endpoint");
         }
         return -1;
     }
 
     if (validate_endpoint_uri(config->client_manager_uri) < 0) {
         set_error(error, error_size,
-                  "client.manager must be an absolute unix:// endpoint or tcp://host:port endpoint");
+                  "client.manager must be an absolute unix:// endpoint, tcp://host:port endpoint, or tls://host:port endpoint");
         return -1;
     }
 

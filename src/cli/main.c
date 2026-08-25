@@ -178,6 +178,7 @@ static void print_usage(FILE *stream)
             "  cube cleanup [NAME|PATTERN]\n"
             "  cube shutdown [--manager-only]\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
+            "  cube identity pub\n"
             "  cube config show|effective|paths|validate\n"
             "  cube defaults show|set|reset ...\n"
             "\n"
@@ -318,6 +319,10 @@ static int print_command_usage(const char *command, FILE *stream)
                 "  cube access revoke KEY_ID\n");
         return 0;
     }
+    if (strcmp(command, "identity") == 0) {
+        fprintf(stream, "Usage:\n  cube identity pub\n");
+        return 0;
+    }
     if (strcmp(command, "config") == 0) {
         fprintf(stream,
                 "Usage:\n  cube config show|effective|paths|validate\n");
@@ -423,6 +428,52 @@ static int command_requires_manager(const char *command)
            strcmp(command, "access") == 0 ||
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0;
+}
+
+static const char *cube_user_home_directory(void);
+
+static int cube_client_key_dir(char path[CUBICLE_PATH_MAX])
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    int length;
+    if (config_home != NULL && config_home[0] != '\0') {
+        length = snprintf(path, CUBICLE_PATH_MAX, "%s/cubicle/keys",
+                          config_home);
+    } else {
+        const char *home = cube_user_home_directory();
+        if (home == NULL || home[0] == '\0') {
+            errno = ENOENT;
+            return -1;
+        }
+        length = snprintf(path, CUBICLE_PATH_MAX,
+                          "%s/.config/cubicle/keys", home);
+    }
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int command_identity(int argc, char **argv, int command_index)
+{
+    if (command_index + 2 != argc ||
+        strcmp(argv[command_index + 1], "pub") != 0) {
+        fprintf(stderr, "cube: identity requires pub\n");
+        return 2;
+    }
+
+    char key_dir[CUBICLE_PATH_MAX];
+    cubicle_auth_identity_t identity;
+    if (cube_client_key_dir(key_dir) < 0 ||
+        cubicle_auth_ensure_identity(key_dir, "client.key", "client.pub",
+                                     &identity) < 0) {
+        fprintf(stderr, "cube: failed to initialize client identity: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    printf("%s\n", identity.public_key_hex);
+    return 0;
 }
 
 static int command_config(const cubicle_config_t *config,
@@ -5702,6 +5753,10 @@ int main(int argc, char **argv)
     if (strcmp(command, "config") == 0) {
         return command_config(&config, config_error, argc, argv,
                               command_index);
+    }
+
+    if (strcmp(command, "identity") == 0) {
+        return command_identity(argc, argv, command_index);
     }
 
     if (strcmp(command, "defaults") == 0) {

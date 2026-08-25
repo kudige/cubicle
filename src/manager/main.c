@@ -22,6 +22,9 @@
 #include <grp.h>
 #include <limits.h>
 #include <netdb.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -76,6 +79,7 @@ typedef struct manager_runtime manager_runtime_t;
 typedef struct manager_worker_slot {
     int active;
     int fd;
+    SSL *ssl;
     manager_runtime_t *runtime;
 } manager_worker_slot_t;
 
@@ -89,11 +93,13 @@ struct manager_runtime {
     uint64_t started_at_ms;
     int max_clients;
     int active_workers;
+    SSL_CTX *tls_ctx;
     manager_worker_slot_t workers[CUBICLE_MANAGER_MAX_CLIENTS];
 };
 
 typedef struct manager_connection {
     int has_peer_credentials;
+    int is_tls;
     uid_t peer_uid;
     gid_t peer_gid;
     pid_t peer_pid;
@@ -105,6 +111,8 @@ typedef struct manager_connection {
     char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
     manager_runtime_t *runtime;
 } manager_connection_t;
+
+static _Thread_local SSL *g_manager_tls = NULL;
 
 typedef struct workspace_key_record {
     char workspace_id[CUBICLE_ID_STRING_LENGTH];
@@ -649,11 +657,12 @@ static int open_manager_socket(const char *path, mode_t socket_mode,
     return fd;
 }
 
-static int split_tcp_uri(const char *uri, char *host, size_t host_size,
-                         char *port, size_t port_size)
+static int split_host_port_uri(const char *uri, const char *prefix,
+                               char *host, size_t host_size,
+                               char *port, size_t port_size)
 {
-    const char prefix[] = "tcp://";
-    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+    if (uri == NULL || prefix == NULL ||
+        strncmp(uri, prefix, strlen(prefix)) != 0) {
         errno = EINVAL;
         return -1;
     }
@@ -696,7 +705,9 @@ static int open_manager_tcp_listener(const char *uri)
 {
     char host[256];
     char port[32];
-    if (split_tcp_uri(uri, host, sizeof(host), port, sizeof(port)) < 0) {
+    const char *prefix = strncmp(uri, "tls://", 6) == 0 ? "tls://" : "tcp://";
+    if (split_host_port_uri(uri, prefix, host, sizeof(host), port,
+                            sizeof(port)) < 0) {
         return -1;
     }
 
@@ -749,6 +760,114 @@ static int open_manager_tcp_listener(const char *uri)
     return fd;
 }
 
+static int manager_tls_paths(const manager_state_t *state,
+                             char cert_path[PATH_MAX],
+                             char key_path[PATH_MAX])
+{
+    int cert_length = snprintf(cert_path, PATH_MAX, "%s/tls/server.crt",
+                               state->dir);
+    int key_length = snprintf(key_path, PATH_MAX, "%s/tls/server.key",
+                              state->dir);
+    if (cert_length < 0 || cert_length >= PATH_MAX ||
+        key_length < 0 || key_length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int manager_generate_tls_material(const char *cert_path,
+                                         const char *key_path)
+{
+    EVP_PKEY *pkey = EVP_RSA_gen(2048);
+    X509 *cert = X509_new();
+    if (pkey == NULL || cert == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = EIO;
+        return -1;
+    }
+
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_get_notBefore(cert), 0);
+    X509_gmtime_adj(X509_get_notAfter(cert), 10L * 365L * 24L * 60L * 60L);
+    X509_set_version(cert, 2);
+    X509_set_pubkey(cert, pkey);
+
+    X509_NAME *name = X509_get_subject_name(cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char *)"cubicle-manager",
+                               -1, -1, 0);
+    X509_set_issuer_name(cert, name);
+    if (X509_sign(cert, pkey, EVP_sha256()) <= 0) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = EIO;
+        return -1;
+    }
+
+    FILE *key_file = fopen(key_path, "w");
+    if (key_file == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        return -1;
+    }
+    int ok = PEM_write_PrivateKey(key_file, pkey, NULL, NULL, 0, NULL, NULL);
+    int close_result = fclose(key_file);
+    if (!ok || close_result != 0 || chmod(key_path, 0600) < 0) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = errno == 0 ? EIO : errno;
+        return -1;
+    }
+
+    FILE *cert_file = fopen(cert_path, "w");
+    if (cert_file == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        return -1;
+    }
+    ok = PEM_write_X509(cert_file, cert);
+    close_result = fclose(cert_file);
+    EVP_PKEY_free(pkey);
+    X509_free(cert);
+    if (!ok || close_result != 0) {
+        errno = errno == 0 ? EIO : errno;
+        return -1;
+    }
+    return 0;
+}
+
+static SSL_CTX *manager_tls_context_create(const manager_state_t *state)
+{
+    char cert_path[PATH_MAX];
+    char key_path[PATH_MAX];
+    if (manager_tls_paths(state, cert_path, key_path) < 0 ||
+        ensure_parent_directory(cert_path) < 0) {
+        return NULL;
+    }
+    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
+        if (manager_generate_tls_material(cert_path, key_path) < 0) {
+            return NULL;
+        }
+    }
+
+    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+    if (ctx == NULL) {
+        errno = EIO;
+        return NULL;
+    }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+    if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_check_private_key(ctx) != 1) {
+        SSL_CTX_free(ctx);
+        errno = EIO;
+        return NULL;
+    }
+    return ctx;
+}
+
 static int open_manager_listener(const manager_state_t *state, const char *uri,
                                  int allow_insecure,
                                  char cleanup_path[PATH_MAX])
@@ -773,6 +892,10 @@ static int open_manager_listener(const manager_state_t *state, const char *uri,
             errno = EACCES;
             return -1;
         }
+        return open_manager_tcp_listener(uri);
+    }
+
+    if (strncmp(uri, "tls://", 6) == 0) {
         return open_manager_tcp_listener(uri);
     }
 
@@ -3744,10 +3867,56 @@ static int read_all_fd(int fd, void *buffer, size_t length)
     return 0;
 }
 
+static int tls_read_all(SSL *ssl, void *buffer, size_t length)
+{
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        int chunk = length > INT32_MAX ? INT32_MAX : (int)length;
+        int result = SSL_read(ssl, cursor, chunk);
+        if (result <= 0) {
+            int ssl_error = SSL_get_error(ssl, result);
+            if (ssl_error == SSL_ERROR_WANT_READ ||
+                ssl_error == SSL_ERROR_WANT_WRITE) {
+                continue;
+            }
+            errno = ECONNRESET;
+            return -1;
+        }
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
+    return 0;
+}
+
+static int tls_write_all(SSL *ssl, const void *buffer, size_t length)
+{
+    const unsigned char *cursor = buffer;
+    while (length > 0) {
+        int chunk = length > INT32_MAX ? INT32_MAX : (int)length;
+        int result = SSL_write(ssl, cursor, chunk);
+        if (result <= 0) {
+            int ssl_error = SSL_get_error(ssl, result);
+            if (ssl_error == SSL_ERROR_WANT_READ ||
+                ssl_error == SSL_ERROR_WANT_WRITE) {
+                continue;
+            }
+            errno = EIO;
+            return -1;
+        }
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
+    return 0;
+}
+
 static int read_api_frame(int client_fd, char *request, size_t request_size)
 {
     uint32_t length_network = 0;
-    if (read_all_fd(client_fd, &length_network, sizeof(length_network)) < 0) {
+    if ((g_manager_tls != NULL
+             ? tls_read_all(g_manager_tls, &length_network,
+                            sizeof(length_network))
+             : read_all_fd(client_fd, &length_network,
+                           sizeof(length_network))) < 0) {
         return -1;
     }
 
@@ -3758,7 +3927,9 @@ static int read_api_frame(int client_fd, char *request, size_t request_size)
         return -1;
     }
 
-    if (read_all_fd(client_fd, request, length) < 0) {
+    if ((g_manager_tls != NULL
+             ? tls_read_all(g_manager_tls, request, length)
+             : read_all_fd(client_fd, request, length)) < 0) {
         return -1;
     }
     request[length] = '\0';
@@ -3774,6 +3945,13 @@ static int write_api_frame(int client_fd, const char *response)
     }
 
     uint32_t length_network = htonl((uint32_t)length);
+    if (g_manager_tls != NULL) {
+        return tls_write_all(g_manager_tls, &length_network,
+                             sizeof(length_network)) == 0 &&
+                       tls_write_all(g_manager_tls, response, length) == 0
+                   ? 0
+                   : -1;
+    }
     return cubicle_write_all(client_fd, (const char *)&length_network,
                              sizeof(length_network)) == 0 &&
                    cubicle_write_all(client_fd, response, length) == 0
@@ -4078,7 +4256,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
     uint64_t now_ms = manager_time_ms();
     if (strcmp(method, "auth.challenge") == 0) {
-        if (!connection->has_peer_credentials) {
+        if (!connection->has_peer_credentials && !connection->is_tls) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_UNSUPPORTED,
                                              "authenticated bootstrap requires Unix peer credentials",
@@ -4133,8 +4311,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         transcript.capabilities =
             CUBICLE_API_CAPABILITIES | CUBICLE_PROTOCOL_CAP_AUTH_ED25519;
         transcript.manager_generation = connection->runtime->started_at_ms;
-        transcript.peer_uid = connection->peer_uid;
-        transcript.peer_gid = connection->peer_gid;
+        transcript.peer_uid =
+            connection->has_peer_credentials ? connection->peer_uid : 0;
+        transcript.peer_gid =
+            connection->has_peer_credentials ? connection->peer_gid : 0;
         if (has_workspace_ref) {
             snprintf(transcript.workspace_ref, sizeof(transcript.workspace_ref),
                      "%s", workspace_ref);
@@ -4241,7 +4421,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     if (strcmp(method, "auth.resume") == 0) {
-        if (!connection->has_peer_credentials) {
+        if (!connection->has_peer_credentials && !connection->is_tls) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_UNSUPPORTED,
                                              "session resume requires Unix peer credentials",
@@ -4279,8 +4459,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         if (!runtime_find_session_copy(connection->runtime, session_id,
                                        &record) ||
             record.manager_generation != connection->runtime->started_at_ms ||
-            record.peer_uid != connection->peer_uid ||
-            record.peer_gid != connection->peer_gid ||
+            record.peer_uid !=
+                (connection->has_peer_credentials ? connection->peer_uid : 0) ||
+            record.peer_gid !=
+                (connection->has_peer_credentials ? connection->peer_gid : 0) ||
             (record.session.expires_at_ms > 0 &&
              record.session.expires_at_ms < now_ms)) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4305,8 +4487,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, 0));
         }
         resume.manager_generation = connection->runtime->started_at_ms;
-        resume.peer_uid = connection->peer_uid;
-        resume.peer_gid = connection->peer_gid;
+        resume.peer_uid =
+            connection->has_peer_credentials ? connection->peer_uid : 0;
+        resume.peer_gid =
+            connection->has_peer_credentials ? connection->peer_gid : 0;
 
         unsigned char resume_bytes[512];
         size_t resume_length = 0;
@@ -6942,10 +7126,12 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
 static int handle_manager_connection(const manager_state_t *state,
                                      int client_fd,
-                                     manager_runtime_t *runtime)
+                                     manager_runtime_t *runtime,
+                                     int is_tls)
 {
     manager_connection_t connection;
     load_peer_credentials(client_fd, &connection);
+    connection.is_tls = is_tls;
     connection.runtime = runtime;
     while (!runtime_shutdown_requested(runtime)) {
         if (handle_manager_client(state, client_fd, &connection) == 0) {
@@ -6991,6 +7177,8 @@ static int manager_runtime_init(manager_runtime_t *runtime,
 
 static void manager_runtime_destroy(manager_runtime_t *runtime)
 {
+    SSL_CTX_free(runtime->tls_ctx);
+    runtime->tls_ctx = NULL;
     pthread_cond_destroy(&runtime->workers_cond);
     pthread_mutex_destroy(&runtime->workers_mutex);
     pthread_mutex_destroy(&runtime->sessions_mutex);
@@ -7001,12 +7189,38 @@ static void *manager_worker_main(void *argument)
     manager_worker_slot_t *slot = argument;
     manager_runtime_t *runtime = slot->runtime;
     int client_fd = slot->fd;
+    int is_tls = runtime->tls_ctx != NULL;
+    SSL *ssl = NULL;
 
-    if (handle_manager_connection(runtime->state, client_fd, runtime) < 0) {
+    if (is_tls) {
+        ssl = SSL_new(runtime->tls_ctx);
+        if (ssl == NULL) {
+            manager_log_error(EIO);
+            close(client_fd);
+            goto done;
+        }
+        SSL_set_fd(ssl, client_fd);
+        if (SSL_accept(ssl) != 1) {
+            manager_log_error(EPROTO);
+            SSL_free(ssl);
+            close(client_fd);
+            goto done;
+        }
+        g_manager_tls = ssl;
+    }
+
+    if (handle_manager_connection(runtime->state, client_fd, runtime,
+                                  is_tls) < 0) {
         manager_log_error(errno);
+    }
+    g_manager_tls = NULL;
+    if (ssl != NULL) {
+        (void)SSL_shutdown(ssl);
+        SSL_free(ssl);
     }
     close(client_fd);
 
+done:
     pthread_mutex_lock(&runtime->workers_mutex);
     slot->fd = -1;
     slot->active = 0;
@@ -7243,6 +7457,19 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
         }
         unlock_state(daemon_lock_fd);
         return 1;
+    }
+    if (strncmp(listen_uri, "tls://", 6) == 0) {
+        runtime.tls_ctx = manager_tls_context_create(state);
+        if (runtime.tls_ctx == NULL) {
+            manager_log_error(errno);
+            manager_runtime_destroy(&runtime);
+            close(listen_fd);
+            if (cleanup_path[0] != '\0') {
+                unlink(cleanup_path);
+            }
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
     }
 
     if (autostart_restart_processes(state) < 0) {
