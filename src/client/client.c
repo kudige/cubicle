@@ -313,6 +313,9 @@ static cubicle_error_code_t parse_session_result(cubicle_client_t *client,
                    &client->session.authenticated_at_ms);
     json_u64_field(result, "expires_at_ms",
                    &client->session.expires_at_ms);
+    (void)json_string_field(result, "manager_public_key",
+                            client->session.manager_public_key,
+                            sizeof(client->session.manager_public_key));
     return CUBICLE_OK;
 }
 

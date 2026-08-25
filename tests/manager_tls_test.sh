@@ -76,6 +76,16 @@ grep -q 'Remote' "$tmpdir/tls-list.out"
 test -f "$state_dir/tls/server.crt"
 test -f "$state_dir/tls/server.key"
 
+cube remote add lab "$endpoint" --yes >"$tmpdir/remote-add.out"
+grep -q 'Manager public key:' "$tmpdir/remote-add.out"
+cube remote list >"$tmpdir/remote-list.out"
+grep -q "lab	$endpoint" "$tmpdir/remote-list.out"
+cube remote inspect lab >"$tmpdir/remote-inspect.out"
+grep -q "manager=$endpoint" "$tmpdir/remote-inspect.out"
+cube remote remove lab
+cube remote list >"$tmpdir/remote-list-empty.out"
+grep -q 'No remotes configured' "$tmpdir/remote-list-empty.out"
+
 CUBICLE_MANAGER_SOCKET="$endpoint" cube shutdown >/dev/null
 wait "$manager_pid"
 manager_pid=

@@ -42,6 +42,7 @@ typedef struct cubicle_session_info {
     cubicle_protocol_capability_mask_t negotiated_capabilities;
     uint64_t authenticated_at_ms;
     uint64_t expires_at_ms;
+    char manager_public_key[CUBICLE_SERVER_ID_MAX];
 } cubicle_session_info_t;
 
 cubicle_error_code_t cubicle_signer_create(const cubicle_signer_callbacks_t *callbacks, void *context, cubicle_signer_t **signer_out);
