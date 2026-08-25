@@ -2844,8 +2844,13 @@ static int append_all_workspace_processes_json(cubicle_json_builder_t *output,
     return result;
 }
 
-static int process_list_all_workspaces(const char *manager_socket,
-                                       const cube_options_t *options)
+static int process_list_all_workspaces_from_manager(
+    const char *manager_socket,
+    const char *remote_name,
+    const cube_options_t *options,
+    cubicle_json_builder_t *json_output,
+    int *first_text_block,
+    int *first_json_item)
 {
     cube_rpc_response_t workspace_response;
     if (call_manager(manager_socket, "workspace.list", "{}",
@@ -2868,18 +2873,7 @@ static int process_list_all_workspaces(const char *manager_socket,
         return 2;
     }
 
-    cubicle_json_builder_t json_output = {0};
-    if (options->json &&
-        cubicle_json_builder_append(&json_output, "{\"workspaces\":[") < 0) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&workspace_response);
-        fprintf(stderr, "cube: failed to format process list response\n");
-        return 2;
-    }
-
     int result = 0;
-    int first_text_block = 1;
-    int first_json_item = 1;
     size_t index;
     size_t max;
     yyjson_val *item;
@@ -2893,6 +2887,19 @@ static int process_list_all_workspaces(const char *manager_socket,
             break;
         }
 
+        char display_name[CUBICLE_NAME_MAX + CUBICLE_NAME_MAX + 2];
+        if (remote_name != NULL && remote_name[0] != '\0') {
+            int length = snprintf(display_name, sizeof(display_name), "%s@%s",
+                                  name, remote_name);
+            if (length < 0 || (size_t)length >= sizeof(display_name)) {
+                fprintf(stderr, "cube: remote workspace name is too long\n");
+                result = 2;
+                break;
+            }
+        } else {
+            snprintf(display_name, sizeof(display_name), "%s", name);
+        }
+
         cube_rpc_response_t process_response;
         if (process_list_for_workspace(manager_socket, id,
                                        &process_response) < 0) {
@@ -2901,27 +2908,64 @@ static int process_list_all_workspaces(const char *manager_socket,
         }
 
         if (options->json) {
-            if ((!first_json_item &&
-                 cubicle_json_builder_append(&json_output, ",") < 0) ||
-                append_all_workspace_processes_json(&json_output, id, name,
+            if ((!*first_json_item &&
+                 cubicle_json_builder_append(json_output, ",") < 0) ||
+                append_all_workspace_processes_json(json_output, id,
+                                                    display_name,
                                                     &process_response) < 0) {
                 cleanup_rpc_response(&process_response);
                 result = 2;
                 break;
             }
-            first_json_item = 0;
+            *first_json_item = 0;
         } else {
-            if (!first_text_block) {
+            if (!*first_text_block) {
                 printf("\n");
             }
-            result = print_process_list_result(name, &process_response);
-            first_text_block = 0;
+            result = print_process_list_result(display_name,
+                                               &process_response);
+            *first_text_block = 0;
         }
         cleanup_rpc_response(&process_response);
         if (result != 0) {
             break;
         }
     }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&workspace_response);
+    return result;
+}
+
+static int process_list_all_workspaces(const char *manager_socket,
+                                       const cube_options_t *options)
+{
+    cubicle_json_builder_t json_output = {0};
+    if (options->json &&
+        cubicle_json_builder_append(&json_output, "{\"workspaces\":[") < 0) {
+        fprintf(stderr, "cube: failed to format process list response\n");
+        return 2;
+    }
+
+    int first_text_block = 1;
+    int first_json_item = 1;
+    int result = process_list_all_workspaces_from_manager(
+        manager_socket, NULL, options, &json_output, &first_text_block,
+        &first_json_item);
+
+    cube_remote_record_t *remotes = NULL;
+    size_t remote_count = 0;
+    if (result == 0 && cube_remote_load(&remotes, &remote_count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        result = 1;
+    }
+    for (size_t i = 0; result == 0 && i < remote_count; ++i) {
+        result = process_list_all_workspaces_from_manager(
+            remotes[i].uri, remotes[i].name, options, &json_output,
+            &first_text_block, &first_json_item);
+    }
+    free(remotes);
 
     if (result == 0 && options->json) {
         if (cubicle_json_builder_append(&json_output, "]}") < 0) {
@@ -2933,8 +2977,6 @@ static int process_list_all_workspaces(const char *manager_socket,
     }
 
     cubicle_json_builder_cleanup(&json_output);
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&workspace_response);
     return result;
 }
 

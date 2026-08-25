@@ -2,9 +2,19 @@ set -eu
 
 tmpdir=$(mktemp -d)
 manager_pid=
+local_manager_pid=
 endpoint=
+local_endpoint=
 
 cleanup() {
+    if [ -n "${local_manager_pid:-}" ] && [ -n "${local_endpoint:-}" ]; then
+        XDG_CONFIG_HOME="$tmpdir/config" \
+            XDG_STATE_HOME="$tmpdir/client-state" \
+            XDG_RUNTIME_DIR="$tmpdir/runtime" \
+            CUBICLE_MANAGER_SOCKET="$local_endpoint" \
+            "$CUBE" shutdown >/dev/null 2>&1 || true
+        wait "$local_manager_pid" 2>/dev/null || true
+    fi
     if [ -n "${manager_pid:-}" ]; then
         if [ -n "${endpoint:-}" ]; then
             XDG_CONFIG_HOME="$tmpdir/config" \
@@ -85,6 +95,30 @@ grep -q "manager=$endpoint" "$tmpdir/remote-inspect.out"
 cube remote remove lab
 cube remote list >"$tmpdir/remote-list-empty.out"
 grep -q 'No remotes configured' "$tmpdir/remote-list-empty.out"
+cube remote add lab "$endpoint" --yes >"$tmpdir/remote-add-again.out"
+
+local_state_dir="$tmpdir/local-manager"
+local_socket="$tmpdir/local-manager.sock"
+local_endpoint="$local_socket"
+"$CUBICLE_MANAGER" --state-dir "$local_state_dir" daemon \
+    --foreground --control-socket "$local_socket" --event-interval-ms 50 &
+local_manager_pid=$!
+
+for _ in $(seq 1 100); do
+    [ -S "$local_socket" ] && break
+    sleep 0.05
+done
+
+CUBICLE_MANAGER_SOCKET="$local_socket" cube workspace create Local \
+    >"$tmpdir/local-workspace-create.out"
+CUBICLE_MANAGER_SOCKET="$local_socket" cube ps -a >"$tmpdir/ps-all.out"
+grep -q 'Workspace Local' "$tmpdir/ps-all.out"
+grep -q 'Workspace Remote@lab' "$tmpdir/ps-all.out"
+
+CUBICLE_MANAGER_SOCKET="$local_socket" cube shutdown >/dev/null
+wait "$local_manager_pid"
+local_manager_pid=
+local_endpoint=
 
 CUBICLE_MANAGER_SOCKET="$endpoint" cube shutdown >/dev/null
 wait "$manager_pid"
