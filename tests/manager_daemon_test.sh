@@ -394,6 +394,52 @@ if [ -S "$socket_path" ]; then
     exit 1
 fi
 
+bad_autostart_state="$tmpdir/bad-autostart"
+bad_autostart_socket="$tmpdir/bad-autostart.sock"
+bad_autostart_workspace=$("$CUBICLE_MANAGER" --state-dir "$bad_autostart_state" \
+    --controller-bin "$CUBICLE_CONTROLLER" workspace create "Bad Autostart")
+bad_autostart_workspace_id=${bad_autostart_workspace#workspace id=}
+bad_autostart_workspace_id=${bad_autostart_workspace_id%% name=*}
+printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n" \
+    "bad-autostart-process-0000000000" \
+    "$bad_autostart_workspace_id" \
+    "bad-autostart" \
+    "stream" \
+    "completed" \
+    "bad-autostart-controller-000000" \
+    "$tmpdir/bad-autostart-controller.sock" \
+    "$PWD" \
+    0 \
+    '["sh","-c","exit 0"]' \
+    1 \
+    "open" \
+    "Bad Autostart" \
+    "$PWD" >>"$bad_autostart_state/processes.tsv"
+
+"$CUBICLE_MANAGER" --state-dir "$bad_autostart_state" \
+    --controller-bin "$tmpdir/missing-controller" daemon \
+    --foreground --control-socket "$bad_autostart_socket" \
+    --event-interval-ms 50 >"$tmpdir/bad-autostart.out" \
+    2>"$tmpdir/bad-autostart.err" &
+bad_autostart_pid=$!
+for _ in $(seq 1 100); do
+    if [ -S "$bad_autostart_socket" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if [ ! -S "$bad_autostart_socket" ]; then
+    echo "manager daemon did not survive bad autostart record" >&2
+    cat "$tmpdir/bad-autostart.err" >&2
+    kill "$bad_autostart_pid" 2>/dev/null || true
+    wait "$bad_autostart_pid" 2>/dev/null || true
+    exit 1
+fi
+bad_autostart_ping=$(python3 "$CUBICLE_API_CLIENT" "$bad_autostart_socket" ping)
+printf "%s" "$bad_autostart_ping" | grep -q '"success": true'
+python3 "$CUBICLE_API_CLIENT" "$bad_autostart_socket" shutdown >/dev/null
+wait "$bad_autostart_pid"
+
 detached_state_dir="$tmpdir/detached-manager"
 detached_socket_path="$tmpdir/detached-manager.sock"
 if ! "$CUBICLE_MANAGER" --state-dir "$detached_state_dir" daemon \

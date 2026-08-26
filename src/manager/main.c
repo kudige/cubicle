@@ -8048,11 +8048,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     }
 
     if (autostart_restart_processes(state) < 0) {
-        manager_log_error(errno);
-        manager_runtime_destroy(&runtime);
-        close_manager_listeners(listeners, listener_count);
-        unlock_state(daemon_lock_fd);
-        return 1;
+        cubicle_log(CUBICLE_LOG_WARN, "manager",
+                    manager_error_message(errno));
     }
 
     while (!runtime_shutdown_requested(&runtime)) {
