@@ -242,6 +242,25 @@ static int desk_split_remote_workspace(const char *input,
     return 1;
 }
 
+static bool desk_workspace_is_remote_alias(const cubicle_workspace_info_t *workspace,
+                                           const desk_remote_record_t *remotes,
+                                           size_t remote_count)
+{
+    char workspace_name[CUBICLE_NAME_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
+    int result = desk_split_remote_workspace(workspace->name, workspace_name,
+                                             remote_name);
+    if (result <= 0) {
+        return false;
+    }
+    for (size_t i = 0; i < remote_count; ++i) {
+        if (strcmp(remotes[i].name, remote_name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 typedef struct desk_layout {
     int rows;
     int cols;
@@ -4526,6 +4545,14 @@ static int desk_open_root_menu(desk_session_t *session)
     }
     cubicle_process_list_free(processes);
 
+    desk_remote_record_t *remotes = NULL;
+    size_t remote_count = 0;
+    bool remotes_loaded = desk_remote_load(&remotes, &remote_count) == 0;
+    if (!remotes_loaded) {
+        snprintf(menu->status, sizeof(menu->status),
+                 "failed to read remote registry");
+    }
+
     cubicle_workspace_info_t *workspaces = NULL;
     size_t workspace_count = 0;
     memset(&page, 0, sizeof(page));
@@ -4537,10 +4564,14 @@ static int desk_open_root_menu(desk_session_t *session)
                  last != NULL && last->message[0] != '\0'
                      ? last->message
                      : "workspace list failed");
+        free(remotes);
         return -1;
     }
     for (size_t i = 0; i < workspace_count; ++i) {
-        if (strcmp(workspaces[i].id, session->workspace.id) != 0) {
+        if (strcmp(workspaces[i].id, session->workspace.id) != 0 &&
+            !(remotes_loaded &&
+              desk_workspace_is_remote_alias(&workspaces[i], remotes,
+                                             remote_count))) {
             (void)desk_menu_add_workspace(session, &workspaces[i],
                                           session->manager_uri,
                                           session->manager_relay_attachments,
@@ -4548,9 +4579,7 @@ static int desk_open_root_menu(desk_session_t *session)
         }
     }
     cubicle_workspace_list_free(workspaces);
-    desk_remote_record_t *remotes = NULL;
-    size_t remote_count = 0;
-    if (desk_remote_load(&remotes, &remote_count) == 0) {
+    if (remotes_loaded) {
         for (size_t remote_index = 0; remote_index < remote_count; ++remote_index) {
             if (strcmp(remotes[remote_index].uri, session->manager_uri) == 0) {
                 continue;
@@ -4583,9 +4612,6 @@ static int desk_open_root_menu(desk_session_t *session)
             cubicle_workspace_list_free(remote_workspaces);
             cubicle_client_disconnect(remote_manager);
         }
-    } else {
-        snprintf(menu->status, sizeof(menu->status),
-                 "failed to read remote registry");
     }
     free(remotes);
     (void)desk_menu_add_new_process(session);
