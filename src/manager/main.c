@@ -334,6 +334,18 @@ static int controller_log_path(char path[PATH_MAX],
     return 0;
 }
 
+static int manager_listen_uri_for_runtime(char uri[CUBICLE_ENDPOINT_URI_MAX],
+                                          const char *runtime_dir)
+{
+    int result = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX,
+                          "unix://%s/manager.sock", runtime_dir);
+    if (result < 0 || result >= CUBICLE_ENDPOINT_URI_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 static int process_output_path(char path[PATH_MAX],
                                const manager_state_t *state,
                                const char *process_id,
@@ -438,6 +450,42 @@ static void log_manager_effective_config(const manager_state_t *state)
     log_manager_setting("manager.socket_group", state->socket_group);
     log_manager_setting("manager.controller_binary", state->controller_bin);
     log_manager_setting("controller.debug", state->controller_debug);
+}
+
+static int resolve_build_tree_controller(manager_state_t *state,
+                                         const char *program)
+{
+    if (access(state->controller_bin, X_OK) == 0 ||
+        program == NULL || strchr(program, '/') == NULL) {
+        return 0;
+    }
+
+    char candidate[PATH_MAX];
+    int length = snprintf(candidate, sizeof(candidate), "%s", program);
+    if (length < 0 || (size_t)length >= sizeof(candidate)) {
+        return 0;
+    }
+
+    char *slash = strrchr(candidate, '/');
+    if (slash == NULL) {
+        return 0;
+    }
+    *slash = '\0';
+
+    size_t directory_length = strlen(candidate);
+    length = snprintf(candidate + directory_length,
+                      sizeof(candidate) - directory_length,
+                      "/cubicle-controller");
+    if (length < 0 ||
+        (size_t)length >= sizeof(candidate) - directory_length) {
+        return 0;
+    }
+
+    if (access(candidate, X_OK) == 0) {
+        snprintf(state->controller_bin, sizeof(state->controller_bin), "%s",
+                 candidate);
+    }
+    return 0;
 }
 
 static int append_line(const manager_state_t *state, const char *file_name,
@@ -7776,7 +7824,7 @@ static void manager_runtime_wait_workers(manager_runtime_t *runtime)
     pthread_mutex_unlock(&runtime->workers_mutex);
 }
 
-static int daemonize_manager(void)
+static int daemonize_manager(const manager_state_t *state)
 {
     fflush(NULL);
 
@@ -7800,20 +7848,40 @@ static int daemonize_manager(void)
         _exit(0);
     }
 
+    char log_path[PATH_MAX];
+    int log_length = snprintf(log_path, sizeof(log_path), "%s/manager.log",
+                              state->log_dir);
+    if (log_length < 0 || (size_t)log_length >= sizeof(log_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
     int devnull = open("/dev/null", O_RDWR);
     if (devnull < 0) {
         return -1;
     }
-    if (dup2(devnull, STDIN_FILENO) < 0 ||
-        dup2(devnull, STDOUT_FILENO) < 0 ||
-        dup2(devnull, STDERR_FILENO) < 0) {
+    int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                      0600);
+    if (log_fd < 0) {
         int saved_errno = errno;
         close(devnull);
         errno = saved_errno;
         return -1;
     }
+    if (dup2(devnull, STDIN_FILENO) < 0 ||
+        dup2(devnull, STDOUT_FILENO) < 0 ||
+        dup2(log_fd, STDERR_FILENO) < 0) {
+        int saved_errno = errno;
+        close(devnull);
+        close(log_fd);
+        errno = saved_errno;
+        return -1;
+    }
     if (devnull > STDERR_FILENO) {
         close(devnull);
+    }
+    if (log_fd > STDERR_FILENO) {
+        close(log_fd);
     }
     return 0;
 }
@@ -7946,7 +8014,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
         return 1;
     }
 
-    if (!foreground && daemonize_manager() < 0) {
+    if (!foreground && daemonize_manager(state) < 0) {
         manager_log_error(errno);
         close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
@@ -8241,12 +8309,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "Runtime directory path is too long\n");
             return 2;
         }
-        result = snprintf(state.listen_uri, sizeof(state.listen_uri),
-                          "unix://%s/manager.sock", state.runtime_dir);
-        if (result < 0 || (size_t)result >= sizeof(state.listen_uri)) {
+        if (manager_listen_uri_for_runtime(state.listen_uri,
+                                           state.runtime_dir) < 0) {
             fprintf(stderr, "Manager socket path is too long\n");
             return 2;
         }
+    }
+    if (runtime_dir_overridden &&
+        manager_listen_uri_for_runtime(state.listen_uri,
+                                       state.runtime_dir) < 0) {
+        fprintf(stderr, "Manager socket path is too long\n");
+        return 2;
     }
     if (state_dir_overridden && !log_dir_overridden) {
         int result = snprintf(state.log_dir, sizeof(state.log_dir),
@@ -8256,6 +8329,7 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    (void)resolve_build_tree_controller(&state, argv[0]);
 
     log_manager_effective_config(&state);
 
