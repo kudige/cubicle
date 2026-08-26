@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,13 @@
 #define CUBICLE_TCP_URI_PREFIX "tcp://"
 
 typedef struct cubicle_tcp_transport_context { int fd; } cubicle_tcp_transport_context_t;
+
+static void tcp_set_low_latency(int fd)
+{
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled,
+                     sizeof(enabled));
+}
 
 static cubicle_error_code_t set_error(cubicle_error_t *error, cubicle_error_code_t code, int system_errno, const char *message)
 {
@@ -126,6 +134,7 @@ static cubicle_error_code_t tcp_connect(cubicle_transport_t *transport, const cu
 
     if (fd < 0) return set_error(error, CUBICLE_ERR_MANAGER_UNAVAILABLE, saved_errno, "failed to connect to TCP endpoint");
 
+    tcp_set_low_latency(fd);
     context->fd = fd;
     if (error != NULL) memset(error, 0, sizeof(*error));
     return CUBICLE_OK;

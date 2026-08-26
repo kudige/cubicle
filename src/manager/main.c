@@ -22,6 +22,7 @@
 #include <grp.h>
 #include <limits.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
@@ -86,6 +87,7 @@ typedef struct manager_worker_slot {
 
 typedef struct manager_listener {
     int fd;
+    int is_tcp;
     int is_tls;
     char cleanup_path[PATH_MAX];
 } manager_listener_t;
@@ -770,6 +772,13 @@ static int open_manager_tcp_listener(const char *uri)
     return fd;
 }
 
+static void manager_set_tcp_low_latency(int fd)
+{
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled,
+                     sizeof(enabled));
+}
+
 static int manager_tls_paths(const manager_state_t *state,
                              char cert_path[PATH_MAX],
                              char key_path[PATH_MAX])
@@ -945,6 +954,8 @@ static int add_manager_listener(const manager_state_t *state,
     if (listener->fd < 0) {
         return -1;
     }
+    listener->is_tcp = strncmp(uri, "tcp://", 6) == 0 ||
+                       strncmp(uri, "tls://", 6) == 0;
     listener->is_tls = strncmp(uri, "tls://", 6) == 0;
     ++*listener_count;
     return 0;
@@ -7740,6 +7751,7 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     manager_listener_t listeners[2];
     for (size_t i = 0; i < 2; ++i) {
         listeners[i].fd = -1;
+        listeners[i].is_tcp = 0;
         listeners[i].is_tls = 0;
         listeners[i].cleanup_path[0] = '\0';
     }
@@ -7912,6 +7924,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                     close(client_fd);
                     result = 1;
                     break;
+                }
+                if (listeners[i].is_tcp || listeners[i].is_tls) {
+                    manager_set_tcp_low_latency(client_fd);
                 }
 
                 if (manager_runtime_start_worker(&runtime, client_fd,

@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <openssl/ssl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,6 +22,13 @@ typedef struct cubicle_tls_transport_context {
     SSL_CTX *ctx;
     SSL *ssl;
 } cubicle_tls_transport_context_t;
+
+static void tls_set_low_latency(int fd)
+{
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled,
+                     sizeof(enabled));
+}
 
 static cubicle_error_code_t set_error(cubicle_error_t *error,
                                       cubicle_error_code_t code,
@@ -190,6 +198,7 @@ static cubicle_error_code_t tls_connect(cubicle_transport_t *transport,
         return set_error(error, CUBICLE_ERR_MANAGER_UNAVAILABLE,
                          saved_errno, "failed to connect to TLS endpoint");
     }
+    tls_set_low_latency(fd);
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     SSL *ssl = ctx == NULL ? NULL : SSL_new(ctx);
