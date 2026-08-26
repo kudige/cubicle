@@ -948,6 +948,22 @@ static const char *user_home_directory(void)
     return entry != NULL ? entry->pw_dir : NULL;
 }
 
+static int format_user_runtime_dir(char *buffer,
+                                   size_t buffer_size,
+                                   uid_t uid)
+{
+#ifdef __APPLE__
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0') {
+        tmpdir = "/tmp";
+    }
+    return snprintf(buffer, buffer_size, "%s/cubicle-%ld/cubicle",
+                    tmpdir, (long)uid);
+#else
+    return snprintf(buffer, buffer_size, "/run/user/%ld/cubicle", (long)uid);
+#endif
+}
+
 static int set_user_defaults(cubicle_config_t *config)
 {
     uid_t uid = geteuid();
@@ -985,9 +1001,9 @@ static int set_user_defaults(cubicle_config_t *config)
                           sizeof(config->manager_runtime_dir),
                           "%s/cubicle", runtime_dir);
     } else {
-        result = snprintf(config->manager_runtime_dir,
-                          sizeof(config->manager_runtime_dir),
-                          "/run/user/%ld/cubicle", (long)uid);
+        result = format_user_runtime_dir(config->manager_runtime_dir,
+                                         sizeof(config->manager_runtime_dir),
+                                         uid);
     }
     if (result < 0 || (size_t)result >= sizeof(config->manager_runtime_dir)) {
         return -1;
@@ -1070,15 +1086,31 @@ void cubicle_config_defaults(cubicle_config_t *config)
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
         snprintf(config->manager_state_dir, sizeof(config->manager_state_dir),
                  "/tmp/cubicle-state-%ld", (long)geteuid());
-        snprintf(config->manager_runtime_dir,
-                 sizeof(config->manager_runtime_dir),
-                 "/run/user/%ld/cubicle", (long)geteuid());
+        int runtime_length = format_user_runtime_dir(
+            config->manager_runtime_dir, sizeof(config->manager_runtime_dir),
+            geteuid());
+        if (runtime_length < 0 ||
+            (size_t)runtime_length >= sizeof(config->manager_runtime_dir)) {
+            snprintf(config->manager_runtime_dir,
+                     sizeof(config->manager_runtime_dir),
+                     "/tmp/cubicle-runtime-%ld", (long)geteuid());
+        }
         snprintf(config->manager_log_dir, sizeof(config->manager_log_dir),
                  "/tmp/cubicle-log-%ld", (long)geteuid());
-        snprintf(config->manager_listen_uri,
-                 sizeof(config->manager_listen_uri),
-                 "unix:///run/user/%ld/cubicle/manager.sock",
-                 (long)geteuid());
+        int listen_length = snprintf(config->manager_listen_uri,
+                                     sizeof(config->manager_listen_uri),
+                                     "unix://%s/manager.sock",
+                                     config->manager_runtime_dir);
+        if (listen_length < 0 ||
+            (size_t)listen_length >= sizeof(config->manager_listen_uri)) {
+            snprintf(config->manager_runtime_dir,
+                     sizeof(config->manager_runtime_dir),
+                     "/tmp/cubicle-runtime-%ld", (long)geteuid());
+            snprintf(config->manager_listen_uri,
+                     sizeof(config->manager_listen_uri),
+                     "unix:///tmp/cubicle-runtime-%ld/manager.sock",
+                     (long)geteuid());
+        }
         snprintf(config->client_manager_uri,
                  sizeof(config->client_manager_uri), "%s",
                  config->manager_listen_uri);
