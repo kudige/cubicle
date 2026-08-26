@@ -323,7 +323,20 @@ static cubicle_error_code_t attach_controller(cubicle_attachment_t *attachment)
     }
 
     char *response = NULL;
-    code = attachment_rpc(attachment, "controller.attach", params, &response);
+    if (attachment->relay) {
+        code = attachment_rpc(attachment, "controller.attach", params,
+                              &response);
+    } else if (attachment->controller != NULL) {
+        code = rpc_object(attachment->controller, "controller.attach", params,
+                          &response);
+        if (code != CUBICLE_OK) {
+            attachment->last_error =
+                *cubicle_client_last_error(attachment->controller);
+        }
+    } else {
+        code = attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
+                                    "controller client is not connected");
+    }
     if (code != CUBICLE_OK) {
         free(response);
         return code;

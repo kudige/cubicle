@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
 #include <signal.h>
@@ -67,6 +68,10 @@ static volatile sig_atomic_t g_resize_requested = 1;
 static volatile sig_atomic_t g_stop_requested = 0;
 static int g_desk_debug_terminal = 0;
 static char g_desk_debug_log_path[CUBICLE_PATH_MAX];
+static char g_desk_crash_log_path[CUBICLE_PATH_MAX];
+static char g_desk_crash_phase[64] = "startup";
+static char g_desk_crash_workspace[CUBICLE_NAME_MAX];
+static char g_desk_crash_manager[CUBICLE_ENDPOINT_URI_MAX];
 
 typedef cubeui_terminal_t desk_terminal_t;
 
@@ -449,6 +454,103 @@ static void handle_signal(int signo)
     } else {
         g_stop_requested = 1;
     }
+}
+
+static void desk_crash_write_string(int fd, const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+    size_t length = 0;
+    while (text[length] != '\0') {
+        ++length;
+    }
+    if (length > 0) {
+        (void)write(fd, text, length);
+    }
+}
+
+static void desk_crash_write_long(int fd, long value)
+{
+    char buffer[32];
+    size_t used = sizeof(buffer);
+    unsigned long magnitude;
+    int negative = value < 0;
+    if (negative) {
+        magnitude = (unsigned long)(-(value + 1)) + 1;
+    } else {
+        magnitude = (unsigned long)value;
+    }
+    buffer[--used] = '\0';
+    do {
+        buffer[--used] = (char)('0' + (magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude > 0 && used > 0);
+    if (negative && used > 0) {
+        buffer[--used] = '-';
+    }
+    desk_crash_write_string(fd, &buffer[used]);
+}
+
+static void handle_crash_signal(int signo)
+{
+    if (g_desk_crash_log_path[0] != '\0') {
+        int fd = open(g_desk_crash_log_path,
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            desk_crash_write_string(fd, "event=crash pid=");
+            desk_crash_write_long(fd, (long)getpid());
+            desk_crash_write_string(fd, " signal=");
+            desk_crash_write_long(fd, (long)signo);
+            desk_crash_write_string(fd, " phase=");
+            desk_crash_write_string(fd, g_desk_crash_phase);
+            desk_crash_write_string(fd, " workspace=\"");
+            desk_crash_write_string(fd, g_desk_crash_workspace);
+            desk_crash_write_string(fd, "\" manager=\"");
+            desk_crash_write_string(fd, g_desk_crash_manager);
+            desk_crash_write_string(fd, "\"\n");
+            close(fd);
+        }
+    }
+
+    signal(signo, SIG_DFL);
+    raise(signo);
+    _exit(128 + signo);
+}
+
+static void desk_crash_set_phase(const char *phase)
+{
+    if (phase == NULL) {
+        phase = "";
+    }
+    snprintf(g_desk_crash_phase, sizeof(g_desk_crash_phase), "%s", phase);
+}
+
+static void desk_crash_configure(const cubicle_config_t *config)
+{
+    g_desk_crash_log_path[0] = '\0';
+    if (config == NULL || config->manager_log_dir[0] == '\0') {
+        return;
+    }
+    int length = snprintf(g_desk_crash_log_path,
+                          sizeof(g_desk_crash_log_path),
+                          "%s/desk-crash.log", config->manager_log_dir);
+    if (length <= 0 || (size_t)length >= sizeof(g_desk_crash_log_path)) {
+        g_desk_crash_log_path[0] = '\0';
+        return;
+    }
+    (void)cubicle_mkdir_p(config->manager_log_dir);
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = handle_crash_signal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESETHAND;
+    (void)sigaction(SIGABRT, &action, NULL);
+    (void)sigaction(SIGBUS, &action, NULL);
+    (void)sigaction(SIGFPE, &action, NULL);
+    (void)sigaction(SIGILL, &action, NULL);
+    (void)sigaction(SIGSEGV, &action, NULL);
 }
 
 static void desk_debug_timestamp(char *buffer, size_t size)
@@ -7399,6 +7501,7 @@ static int desk_run_workspace(const char *workspace_arg,
         fprintf(stderr, "desk: %s\n", error);
         return 2;
     }
+    desk_crash_configure(&config);
     if (session.manager_uri[0] == '\0') {
         char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
         const char *resolved = cubeui_resolve_manager_endpoint(
@@ -7410,6 +7513,10 @@ static int desk_run_workspace(const char *workspace_arg,
                 strncmp(resolved, "tls://", 6) == 0;
         }
     }
+    snprintf(g_desk_crash_workspace, sizeof(g_desk_crash_workspace), "%s",
+             workspace_arg != NULL ? workspace_arg : "");
+    snprintf(g_desk_crash_manager, sizeof(g_desk_crash_manager), "%s",
+             session.manager_uri);
     session.prefix_key = prefix_override ? prefix_key : config.desk_prefix_key;
     if (prefix_override) {
         session.prefix_sequence[0] = prefix_key;
@@ -7431,18 +7538,24 @@ static int desk_run_workspace(const char *workspace_arg,
                    effective_workspace_arg != NULL ? effective_workspace_arg : "",
                    session.manager_uri, session.manager_relay_attachments);
 
+    desk_crash_set_phase("resolve-workspace");
     int result = resolve_workspace(&session, effective_workspace_arg, error,
                                    sizeof(error));
     if (result == 0) {
+        snprintf(g_desk_crash_workspace, sizeof(g_desk_crash_workspace), "%s",
+                 session.workspace.name);
+        desk_crash_set_phase("load-macros");
         snprintf(session.last_opened_workspace_id,
                  sizeof(session.last_opened_workspace_id), "%s",
                  session.workspace.id);
         result = desk_load_workspace_macros(&session, error, sizeof(error));
     }
     if (result == 0) {
+        desk_crash_set_phase("load-processes");
         result = load_workspace_processes(&session, error, sizeof(error));
     }
     if (result == 0) {
+        desk_crash_set_phase("load-layout");
         result = load_or_create_layout(&session, error, sizeof(error));
     }
     if (result != 0) {
@@ -7470,6 +7583,7 @@ static int desk_run_workspace(const char *workspace_arg,
     (void)sigaction(SIGTERM, &action, NULL);
 
     bool initial_size_changed = false;
+    desk_crash_set_phase("initial-resize");
     if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
         cubeui_terminal_leave_alt_raw(&terminal);
         desk_debug_log("event=initial_resize_failed errno=%d", errno);
@@ -7477,6 +7591,7 @@ static int desk_run_workspace(const char *workspace_arg,
         desk_session_cleanup(&session);
         return 2;
     }
+    desk_crash_set_phase("attach-panes");
     result = attach_all_panes(&session, error, sizeof(error));
     if (result != 0) {
         cubeui_terminal_leave_alt_raw(&terminal);
@@ -7490,6 +7605,7 @@ static int desk_run_workspace(const char *workspace_arg,
     if (session.mouse_titles) {
         desk_menu_enable_mouse();
     }
+    desk_crash_set_phase("event-loop");
     desk_debug_log("event=loop_start panes=%zu", session.pane_count);
     while (!g_stop_requested) {
         bool layout_changed = false;
