@@ -217,6 +217,27 @@ static int desk_remote_load(desk_remote_record_t **records_out,
     return 0;
 }
 
+static int desk_remote_name_for_uri(const char *uri,
+                                    char name[CUBICLE_NAME_MAX])
+{
+    desk_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (uri == NULL || uri[0] == '\0' ||
+        desk_remote_load(&records, &count) < 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(records[i].uri, uri) == 0) {
+            snprintf(name, CUBICLE_NAME_MAX, "%s", records[i].name);
+            free(records);
+            return 0;
+        }
+    }
+    free(records);
+    errno = ENOENT;
+    return -1;
+}
+
 static int desk_split_remote_workspace(const char *input,
                                        char workspace[CUBICLE_NAME_MAX],
                                        char remote[CUBICLE_NAME_MAX])
@@ -376,7 +397,9 @@ typedef struct desk_pane {
     cubicle_client_t *manager;
     cubicle_attachment_t *attachment;
     cubicle_process_info_t process;
+    char workspace_name[CUBICLE_NAME_MAX];
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
     bool manager_relay_attachments;
     desk_grid_t grid;
     cubicle_resize_tracker_t resize;
@@ -439,6 +462,7 @@ typedef struct desk_open_menu {
     desk_menu_level_t prompt_return_level;
     cubicle_workspace_info_t workspace;
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
     bool manager_relay_attachments;
     desk_menu_item_t items[DESK_MENU_MAX_ITEMS];
     size_t item_count;
@@ -466,6 +490,7 @@ typedef struct desk_menu_geometry {
 typedef struct desk_session {
     cubicle_client_t *manager;
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
     bool manager_relay_attachments;
     cubicle_workspace_info_t workspace;
     desk_pane_t panes[32];
@@ -3162,6 +3187,57 @@ static void desk_cursor_tick(const desk_terminal_t *terminal,
     desk_cursor_render(terminal, session);
 }
 
+static const char *desk_pane_base_name(const desk_pane_t *pane)
+{
+    return pane->process.friendly_name[0] != '\0'
+               ? pane->process.friendly_name
+               : pane->process.id;
+}
+
+static void desk_format_pane_title(const desk_pane_t *pane,
+                                   char *title,
+                                   size_t title_size)
+{
+    const char *pane_name = desk_pane_base_name(pane);
+    if (pane->remote_name[0] != '\0') {
+        const char *workspace_name =
+            pane->workspace_name[0] != '\0' ? pane->workspace_name
+                                            : pane->process.workspace_id;
+        snprintf(title, title_size, "%s.%s@%s", workspace_name, pane_name,
+                 pane->remote_name);
+        return;
+    }
+    snprintf(title, title_size, "%s", pane_name);
+}
+
+static void desk_set_pane_display_context(desk_session_t *session,
+                                          desk_pane_t *pane,
+                                          const cubicle_workspace_info_t *workspace,
+                                          const char *remote_name)
+{
+    if (workspace != NULL) {
+        snprintf(pane->workspace_name, sizeof(pane->workspace_name), "%s",
+                 workspace->name);
+    } else if (pane->workspace_name[0] == '\0') {
+        snprintf(pane->workspace_name, sizeof(pane->workspace_name), "%s",
+                 session->workspace.name);
+    }
+
+    pane->remote_name[0] = '\0';
+    if (remote_name != NULL && remote_name[0] != '\0') {
+        snprintf(pane->remote_name, sizeof(pane->remote_name), "%s",
+                 remote_name);
+    } else if (pane->manager != NULL) {
+        (void)desk_remote_name_for_uri(pane->manager_uri, pane->remote_name);
+    } else if (session->remote_name[0] != '\0') {
+        snprintf(pane->remote_name, sizeof(pane->remote_name), "%s",
+                 session->remote_name);
+    } else {
+        (void)desk_remote_name_for_uri(session->manager_uri,
+                                       pane->remote_name);
+    }
+}
+
 static void desk_render_pane_title(const desk_terminal_t *terminal,
                                    const desk_pane_layout_t *panes,
                                    int pane_id,
@@ -3317,15 +3393,16 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, "\x1b[0m");
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
-    char title[160];
-    snprintf(title, sizeof(title), "%.96s%s%zu/%zu",
-             pane->process.friendly_name,
+    char pane_title[160];
+    desk_format_pane_title(pane, pane_title, sizeof(pane_title));
+    char title[192];
+    snprintf(title, sizeof(title), "%.128s%s%zu/%zu",
+             pane_title,
              scrollback_view ? " scroll " : "",
              scrollback_view ? pane->scrollback_offset : 0,
              scrollback_view ? pane->scrollback_count : 0);
     desk_render_pane_title(terminal, panes, pane_id,
-                           scrollback_view ? title
-                                           : pane->process.friendly_name,
+                           scrollback_view ? title : pane_title,
                            mouse_titles);
 }
 
@@ -3427,9 +3504,8 @@ static void desk_apply_pane_labels(desk_session_t *session)
         if (node < 0) {
             continue;
         }
-        const char *name = session->panes[i].process.friendly_name[0] != '\0'
-                               ? session->panes[i].process.friendly_name
-                               : session->panes[i].process.id;
+        char name[192];
+        desk_format_pane_title(&session->panes[i], name, sizeof(name));
         snprintf(session->layout.nodes[node].label,
                  sizeof(session->layout.nodes[node].label), "%.*s",
                  (int)sizeof(session->layout.nodes[node].label) - 1, name);
@@ -3535,7 +3611,10 @@ static int load_workspace_processes(desk_session_t *session,
                                      sizeof(session->panes[0])) {
             break;
         }
-        session->panes[session->pane_count].process = processes[i];
+        desk_pane_t *pane = &session->panes[session->pane_count];
+        pane->process = processes[i];
+        desk_set_pane_display_context(session, pane, &session->workspace,
+                                      NULL);
         session->pane_count++;
     }
     cubicle_process_list_free(processes);
@@ -4060,6 +4139,8 @@ static int desk_switch_workspace(desk_session_t *session,
              sizeof(session->last_opened_workspace_id), "%s", workspace->id);
     for (size_t i = 0; i < attachable_count; ++i) {
         session->panes[i].process = attachable[i];
+        desk_set_pane_display_context(session, &session->panes[i], workspace,
+                                      NULL);
     }
     session->pane_count = attachable_count;
     session->zoomed = false;
@@ -4212,7 +4293,9 @@ static int desk_load_layout_picker_items(desk_session_t *session)
 
 static int desk_menu_add_process(desk_session_t *session,
                                  const cubicle_process_info_t *process,
+                                 const cubicle_workspace_info_t *workspace,
                                  const char *manager_uri,
+                                 const char *remote_name,
                                  bool manager_relay_attachments)
 {
     if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
@@ -4223,9 +4306,16 @@ static int desk_menu_add_process(desk_session_t *session,
     memset(item, 0, sizeof(*item));
     item->kind = DESK_MENU_ITEM_PROCESS;
     item->process = *process;
+    if (workspace != NULL) {
+        item->workspace = *workspace;
+    }
     if (manager_uri != NULL) {
         snprintf(item->manager_uri, sizeof(item->manager_uri), "%s",
                  manager_uri);
+    }
+    if (remote_name != NULL) {
+        snprintf(item->remote_name, sizeof(item->remote_name), "%s",
+                 remote_name);
     }
     item->manager_relay_attachments = manager_relay_attachments;
     item->disabled = desk_process_is_open(session, process->id, manager_uri);
@@ -4441,6 +4531,7 @@ static int desk_load_process_menu(desk_session_t *session,
                                   cubicle_client_t *manager,
                                   const cubicle_workspace_info_t *workspace,
                                   const char *manager_uri,
+                                  const char *remote_name,
                                   bool manager_relay_attachments)
 {
     cubicle_client_t *temporary_manager = NULL;
@@ -4466,6 +4557,10 @@ static int desk_load_process_menu(desk_session_t *session,
     menu->workspace = *workspace;
     snprintf(menu->manager_uri, sizeof(menu->manager_uri), "%s",
              manager_uri != NULL ? manager_uri : session->manager_uri);
+    if (remote_name != NULL) {
+        snprintf(menu->remote_name, sizeof(menu->remote_name), "%s",
+                 remote_name);
+    }
     menu->manager_relay_attachments = manager_relay_attachments;
     snprintf(session->last_opened_workspace_id,
              sizeof(session->last_opened_workspace_id), "%s", workspace->id);
@@ -4492,7 +4587,8 @@ static int desk_load_process_menu(desk_session_t *session,
     for (size_t i = 0; i < process_count; ++i) {
         if (process_belongs_to_workspace(&processes[i], workspace->id) &&
             process_is_attachable(&processes[i])) {
-            (void)desk_menu_add_process(session, &processes[i], manager_uri,
+            (void)desk_menu_add_process(session, &processes[i], workspace,
+                                        manager_uri, remote_name,
                                         manager_relay_attachments);
         }
     }
@@ -4515,6 +4611,8 @@ static int desk_open_root_menu(desk_session_t *session)
     menu->workspace = session->workspace;
     snprintf(menu->manager_uri, sizeof(menu->manager_uri), "%s",
              session->manager_uri);
+    snprintf(menu->remote_name, sizeof(menu->remote_name), "%s",
+             session->remote_name);
     menu->manager_relay_attachments = session->manager_relay_attachments;
 
     cubicle_process_filter_t filter;
@@ -4539,7 +4637,9 @@ static int desk_open_root_menu(desk_session_t *session)
         if (process_belongs_to_workspace(&processes[i], session->workspace.id) &&
             process_is_attachable(&processes[i])) {
             (void)desk_menu_add_process(session, &processes[i],
+                                        &session->workspace,
                                         session->manager_uri,
+                                        session->remote_name,
                                         session->manager_relay_attachments);
         }
     }
@@ -5131,10 +5231,8 @@ static bool desk_title_hit_test(const desk_terminal_t *terminal,
             continue;
         }
 
-        const char *label =
-            session->panes[i].process.friendly_name[0] != '\0'
-                ? session->panes[i].process.friendly_name
-                : session->panes[i].process.id;
+        char label[192];
+        desk_format_pane_title(&session->panes[i], label, sizeof(label));
         int title_start = rect.col + 1;
         int title_cols = rect.cols;
         if (rect.cols > 2) {
@@ -5202,6 +5300,8 @@ static void desk_menu_move_selection(desk_open_menu_t *menu, int delta,
 static int desk_replace_active_pane_process(desk_session_t *session,
                                             const desk_terminal_t *terminal,
                                             const cubicle_process_info_t *process,
+                                            const cubicle_workspace_info_t *workspace,
+                                            const char *remote_name,
                                             const char *manager_uri,
                                             bool manager_relay_attachments,
                                             char *error,
@@ -5243,6 +5343,7 @@ static int desk_replace_active_pane_process(desk_session_t *session,
     pane->rows = 0;
     pane->cols = 0;
     pane->process = *process;
+    desk_set_pane_display_context(session, pane, workspace, remote_name);
     bool changed = false;
     if (resize_pane_attachment(session, terminal, pane_index, &changed) < 0) {
         snprintf(error, error_size, "failed to resize pane");
@@ -5260,6 +5361,8 @@ static int desk_replace_active_pane_process(desk_session_t *session,
 static int desk_commit_pending_split_process(desk_session_t *session,
                                              const desk_terminal_t *terminal,
                                              const cubicle_process_info_t *process,
+                                             const cubicle_workspace_info_t *workspace,
+                                             const char *remote_name,
                                              const char *manager_uri,
                                              bool manager_relay_attachments,
                                              char *error,
@@ -5267,6 +5370,7 @@ static int desk_commit_pending_split_process(desk_session_t *session,
 {
     if (session->pending_split == DESK_PENDING_SPLIT_NONE) {
         return desk_replace_active_pane_process(session, terminal, process,
+                                                workspace, remote_name,
                                                 manager_uri,
                                                 manager_relay_attachments,
                                                 error, error_size);
@@ -5292,6 +5396,7 @@ static int desk_commit_pending_split_process(desk_session_t *session,
     bool resized = false;
     if (resize_all_panes(session, terminal, &resized) < 0 ||
         desk_replace_active_pane_process(session, terminal, process,
+                                         workspace, remote_name,
                                          manager_uri,
                                          manager_relay_attachments, error,
                                          error_size) < 0) {
@@ -5321,6 +5426,7 @@ static int desk_begin_split_process_menu(desk_session_t *session,
     session->pending_split = split;
     if (desk_load_process_menu(session, session->manager, &session->workspace,
                                session->manager_uri,
+                               session->remote_name,
                                session->manager_relay_attachments) < 0) {
         session->pending_split = DESK_PENDING_SPLIT_NONE;
         snprintf(error, error_size, "%s", session->open_menu.status);
@@ -6151,6 +6257,7 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
 static void desk_begin_new_process_prompt(desk_session_t *session,
                                           const cubicle_workspace_info_t *workspace,
                                           const char *manager_uri,
+                                          const char *remote_name,
                                           bool manager_relay_attachments,
                                           desk_menu_level_t return_level)
 {
@@ -6165,6 +6272,10 @@ static void desk_begin_new_process_prompt(desk_session_t *session,
     menu->workspace = target_workspace;
     snprintf(menu->manager_uri, sizeof(menu->manager_uri), "%s",
              manager_uri != NULL ? manager_uri : session->manager_uri);
+    if (remote_name != NULL) {
+        snprintf(menu->remote_name, sizeof(menu->remote_name), "%s",
+                 remote_name);
+    }
     menu->manager_relay_attachments = manager_relay_attachments;
     menu->status[0] = '\0';
 }
@@ -6329,6 +6440,7 @@ static int desk_start_new_process_from_prompt(desk_session_t *session,
     char error[256];
     if (desk_commit_pending_split_process(
             session, terminal, &process,
+            &menu->workspace, menu->remote_name,
             use_menu_manager ? menu->manager_uri : NULL,
             menu->manager_relay_attachments, error, sizeof(error)) < 0) {
         cubicle_process_terminate_options_t terminate_options;
@@ -6425,6 +6537,7 @@ static int desk_open_menu_select(desk_session_t *session,
     if (selected.kind == DESK_MENU_ITEM_NEW) {
         desk_begin_new_process_prompt(session, &menu->workspace,
                                       menu->manager_uri,
+                                      menu->remote_name,
                                       menu->manager_relay_attachments,
                                       menu->level);
         return 0;
@@ -6436,6 +6549,8 @@ static int desk_open_menu_select(desk_session_t *session,
         strcmp(selected.manager_uri, session->manager_uri) != 0;
     if (desk_commit_pending_split_process(
             session, terminal, &selected.process,
+            selected.workspace.id[0] != '\0' ? &selected.workspace : NULL,
+            selected.remote_name,
             use_item_manager ? selected.manager_uri : NULL,
             selected.manager_relay_attachments, error, sizeof(error)) < 0) {
         snprintf(menu->status, sizeof(menu->status), "%s", error);
@@ -6604,6 +6719,9 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
     char old_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     snprintf(old_manager_uri, sizeof(old_manager_uri), "%s",
              session->manager_uri);
+    char old_remote_name[CUBICLE_NAME_MAX];
+    snprintf(old_remote_name, sizeof(old_remote_name), "%s",
+             session->remote_name);
     bool old_manager_relay_attachments = session->manager_relay_attachments;
     cubicle_client_t *temporary_manager = NULL;
     bool use_item_manager =
@@ -6621,6 +6739,8 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
         session->manager = temporary_manager;
         snprintf(session->manager_uri, sizeof(session->manager_uri), "%s",
                  selected.manager_uri);
+        snprintf(session->remote_name, sizeof(session->remote_name), "%s",
+                 selected.remote_name);
         session->manager_relay_attachments =
             selected.manager_relay_attachments;
     }
@@ -6632,6 +6752,8 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
             session->manager = old_manager;
             snprintf(session->manager_uri, sizeof(session->manager_uri), "%s",
                      old_manager_uri);
+            snprintf(session->remote_name, sizeof(session->remote_name), "%s",
+                     old_remote_name);
             session->manager_relay_attachments =
                 old_manager_relay_attachments;
         }
@@ -6714,6 +6836,7 @@ static int handle_open_menu_input(desk_session_t *session,
                     (void)desk_load_process_menu(
                         session, NULL, &workspace,
                         session->open_menu.manager_uri,
+                        session->open_menu.remote_name,
                         session->open_menu.manager_relay_attachments);
                 } else {
                     (void)desk_open_root_menu(session);
@@ -6879,6 +7002,7 @@ static int handle_open_menu_input(desk_session_t *session,
                         (void)desk_load_process_menu(
                             session, manager, &selected.workspace,
                             selected.manager_uri,
+                            selected.remote_name,
                             selected.manager_relay_attachments);
                     }
                     cubicle_client_disconnect(temporary_manager);
@@ -7832,6 +7956,8 @@ static int desk_run_workspace(const char *workspace_arg,
             effective_workspace_arg = remote_workspace;
             snprintf(session.manager_uri, sizeof(session.manager_uri), "%s",
                      remote_manager_uri);
+            snprintf(session.remote_name, sizeof(session.remote_name), "%s",
+                     remote_name);
             session.manager_relay_attachments =
                 strncmp(remote_manager_uri, "tls://", 6) == 0;
         }
@@ -7854,6 +7980,9 @@ static int desk_run_workspace(const char *workspace_arg,
         if (resolved != NULL) {
             snprintf(session.manager_uri, sizeof(session.manager_uri), "%s",
                      resolved);
+            if (session.remote_name[0] == '\0') {
+                (void)desk_remote_name_for_uri(resolved, session.remote_name);
+            }
             session.manager_relay_attachments =
                 strncmp(resolved, "tls://", 6) == 0;
         }
