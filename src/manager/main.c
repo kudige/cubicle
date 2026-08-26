@@ -60,6 +60,8 @@ typedef struct manager_state {
 #define CUBICLE_MANAGER_MAX_SESSIONS 128
 #define CUBICLE_MANAGER_DEFAULT_MAX_CLIENTS 64
 #define CUBICLE_MANAGER_MAX_CLIENTS 1024
+#define CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE 16
+#define CUBICLE_MANAGER_CONTROLLER_CACHE_MAX_IDLE_MS 90000ULL
 
 typedef struct manager_session_record {
     int active;
@@ -76,6 +78,12 @@ typedef struct manager_session_store {
 } manager_session_store_t;
 
 typedef struct manager_runtime manager_runtime_t;
+
+typedef struct manager_controller_cache_entry {
+    int fd;
+    uint64_t last_used_ms;
+    char socket_path[CUBICLE_PATH_MAX];
+} manager_controller_cache_entry_t;
 
 typedef struct manager_worker_slot {
     int active;
@@ -119,6 +127,8 @@ typedef struct manager_connection {
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
     char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
     manager_runtime_t *runtime;
+    manager_controller_cache_entry_t controller_cache
+        [CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE];
 } manager_connection_t;
 
 static _Thread_local SSL *g_manager_tls = NULL;
@@ -4102,23 +4112,107 @@ static int connect_controller_socket(const char *socket_path)
     return fd;
 }
 
-static int controller_rpc_call(const char *socket_path,
-                               const char *method,
-                               const char *params,
-                               char **response_out)
+static void manager_controller_cache_init(manager_connection_t *connection)
 {
-    int fd = connect_controller_socket(socket_path);
-    if (fd < 0) {
-        return -1;
+    if (connection == NULL) {
+        return;
     }
 
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        connection->controller_cache[i].fd = -1;
+        connection->controller_cache[i].last_used_ms = 0;
+        connection->controller_cache[i].socket_path[0] = '\0';
+    }
+}
+
+static void manager_controller_cache_close(manager_connection_t *connection)
+{
+    if (connection == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        if (connection->controller_cache[i].fd >= 0) {
+            close(connection->controller_cache[i].fd);
+            connection->controller_cache[i].fd = -1;
+        }
+        connection->controller_cache[i].last_used_ms = 0;
+        connection->controller_cache[i].socket_path[0] = '\0';
+    }
+}
+
+static void manager_controller_cache_invalidate(
+    manager_controller_cache_entry_t *entry)
+{
+    if (entry == NULL) {
+        return;
+    }
+
+    if (entry->fd >= 0) {
+        close(entry->fd);
+        entry->fd = -1;
+    }
+    entry->last_used_ms = 0;
+    entry->socket_path[0] = '\0';
+}
+
+static manager_controller_cache_entry_t *manager_controller_cache_get(
+    manager_connection_t *connection,
+    const char *socket_path)
+{
+    if (connection == NULL || socket_path == NULL ||
+        strlen(socket_path) >= CUBICLE_PATH_MAX) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    uint64_t now_ms = manager_time_ms();
+    size_t empty_slot = CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE;
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        manager_controller_cache_entry_t *entry =
+            &connection->controller_cache[i];
+        if (entry->fd >= 0 && strcmp(entry->socket_path, socket_path) == 0) {
+            if (now_ms > 0 && entry->last_used_ms > 0 &&
+                now_ms - entry->last_used_ms >
+                    CUBICLE_MANAGER_CONTROLLER_CACHE_MAX_IDLE_MS) {
+                manager_controller_cache_invalidate(entry);
+                empty_slot = i;
+                break;
+            }
+            return entry;
+        }
+        if (entry->fd < 0 && empty_slot == CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE) {
+            empty_slot = i;
+        }
+    }
+
+    if (empty_slot == CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE) {
+        empty_slot = 0;
+        manager_controller_cache_invalidate(
+            &connection->controller_cache[empty_slot]);
+    }
+
+    manager_controller_cache_entry_t *entry =
+        &connection->controller_cache[empty_slot];
+    entry->fd = connect_controller_socket(socket_path);
+    if (entry->fd < 0) {
+        entry->socket_path[0] = '\0';
+        return NULL;
+    }
+    entry->last_used_ms = now_ms;
+    snprintf(entry->socket_path, sizeof(entry->socket_path), "%s", socket_path);
+    return entry;
+}
+
+static int controller_rpc_call_fd(int fd,
+                                  const char *method,
+                                  const char *params,
+                                  char **response_out)
+{
     char request[CUBICLE_API_MAX_FRAME];
     if (cubicle_rpc_request(request, sizeof(request), "relay-1",
                             "manager-relay", method,
                             params == NULL ? "{}" : params) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
         return -1;
     }
 
@@ -4127,45 +4221,59 @@ static int controller_rpc_call(const char *socket_path,
     if (cubicle_write_all(fd, (const char *)&length_network,
                           sizeof(length_network)) < 0 ||
         cubicle_write_all(fd, request, length) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
         return -1;
     }
 
     uint32_t response_length_network = 0;
     if (read_all_fd(fd, &response_length_network,
                     sizeof(response_length_network)) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
         return -1;
     }
     uint32_t response_length = ntohl(response_length_network);
     if (response_length == 0 ||
         response_length > CUBICLE_CONTROLLER_PROXY_MAX_FRAME) {
-        close(fd);
         errno = EMSGSIZE;
         return -1;
     }
 
     char *response = calloc((size_t)response_length + 1, 1);
     if (response == NULL) {
-        close(fd);
         errno = ENOMEM;
         return -1;
     }
     if (read_all_fd(fd, response, response_length) < 0) {
         int saved_errno = errno;
         free(response);
-        close(fd);
         errno = saved_errno;
         return -1;
     }
-    close(fd);
     response[response_length] = '\0';
     *response_out = response;
     return 0;
+}
+
+static int manager_connection_controller_rpc_call(
+    manager_connection_t *connection,
+    const char *socket_path,
+    const char *method,
+    const char *params,
+    char **response_out)
+{
+    manager_controller_cache_entry_t *entry =
+        manager_controller_cache_get(connection, socket_path);
+    if (entry == NULL) {
+        return -1;
+    }
+
+    if (controller_rpc_call_fd(entry->fd, method, params, response_out) == 0) {
+        entry->last_used_ms = manager_time_ms();
+        return 0;
+    }
+
+    int saved_errno = errno;
+    manager_controller_cache_invalidate(entry);
+    errno = saved_errno;
+    return -1;
 }
 
 static int manager_proxy_controller_response(int client_fd,
@@ -6945,9 +7053,9 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         char *controller_response = NULL;
-        if (controller_rpc_call(process.control_socket, controller_method,
-                                controller_params_json,
-                                &controller_response) < 0) {
+        if (manager_connection_controller_rpc_call(
+                connection, process.control_socket, controller_method,
+                controller_params_json, &controller_response) < 0) {
             int saved_errno = errno;
             free(controller_params_json);
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -7481,14 +7589,18 @@ static int handle_manager_connection(const manager_state_t *state,
 {
     manager_connection_t connection;
     load_peer_credentials(client_fd, &connection);
+    manager_controller_cache_init(&connection);
     connection.is_tls = is_tls;
     connection.runtime = runtime;
     while (!runtime_shutdown_requested(runtime)) {
         if (handle_manager_client(state, client_fd, &connection) == 0) {
             continue;
         }
-        return errno == ECONNRESET ? 0 : -1;
+        int result = errno == ECONNRESET ? 0 : -1;
+        manager_controller_cache_close(&connection);
+        return result;
     }
+    manager_controller_cache_close(&connection);
     return 0;
 }
 
