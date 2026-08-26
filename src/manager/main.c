@@ -1,8 +1,5 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE
-#endif
 
 #include "cubicle/log.h"
 #include "cubicle/config.h"

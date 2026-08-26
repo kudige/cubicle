@@ -13,6 +13,10 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
+
 option(CUBICLE_ENABLE_COVERAGE "Build with gcov/lcov coverage instrumentation" OFF)
 option(CUBICLE_ENABLE_SANITIZERS "Build with ASan/UBSan instrumentation" OFF)
 option(CUBICLE_ENABLE_FUZZERS "Build libFuzzer fuzz targets" OFF)
