@@ -655,6 +655,7 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "scroll.line_down") == 0 ||
            strcmp(command, "scroll.top") == 0 ||
            strcmp(command, "scroll.bottom") == 0 ||
+           strcmp(command, "timemachine.toggle") == 0 ||
            strcmp(command, "menu.open") == 0 ||
            strcmp(command, "mouse.toggle") == 0 ||
            strcmp(command, "quit") == 0;
@@ -1136,6 +1137,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
                                0);
     (void)add_desk_key_binding(config, "Prefix-End", "scroll.bottom", 1, NULL,
                                0);
+    (void)add_desk_key_binding(config, "Prefix-t", "timemachine.toggle", 1,
+                               NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-q", "quit", 1, NULL, 0);
     snprintf(config->source, sizeof(config->source), "built-in defaults");
     set_all_origins(config, CUBICLE_CONFIG_SOURCE_BUILTIN,

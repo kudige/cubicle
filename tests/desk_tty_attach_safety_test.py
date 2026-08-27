@@ -2314,6 +2314,116 @@ def run_desk_scrollback_returns_to_live(desk, env):
         os.close(master_fd)
 
 
+def run_desk_timemachine_replay(desk, env):
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 80, 0, 0))
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_generate = False
+    sent_timemachine = False
+    sent_oldest = False
+    saw_history = False
+    sent_latest = False
+    saw_latest = False
+    sent_exit = False
+    sent_quit = False
+    deadline = time.time() + 6
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_generate and b"READY_TIMEMACHINE" in captured:
+                os.write(master_fd, b"g")
+                sent_generate = True
+
+            if sent_generate and not sent_timemachine and b"LIVE_TIMEMACHINE" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18t")
+                sent_timemachine = True
+
+            if sent_timemachine and not sent_oldest and b"time" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x1b[H")
+                sent_oldest = True
+
+            if sent_timemachine and not saw_history and b"HISTORY_00" in captured:
+                saw_history = True
+                captured.clear()
+                os.write(master_fd, b"\x1b[F")
+                sent_latest = True
+
+            if sent_latest and not saw_latest and b"LIVE_TIMEMACHINE" in captured:
+                saw_latest = True
+                captured.clear()
+                os.write(master_fd, b"q")
+                sent_exit = True
+
+            if sent_exit and not sent_quit and b"LIVE_TIMEMACHINE" in captured:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_generate:
+            raise AssertionError(
+                f"desk did not render time-machine generator pane: {captured!r}"
+            )
+        if not sent_timemachine:
+            raise AssertionError(
+                f"desk did not render generated time-machine live screen: {captured!r}"
+            )
+        if not saw_history:
+            if not sent_oldest:
+                raise AssertionError("desk did not show time-machine progress bar")
+            raise AssertionError(
+                f"desk did not replay oldest time-machine screen: {captured!r}"
+            )
+        if not sent_latest or not saw_latest:
+            raise AssertionError(
+                f"desk did not replay latest time-machine screen: {captured!r}"
+            )
+        if not sent_exit:
+            raise AssertionError("desk was not asked to exit time machine")
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit after time machine")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk time machine exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_cursor_overlay(desk, env, expect_cursor):
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
@@ -3172,6 +3282,41 @@ def main():
             env,
         )
         run_desk_scrollback_returns_to_live(desk, env)
+
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked(
+            [
+                cube,
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "timemachine-live",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY_TIMEMACHINE\\r\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+8\n"
+                    "generated=False\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data=os.read(0,64)\n"
+                    "        if b'g' in data and not generated:\n"
+                    "            generated=True\n"
+                    "            for i in range(40):\n"
+                    "                sys.stdout.write('HISTORY_%02d\\r\\n' % i)\n"
+                    "            sys.stdout.write('\\x1b[2J\\x1b[H LIVE_TIMEMACHINE')\n"
+                    "            sys.stdout.flush()\n"
+                    "time.sleep(1)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_timemachine_replay(desk, env)
 
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked(

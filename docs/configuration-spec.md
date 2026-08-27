@@ -266,7 +266,8 @@ bind.2=Prefix-p pane.previous
 bind.3=Prefix-Space layout.zoom
 bind.4=Prefix-PageUp scroll.page_up
 bind.5=Prefix-PageDown scroll.page_down
-bind.6=Control-G quit
+bind.6=Prefix-t timemachine.toggle
+bind.7=Control-G quit
 ```
 
 Keys:
@@ -300,7 +301,11 @@ Keys:
   `layout.zoom.horizontal`, `layout.zoom.vertical`, `layout.save`,
   `layout.load`, `bindings.show`, `scroll.page_up`, `scroll.page_down`,
   `scroll.line_up`, `scroll.line_down`, `scroll.top`, `scroll.bottom`,
-  `menu.open`, `mouse.toggle`, or `quit`.
+  `timemachine.toggle`, `menu.open`, `mouse.toggle`, or `quit`.
+  `timemachine.toggle` zooms the active pane into a replay view over the
+  session-local retained screen history. Left/Right move the progress bar by
+  10%, Home/End jump to oldest/latest, and `q`, Enter, or Escape returns to
+  live output.
   Use `none` as the command to unbind a default key. Duplicate active shortcuts
   are invalid.
 

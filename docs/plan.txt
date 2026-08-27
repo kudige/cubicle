@@ -489,6 +489,12 @@
   - scroll.page_up, scroll.page_down, scroll.line_up, scroll.line_down, scroll.top, and scroll.bottom are configurable desk commands
   - desk hides the live cursor while a pane is scrolled back and returns to live output before forwarding process input
   - terminal model and config tests cover scrollback capture/drain and configuration parsing
+- Added desk time-machine replay mode on feature/timemachine:
+  - Prefix-t runs timemachine.toggle for the active pane
+  - time-machine mode zooms the pane to full screen and restores the previous zoom state on exit
+  - Left/Right move replay position in 10% increments; Home/End jump to oldest/latest retained point
+  - a bottom progress bar shows the current replay position
+  - replay uses session-local retained screen history and returns to live output with q, Enter, or Escape
 
 ## Next
 

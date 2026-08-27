@@ -338,8 +338,14 @@ Prefix-PageUp Scroll active pane up one page
 Prefix-PageDown Scroll active pane down one page
 Prefix-Home   Scroll active pane to top
 Prefix-End    Return active pane to live output
+Prefix-t      Time-machine replay for the active pane
 Prefix-q      Quit desk, leaving cubes running
 ```
+
+Time-machine mode zooms the active pane, shows a progress bar at the bottom,
+and replays the session-local captured screen history. Left and Right move in
+10% increments, Home jumps to the oldest retained point, End jumps to the
+latest point, and `q`, Enter, or Escape returns to live mode.
 
 Pane direction selection is geometry-aware: it chooses the best pane in the
 requested direction based on current desk layout.
@@ -443,6 +449,7 @@ bind.3=Prefix-Space layout.zoom
 bind.4=Prefix-? bindings.show
 bind.5=Prefix-PageUp scroll.page_up
 bind.6=Prefix-PageDown scroll.page_down
+bind.7=Prefix-t timemachine.toggle
 ```
 
 Supported command names include:
@@ -472,6 +479,7 @@ scroll.line_up
 scroll.line_down
 scroll.top
 scroll.bottom
+timemachine.toggle
 menu.open
 mouse.toggle
 quit

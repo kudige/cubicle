@@ -568,6 +568,7 @@ bind.2=Prefix-p pane.previous
 bind.3=Prefix-Space layout.zoom
 bind.4=Prefix-PageUp scroll.page_up
 bind.5=Prefix-PageDown scroll.page_down
+bind.6=Prefix-t timemachine.toggle
 
 [client]
 manager=unix:///run/cubicle/manager.sock
@@ -619,6 +620,9 @@ use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
 `Control-Shift-Right` are accepted and displayed as canonical tmux-style names.
 `desk.scrollback_lines` controls how many session-local scrolled-off lines each
 pane keeps while the current `desk` process is running.
+`timemachine.toggle` zooms the active pane into a replay view with a bottom
+progress bar; Left/Right move by 10%, Home/End jump to oldest/latest, and `q`,
+Enter, or Escape returns to live output.
 Supported command names are
 `pane.next`, `pane.previous`, `pane.left`, `pane.right`, `pane.above`,
 `pane.below`, `layout.zoom`, `layout.resize.toggle`,
@@ -626,8 +630,8 @@ Supported command names are
 `layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
 `layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,
 `scroll.page_up`, `scroll.page_down`, `scroll.line_up`, `scroll.line_down`,
-`scroll.top`, `scroll.bottom`, `menu.open`, `mouse.toggle`, and `quit`. Use
-`none` to unbind a default shortcut.
+`scroll.top`, `scroll.bottom`, `timemachine.toggle`, `menu.open`,
+`mouse.toggle`, and `quit`. Use `none` to unbind a default shortcut.
 
 Examples:
 

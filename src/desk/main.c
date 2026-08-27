@@ -433,6 +433,8 @@ typedef struct desk_pane {
     size_t scrollback_capacity;
     size_t scrollback_offset;
     size_t scrollback_limit;
+    bool timemachine_active;
+    unsigned int timemachine_percent;
     unsigned int rows;
     unsigned int cols;
     bool ended_notice_shown;
@@ -548,6 +550,11 @@ typedef struct desk_session {
     size_t pending_input_length;
     long long pending_input_since_ms;
     bool redraw_requested;
+    bool timemachine_active;
+    int timemachine_pane_id;
+    desk_zoom_t timemachine_saved_zoom;
+    int timemachine_saved_zoom_pane_id;
+    bool timemachine_saved_zoomed;
     desk_open_menu_t open_menu;
     cubicle_desk_key_binding_t key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t key_binding_count;
@@ -3265,6 +3272,101 @@ static bool desk_scroll_active_pane(desk_session_t *session,
     return pane->scrollback_offset != before;
 }
 
+static void desk_timemachine_apply_position(desk_pane_t *pane)
+{
+    if (pane == NULL) {
+        return;
+    }
+    if (pane->timemachine_percent > 100) {
+        pane->timemachine_percent = 100;
+    }
+    pane->scrollback_offset =
+        ((100 - (size_t)pane->timemachine_percent) *
+             pane->scrollback_count +
+         50) /
+        100;
+}
+
+static void desk_timemachine_disable_pane(desk_pane_t *pane)
+{
+    if (pane == NULL) {
+        return;
+    }
+    pane->timemachine_active = false;
+    pane->timemachine_percent = 100;
+    pane->scrollback_offset = 0;
+}
+
+static bool desk_timemachine_enter(desk_session_t *session)
+{
+    desk_pane_t *pane = desk_pane_for_id(session,
+                                         session->layout.active_pane_id);
+    if (pane == NULL) {
+        return false;
+    }
+    if (session->timemachine_active &&
+        session->timemachine_pane_id == session->layout.active_pane_id) {
+        return true;
+    }
+    if (!session->timemachine_active) {
+        session->timemachine_saved_zoom = session->layout.zoom;
+        session->timemachine_saved_zoom_pane_id = session->layout.zoom_pane_id;
+        session->timemachine_saved_zoomed = session->zoomed;
+    }
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        desk_timemachine_disable_pane(&session->panes[i]);
+    }
+    session->timemachine_active = true;
+    session->timemachine_pane_id = session->layout.active_pane_id;
+    pane->timemachine_active = true;
+    pane->timemachine_percent = 100;
+    desk_timemachine_apply_position(pane);
+    session->zoomed = true;
+    session->layout.zoom = DESK_ZOOM_FULL;
+    session->layout.zoom_pane_id = session->layout.active_pane_id;
+    session->layout.resize_mode = false;
+    return true;
+}
+
+static void desk_timemachine_exit(desk_session_t *session)
+{
+    if (!session->timemachine_active) {
+        return;
+    }
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        desk_timemachine_disable_pane(&session->panes[i]);
+    }
+    session->layout.zoom = session->timemachine_saved_zoom;
+    session->layout.zoom_pane_id = session->timemachine_saved_zoom_pane_id;
+    session->zoomed = session->timemachine_saved_zoomed;
+    session->timemachine_active = false;
+    session->timemachine_pane_id = 0;
+}
+
+static bool desk_timemachine_step(desk_session_t *session, int delta)
+{
+    if (!session->timemachine_active) {
+        return false;
+    }
+    desk_pane_t *pane = desk_pane_for_id(session,
+                                         session->timemachine_pane_id);
+    if (pane == NULL) {
+        return false;
+    }
+    int percent = (int)pane->timemachine_percent + delta;
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    if ((unsigned int)percent == pane->timemachine_percent) {
+        return false;
+    }
+    pane->timemachine_percent = (unsigned int)percent;
+    desk_timemachine_apply_position(pane);
+    return true;
+}
+
 static void grid_apply_snapshot(desk_grid_t *grid,
                                 const cubicle_terminal_snapshot_t *snapshot)
 {
@@ -3430,7 +3532,8 @@ static bool desk_cursor_target(const desk_terminal_t *terminal,
     int active = session->layout.active_pane_id;
     desk_pane_t *pane = desk_pane_for_id(session, active);
     desk_rect_t rect;
-    if (pane == NULL || pane->scrollback_offset > 0 ||
+    if (pane == NULL || pane->timemachine_active ||
+        pane->scrollback_offset > 0 ||
         !pane->grid.cursor_visible ||
         !pane_content_rect_for_pane(&session->layout, terminal, active,
                                     &rect)) {
@@ -3651,6 +3754,60 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
     (void)cubeui_write_all(STDOUT_FILENO, frame, used);
 }
 
+static void desk_render_timemachine_bar(const desk_terminal_t *terminal,
+                                        const desk_pane_layout_t *panes,
+                                        int pane_id,
+                                        const desk_pane_t *pane)
+{
+    desk_rect_t rect;
+    if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect) ||
+        rect.rows <= 0 || rect.cols <= 0) {
+        return;
+    }
+
+    int prefix_cols = 6;
+    int suffix_cols = 7;
+    int bar_cols = rect.cols - prefix_cols - suffix_cols;
+    if (bar_cols < 0) {
+        bar_cols = 0;
+    }
+    int filled = bar_cols > 0
+                     ? (int)((size_t)bar_cols * pane->timemachine_percent /
+                             100)
+                     : 0;
+    char frame[4096];
+    size_t used = 0;
+    char cursor[64];
+    int row = rect.row + rect.rows;
+    int length = snprintf(cursor, sizeof(cursor), "\x1b[%d;%dH",
+                          row, rect.col + 1);
+    if (length <= 0 || (size_t)length >= sizeof(cursor)) {
+        return;
+    }
+    if (rect.cols < 13) {
+        char compact[64];
+        length = snprintf(compact, sizeof(compact),
+                          "%s\x1b[1;7m%3u%%\x1b[0m",
+                          cursor, pane->timemachine_percent);
+        if (length > 0 && (size_t)length < sizeof(compact)) {
+            (void)cubeui_write_all(STDOUT_FILENO, compact, (size_t)length);
+        }
+        return;
+    }
+    append_text(frame, sizeof(frame), &used, cursor);
+    append_text(frame, sizeof(frame), &used, "\x1b[1;7m");
+    const char *prefix = " time ";
+    append_text(frame, sizeof(frame), &used, prefix);
+    for (int col = 0; col < bar_cols && used + 4 < sizeof(frame); ++col) {
+        append_text(frame, sizeof(frame), &used, col < filled ? "=" : " ");
+    }
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), " %3u%%  \x1b[0m",
+             pane->timemachine_percent);
+    append_text(frame, sizeof(frame), &used, suffix);
+    (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+}
+
 static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                                        const desk_pane_layout_t *panes,
                                        int pane_id,
@@ -3756,6 +3913,9 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
     desk_render_pane_title(terminal, panes, pane_id,
                            scrollback_view ? title : pane_title,
                            mouse_titles);
+    if (pane->timemachine_active) {
+        desk_render_timemachine_bar(terminal, panes, pane_id, pane);
+    }
 }
 
 static void desk_render_cube_grid(const desk_terminal_t *terminal,
@@ -5256,6 +5416,9 @@ static const char *desk_command_description(const char *command)
     if (strcmp(command, "scroll.bottom") == 0) {
         return "Return active pane to live output";
     }
+    if (strcmp(command, "timemachine.toggle") == 0) {
+        return "Replay pane history";
+    }
     if (strcmp(command, "menu.open") == 0) {
         return "Open cube menu";
     }
@@ -5375,6 +5538,7 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "scroll.line_down");
     desk_add_bindings_item(session, "scroll.top");
     desk_add_bindings_item(session, "scroll.bottom");
+    desk_add_bindings_item(session, "timemachine.toggle");
     desk_add_bindings_item(session, "menu.open");
     desk_add_bindings_item(session, "mouse.toggle");
     desk_add_bindings_item(session, "quit");
@@ -6573,6 +6737,9 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
             desk_debug_log("event=scrollback_drain_failed pane=%zu process=%s errno=%d",
                            pane_index + 1, pane->process.friendly_name, errno);
             return -1;
+        }
+        if (pane->timemachine_active) {
+            desk_timemachine_apply_position(pane);
         }
         pane_changed = true;
         if (output_seen != NULL) {
@@ -8002,6 +8169,15 @@ static bool desk_execute_command(desk_session_t *session,
         }
         return true;
     }
+    if (strcmp(command, "timemachine.toggle") == 0) {
+        if (session->timemachine_active) {
+            desk_timemachine_exit(session);
+        } else {
+            (void)desk_timemachine_enter(session);
+        }
+        *layout_changed = true;
+        return true;
+    }
     bool keep_zoom = session->zoomed;
     desk_zoom_t previous_zoom = session->layout.zoom;
     cubicle_workspace_macro_info_t *macro =
@@ -8268,6 +8444,66 @@ static int flush_pending_layout_resize(desk_session_t *session,
     return 0;
 }
 
+static int handle_timemachine_input(desk_session_t *session,
+                                    desk_terminal_t *terminal,
+                                    const unsigned char *input,
+                                    size_t length,
+                                    bool *layout_changed)
+{
+    (void)terminal;
+    for (size_t i = 0; i < length; ++i) {
+        if (input[i] == 'q' || input[i] == '\r' || input[i] == '\n') {
+            desk_timemachine_exit(session);
+            *layout_changed = true;
+            return 0;
+        }
+        if (input[i] == 0x1b) {
+            if (i + 2 < length && input[i + 1] == '[') {
+                if (input[i + 2] == 'D') {
+                    if (desk_timemachine_step(session, -10)) {
+                        render_all_panes(terminal, session);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (input[i + 2] == 'C') {
+                    if (desk_timemachine_step(session, 10)) {
+                        render_all_panes(terminal, session);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (input[i + 2] == 'H') {
+                    desk_pane_t *pane =
+                        desk_pane_for_id(session, session->timemachine_pane_id);
+                    if (pane != NULL) {
+                        pane->timemachine_percent = 0;
+                        desk_timemachine_apply_position(pane);
+                        render_all_panes(terminal, session);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (input[i + 2] == 'F') {
+                    desk_pane_t *pane =
+                        desk_pane_for_id(session, session->timemachine_pane_id);
+                    if (pane != NULL) {
+                        pane->timemachine_percent = 100;
+                        desk_timemachine_apply_position(pane);
+                        render_all_panes(terminal, session);
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            desk_timemachine_exit(session);
+            *layout_changed = true;
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static int handle_input(desk_session_t *session,
                         desk_terminal_t *terminal,
                         const unsigned char *input,
@@ -8275,6 +8511,10 @@ static int handle_input(desk_session_t *session,
                         bool *layout_changed,
                         bool *quit_requested)
 {
+    if (session->timemachine_active) {
+        return handle_timemachine_input(session, terminal, input, length,
+                                        layout_changed);
+    }
     size_t start = 0;
     bool pending_resize = false;
     for (size_t i = 0; i < length; ++i) {
@@ -8871,6 +9111,7 @@ static void print_usage(FILE *stream, const char *program)
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
     fprintf(stream, "  Prefix-?      Show or edit configured key bindings.\n");
     fprintf(stream, "  Prefix-PageUp/PageDown scroll the active pane.\n");
+    fprintf(stream, "  Prefix-t      Replay active pane history in time-machine mode.\n");
 }
 
 static bool desk_string_equals_case(const char *left, const char *right)
