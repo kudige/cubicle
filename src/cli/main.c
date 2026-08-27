@@ -2009,10 +2009,39 @@ static int workspace_list(const char *manager_socket,
     return 0;
 }
 
-static int workspace_show_current(const cube_options_t *options)
+static int first_workspace_name(const char *manager_socket,
+                                char *workspace,
+                                size_t workspace_size)
+{
+    cube_rpc_response_t response;
+    if (call_manager(manager_socket, "workspace.list", "{}", &response) < 0) {
+        return -1;
+    }
+    cubicle_json_doc_t document;
+    if (cubicle_json_parse(&document, response.result_json) < 0) {
+        cleanup_rpc_response(&response);
+        return -1;
+    }
+    yyjson_val *workspaces = yyjson_obj_get(document.root, "workspaces");
+    yyjson_val *first = yyjson_arr_get(workspaces, 0);
+    if (first == NULL ||
+        json_string_field(first, "name", workspace, workspace_size) < 0) {
+        cubicle_json_cleanup(&document);
+        cleanup_rpc_response(&response);
+        errno = ENOENT;
+        return -1;
+    }
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&response);
+    return 0;
+}
+
+static int workspace_show_current(const char *manager_socket,
+                                  const cube_options_t *options)
 {
     char workspace[CUBICLE_NAME_MAX];
-    if (cubeui_read_selected_workspace(workspace, sizeof(workspace)) < 0) {
+    if (cubeui_read_selected_workspace(workspace, sizeof(workspace)) < 0 &&
+        first_workspace_name(manager_socket, workspace, sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -2071,6 +2100,7 @@ static int workspace_simple_action(const char *manager_socket,
 }
 
 static int resolve_workspace_selection(const cube_options_t *options,
+                                       const char *manager_socket,
                                        char *workspace,
                                        size_t workspace_size,
                                        int *from_selected_workspace)
@@ -2086,14 +2116,22 @@ static int resolve_workspace_selection(const cube_options_t *options,
     if (from_selected_workspace != NULL) {
         *from_selected_workspace = 1;
     }
-    return cubeui_read_selected_workspace(workspace, workspace_size);
+    if (cubeui_read_selected_workspace(workspace, workspace_size) == 0) {
+        return 0;
+    }
+    if (from_selected_workspace != NULL) {
+        *from_selected_workspace = 0;
+    }
+    return first_workspace_name(manager_socket, workspace, workspace_size);
 }
 
 static int resolve_workspace_argument(const cube_options_t *options,
+                                      const char *manager_socket,
                                       char *workspace,
                                       size_t workspace_size)
 {
-    return resolve_workspace_selection(options, workspace, workspace_size,
+    return resolve_workspace_selection(options, manager_socket, workspace,
+                                       workspace_size,
                                        NULL);
 }
 
@@ -2142,6 +2180,7 @@ static int split_qualified_process_ref(const char *input,
 }
 
 static int resolve_process_ref(const cube_options_t *options,
+                               const char *manager_socket,
                                const char *input,
                                int require_workspace,
                                cube_process_ref_t *ref)
@@ -2170,7 +2209,7 @@ static int resolve_process_ref(const cube_options_t *options,
         return 2;
     }
 
-    if (resolve_workspace_selection(options, ref->workspace,
+    if (resolve_workspace_selection(options, manager_socket, ref->workspace,
                                     sizeof(ref->workspace),
                                     &ref->from_selected_workspace) == 0) {
         ref->has_workspace = 1;
@@ -2234,7 +2273,7 @@ static int command_workspace(const char *manager_socket,
     int remaining = argc - command_index - 1;
     char **arguments = &argv[command_index + 1];
     if (remaining == 0) {
-        return workspace_show_current(options);
+        return workspace_show_current(manager_socket, options);
     }
     if (remaining == 1 && strcmp(arguments[0], "list") == 0) {
         return workspace_list(manager_socket, options);
@@ -2350,7 +2389,8 @@ static int command_access(const char *manager_socket,
     char **arguments = &argv[command_index + 1];
     char workspace[CUBICLE_NAME_MAX];
     int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+    if (resolve_workspace_selection(options, manager_socket, workspace,
+                                    sizeof(workspace),
                                     &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
@@ -2743,7 +2783,7 @@ static int collect_process_pattern_matches(const char *manager_socket,
 
     if (!qualified) {
         int from_selected_workspace = 0;
-        if (resolve_workspace_selection(options, ref.workspace,
+        if (resolve_workspace_selection(options, manager_socket, ref.workspace,
                                         sizeof(ref.workspace),
                                         &from_selected_workspace) < 0) {
             fprintf(stderr, "cube: no workspace selected\n");
@@ -2822,7 +2862,8 @@ static int process_list_selected_workspace(const char *manager_socket,
 {
     char workspace[CUBICLE_NAME_MAX];
     int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+    if (resolve_workspace_selection(options, manager_socket, workspace,
+                                    sizeof(workspace),
                                     &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
@@ -3221,7 +3262,8 @@ static int process_cleanup(const char *manager_socket,
     }
 
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    if (resolve_workspace_argument(options, manager_socket, workspace,
+                                   sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -3377,7 +3419,8 @@ static int process_inspect(const char *manager_socket,
                            const char *process_name)
 {
     cube_process_ref_t ref;
-    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    int ref_result = resolve_process_ref(options, manager_socket, process_name,
+                                         1, &ref);
     if (ref_result != 0) {
         return ref_result;
     }
@@ -3511,7 +3554,8 @@ static int resolve_process_metadata(const char *manager_socket,
                                     size_t mode_size)
 {
     cube_process_ref_t ref;
-    int ref_result = resolve_process_ref(options, process_name, 0, &ref);
+    int ref_result = resolve_process_ref(options, manager_socket, process_name,
+                                         0, &ref);
     if (ref_result != 0) {
         return ref_result;
     }
@@ -3956,7 +4000,8 @@ static int process_kill_all(const char *manager_socket,
                             int cleanup_after_kill)
 {
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    if (resolve_workspace_argument(options, manager_socket, workspace,
+                                   sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -4222,7 +4267,8 @@ static int process_update(const char *manager_socket,
     }
 
     cube_process_ref_t ref;
-    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    int ref_result = resolve_process_ref(options, manager_socket, process_name,
+                                         1, &ref);
     if (ref_result != 0) {
         return ref_result;
     }
@@ -4471,7 +4517,8 @@ static int process_restart(const char *manager_socket,
                            const char *process_name)
 {
     cube_process_ref_t ref;
-    int ref_result = resolve_process_ref(options, process_name, 1, &ref);
+    int ref_result = resolve_process_ref(options, manager_socket, process_name,
+                                         1, &ref);
     if (ref_result != 0) {
         return ref_result;
     }
@@ -5068,7 +5115,8 @@ static int process_events(const char *manager_socket,
         return 2;
     }
     char workspace[CUBICLE_NAME_MAX];
-    if (resolve_workspace_argument(options, workspace, sizeof(workspace)) < 0) {
+    if (resolve_workspace_argument(options, manager_socket, workspace,
+                                   sizeof(workspace)) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;
     }
@@ -6110,7 +6158,8 @@ static int process_run(const char *manager_socket,
     }
     char workspace[CUBICLE_NAME_MAX];
     int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, workspace, sizeof(workspace),
+    if (resolve_workspace_selection(options, manager_socket, workspace,
+                                    sizeof(workspace),
                                     &from_selected_workspace) < 0) {
         fprintf(stderr, "cube: no workspace selected\n");
         return 1;

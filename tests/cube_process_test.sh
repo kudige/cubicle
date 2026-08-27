@@ -886,11 +886,12 @@ XDG_STATE_HOME="$tmpdir/empty-state" CUBICLE_MANAGER_SOCKET="$socket_path" \
     "$CUBE" ps >"$tmpdir/no-workspace.out" 2>"$tmpdir/no-workspace.err"
 status=$?
 set -e
-if [ "$status" -ne 1 ]; then
-    echo "cube ps without selected workspace should exit 1, got $status" >&2
+if [ "$status" -ne 0 ]; then
+    echo "cube ps without selected workspace should use first workspace, got $status" >&2
     exit 1
 fi
-grep -q 'no workspace selected' "$tmpdir/no-workspace.err"
+grep -q '^Workspace Project A$' "$tmpdir/no-workspace.out"
+grep -q '^NAME	MODE	STATE$' "$tmpdir/no-workspace.out"
 
 set +e
 cube inspect >"$tmpdir/inspect-missing.out" 2>"$tmpdir/inspect-missing.err"

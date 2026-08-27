@@ -2306,6 +2306,28 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
     return fclose(file);
 }
 
+static void desk_format_workspace_reference(const cubicle_workspace_info_t *workspace,
+                                            const char *remote_name,
+                                            char *buffer,
+                                            size_t buffer_size)
+{
+    if (remote_name != NULL && remote_name[0] != '\0') {
+        snprintf(buffer, buffer_size, "%s@%s", workspace->name, remote_name);
+        return;
+    }
+    snprintf(buffer, buffer_size, "%s", workspace->name);
+}
+
+static void desk_store_default_workspace(desk_session_t *session)
+{
+    char workspace_ref[CUBICLE_ENDPOINT_URI_MAX];
+    desk_format_workspace_reference(&session->workspace, session->remote_name,
+                                    workspace_ref, sizeof(workspace_ref));
+    if (cubeui_store_desk_workspace(workspace_ref) == 0) {
+        cubeui_clear_desk_layout();
+    }
+}
+
 static int desk_load_named_layout_file(const char *path,
                                        desk_pane_layout_t *layout,
                                        desk_named_layout_pane_t panes[32])
@@ -3870,6 +3892,31 @@ static bool process_belongs_to_workspace(const cubicle_process_info_t *process,
            strcmp(process->workspace_id, workspace_id) == 0;
 }
 
+static int desk_first_workspace_name(desk_session_t *session,
+                                     char *workspace_name,
+                                     size_t workspace_name_size)
+{
+    cubicle_workspace_info_t *workspaces = NULL;
+    size_t workspace_count = 0;
+    cubicle_page_info_t page;
+    memset(&page, 0, sizeof(page));
+    cubicle_error_code_t code = cubicle_workspace_list(
+        session->manager, NULL, &workspaces, &workspace_count, &page);
+    if (code != CUBICLE_OK || workspace_count == 0) {
+        cubicle_workspace_list_free(workspaces);
+        errno = ENOENT;
+        return -1;
+    }
+    int length = snprintf(workspace_name, workspace_name_size, "%s",
+                          workspaces[0].name);
+    cubicle_workspace_list_free(workspaces);
+    if (length < 0 || (size_t)length >= workspace_name_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 static int resolve_workspace(desk_session_t *session,
                              const char *workspace_arg,
                              char *error,
@@ -3881,11 +3928,15 @@ static int resolve_workspace(desk_session_t *session,
         snprintf(workspace_name, sizeof(workspace_name), "%s", workspace_arg);
     } else {
         if (cubeui_read_selected_workspace(workspace_name,
-                                           sizeof(workspace_name)) < 0) {
-            snprintf(error, error_size, "no workspace selected");
-            return 1;
+                                           sizeof(workspace_name)) == 0) {
+            from_selected = true;
+        } else {
+            if (desk_first_workspace_name(session, workspace_name,
+                                          sizeof(workspace_name)) < 0) {
+                snprintf(error, error_size, "no workspace selected");
+                return 1;
+            }
         }
-        from_selected = true;
     }
 
     cubicle_error_code_t code = cubicle_workspace_get(
@@ -6909,6 +6960,7 @@ static int desk_open_menu_select(desk_session_t *session,
                      "failed to save layout");
             return 0;
         }
+        (void)cubeui_store_desk_layout(name);
         desk_close_open_menu(session);
         if (!session->mouse_titles) {
             desk_menu_disable_mouse();
@@ -6945,6 +6997,7 @@ static int desk_open_menu_select(desk_session_t *session,
             snprintf(menu->status, sizeof(menu->status), "%s", error);
             return 0;
         }
+        (void)cubeui_store_desk_layout(selected.layout_name);
         desk_close_open_menu(session);
         if (!session->mouse_titles) {
             desk_menu_disable_mouse();
@@ -7199,6 +7252,7 @@ static int desk_open_workspace_from_menu(desk_session_t *session,
     if (use_item_manager) {
         cubicle_client_disconnect(old_manager);
     }
+    desk_store_default_workspace(session);
     (void)temporary_manager;
     desk_close_open_menu(session);
     desk_menu_disable_mouse();
@@ -8353,12 +8407,27 @@ static int desk_run_workspace(const char *workspace_arg,
     session.terminal_size_dirty = true;
 
     const char *effective_workspace_arg = workspace_arg;
+    char startup_workspace[CUBICLE_ENDPOINT_URI_MAX];
+    char startup_layout_name[CUBICLE_NAME_MAX];
+    bool startup_has_layout = false;
+    bool store_startup_workspace_default =
+        workspace_arg != NULL && workspace_arg[0] != '\0';
+    if (workspace_arg == NULL || workspace_arg[0] == '\0') {
+        if (cubeui_read_desk_layout(startup_layout_name,
+                                    sizeof(startup_layout_name)) == 0 &&
+            layout_name_is_safe(startup_layout_name)) {
+            startup_has_layout = true;
+        } else if (cubeui_read_desk_workspace(startup_workspace,
+                                              sizeof(startup_workspace)) == 0) {
+            effective_workspace_arg = startup_workspace;
+        }
+    }
     char remote_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char remote_workspace[CUBICLE_NAME_MAX];
     char remote_name[CUBICLE_NAME_MAX];
-    if (workspace_arg != NULL && workspace_arg[0] != '\0') {
+    if (effective_workspace_arg != NULL && effective_workspace_arg[0] != '\0') {
         int remote_result = desk_split_remote_workspace(
-            workspace_arg, remote_workspace, remote_name);
+            effective_workspace_arg, remote_workspace, remote_name);
         if (remote_result < 0) {
             fprintf(stderr, "desk: invalid remote workspace reference\n");
             return 2;
@@ -8440,11 +8509,11 @@ static int desk_run_workspace(const char *workspace_arg,
                  session.workspace.id);
         result = desk_load_workspace_macros(&session, error, sizeof(error));
     }
-    if (result == 0) {
+    if (result == 0 && !startup_has_layout) {
         desk_crash_set_phase("load-processes");
         result = load_workspace_processes(&session, error, sizeof(error));
     }
-    if (result == 0) {
+    if (result == 0 && !startup_has_layout) {
         desk_crash_set_phase("load-layout");
         result = load_or_create_layout(&session, error, sizeof(error));
     }
@@ -8472,24 +8541,40 @@ static int desk_run_workspace(const char *workspace_arg,
     (void)sigaction(SIGWINCH, &action, NULL);
     (void)sigaction(SIGTERM, &action, NULL);
 
-    bool initial_size_changed = false;
-    desk_crash_set_phase("initial-resize");
-    if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
-        cubeui_terminal_leave_alt_raw(&terminal);
-        desk_debug_log("event=initial_resize_failed errno=%d", errno);
-        fprintf(stderr, "desk: terminal too small for desk\n");
-        desk_session_cleanup(&session);
-        return 2;
+    if (startup_has_layout) {
+        desk_crash_set_phase("load-startup-layout");
+        if (desk_apply_named_layout(&session, &terminal, startup_layout_name,
+                                    error, sizeof(error)) < 0) {
+            cubeui_terminal_leave_alt_raw(&terminal);
+            desk_debug_log("event=startup_layout_failed layout=%s message=\"%s\"",
+                           startup_layout_name, error);
+            fprintf(stderr, "desk: %s\n", error);
+            desk_session_cleanup(&session);
+            return 2;
+        }
+    } else {
+        bool initial_size_changed = false;
+        desk_crash_set_phase("initial-resize");
+        if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
+            cubeui_terminal_leave_alt_raw(&terminal);
+            desk_debug_log("event=initial_resize_failed errno=%d", errno);
+            fprintf(stderr, "desk: terminal too small for desk\n");
+            desk_session_cleanup(&session);
+            return 2;
+        }
+        desk_crash_set_phase("attach-panes");
+        result = attach_all_panes(&session, error, sizeof(error));
+        if (result != 0) {
+            cubeui_terminal_leave_alt_raw(&terminal);
+            desk_debug_log("event=attach_all_failed result=%d message=\"%s\"",
+                           result, error);
+            fprintf(stderr, "desk: %s\n", error);
+            desk_session_cleanup(&session);
+            return result;
+        }
     }
-    desk_crash_set_phase("attach-panes");
-    result = attach_all_panes(&session, error, sizeof(error));
-    if (result != 0) {
-        cubeui_terminal_leave_alt_raw(&terminal);
-        desk_debug_log("event=attach_all_failed result=%d message=\"%s\"",
-                       result, error);
-        fprintf(stderr, "desk: %s\n", error);
-        desk_session_cleanup(&session);
-        return result;
+    if (store_startup_workspace_default) {
+        desk_store_default_workspace(&session);
     }
     render_all_panes(&terminal, &session);
     if (session.mouse_titles) {

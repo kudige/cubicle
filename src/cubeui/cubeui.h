@@ -13,6 +13,12 @@ int cubeui_selected_workspace_path(char path[CUBICLE_PATH_MAX]);
 int cubeui_read_selected_workspace(char *buffer, size_t buffer_size);
 int cubeui_store_selected_workspace(const char *workspace_name);
 void cubeui_clear_selected_workspace_if_matches(const char *workspace);
+int cubeui_read_desk_workspace(char *buffer, size_t buffer_size);
+int cubeui_store_desk_workspace(const char *workspace_name);
+void cubeui_clear_desk_workspace_if_matches(const char *workspace);
+int cubeui_read_desk_layout(char *buffer, size_t buffer_size);
+int cubeui_store_desk_layout(const char *layout_name);
+void cubeui_clear_desk_layout(void);
 
 const char *cubeui_resolve_manager_endpoint(
     const char *override_endpoint,

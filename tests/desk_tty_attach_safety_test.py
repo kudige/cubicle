@@ -321,6 +321,22 @@ def workspace_layout_file(env, workspace_id):
     )
 
 
+def desk_default_workspace_file(env):
+    return os.path.join(env["XDG_STATE_HOME"], "cubicle", "desk-workspace")
+
+
+def desk_default_layout_file(env):
+    return os.path.join(env["XDG_STATE_HOME"], "cubicle", "desk-layout")
+
+
+def clear_desk_defaults(env):
+    for path in (desk_default_workspace_file(env), desk_default_layout_file(env)):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def run_desk_three_pane_default_layout(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -689,12 +705,16 @@ def run_desk_save_and_load_layout(desk, env):
             raise AssertionError(f"desk did not show saved layout entry: {captured!r}")
         if not sent_quit:
             raise AssertionError("desk was not asked to quit after loading layout")
+        with open(desk_default_layout_file(env), "r", encoding="utf-8") as handle:
+            if handle.read().strip() != "saved-alpha":
+                raise AssertionError("desk did not persist loaded layout")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
             raise AssertionError(
                 f"desk exited with {proc.returncode}; output={captured!r}"
             )
+        clear_desk_defaults(env)
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -1704,12 +1724,18 @@ def run_desk_enter_workspace_switch(desk, cube, env):
             raise AssertionError(f"desk open menu did not show enter workspace: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"entered workspace pane did not receive input: {captured!r}")
+        with open(desk_default_workspace_file(env), "r", encoding="utf-8") as handle:
+            if handle.read().strip() != "DeskEnter":
+                raise AssertionError("desk did not persist entered workspace")
+        if os.path.exists(desk_default_layout_file(env)):
+            raise AssertionError("desk workspace switch should clear default layout")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
             raise AssertionError(
                 f"desk exited with {proc.returncode}; output={captured!r}"
             )
+        clear_desk_defaults(env)
     finally:
         os.close(master_fd)
 
@@ -1793,12 +1819,18 @@ def run_desk_click_workspace_switch(desk, cube, env):
             raise AssertionError(f"desk open menu did not expose clickable workspace: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"clicked workspace did not replace desk session: {captured!r}")
+        with open(desk_default_workspace_file(env), "r", encoding="utf-8") as handle:
+            if handle.read().strip() != "DeskClick":
+                raise AssertionError("desk did not persist clicked workspace")
+        if os.path.exists(desk_default_layout_file(env)):
+            raise AssertionError("desk workspace switch should clear default layout")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
             raise AssertionError(
                 f"desk exited with {proc.returncode}; output={captured!r}"
             )
+        clear_desk_defaults(env)
     finally:
         os.close(master_fd)
 

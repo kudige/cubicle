@@ -149,8 +149,13 @@ cube workspace delete OldProject
 ```
 
 The selected workspace is stored client-side under the user's Cubicle state
-area. If no workspace is selected, commands such as `cube ps` exit with
-`cube: no workspace selected`.
+area. If no workspace is selected, workspace-scoped commands use the first
+workspace returned by the manager.
+
+`desk` keeps its own explicit default workspace and layout. With no explicit
+desk default, it follows the selected `cube` workspace; once a named desk layout
+is saved or loaded, no-argument `desk` starts from that layout until another
+workspace is opened in desk.
 
 ## Running Processes
 

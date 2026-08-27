@@ -57,10 +57,23 @@ int cubeui_selected_workspace_path(char path[CUBICLE_PATH_MAX])
     return length < 0 || length >= CUBICLE_PATH_MAX ? -1 : 0;
 }
 
-int cubeui_read_selected_workspace(char *buffer, size_t buffer_size)
+static int cubeui_state_file_path(const char *name,
+                                  char path[CUBICLE_PATH_MAX])
+{
+    char state_dir[CUBICLE_PATH_MAX];
+    if (cubeui_state_dir(state_dir) < 0) {
+        return -1;
+    }
+    int length = snprintf(path, CUBICLE_PATH_MAX, "%s/%s", state_dir, name);
+    return length < 0 || length >= CUBICLE_PATH_MAX ? -1 : 0;
+}
+
+static int cubeui_read_state_value(const char *name,
+                                   char *buffer,
+                                   size_t buffer_size)
 {
     char path[CUBICLE_PATH_MAX];
-    if (cubeui_selected_workspace_path(path) < 0) {
+    if (cubeui_state_file_path(name, path) < 0) {
         return -1;
     }
     FILE *file = fopen(path, "r");
@@ -76,17 +89,22 @@ int cubeui_read_selected_workspace(char *buffer, size_t buffer_size)
     return buffer[0] == '\0' ? -1 : 0;
 }
 
-int cubeui_store_selected_workspace(const char *workspace_name)
+static int cubeui_store_state_value(const char *name,
+                                    const char *value,
+                                    size_t max_length)
 {
     char path[CUBICLE_PATH_MAX];
-    if (cubeui_selected_workspace_path(path) < 0 ||
-        ensure_parent_dir(path) < 0) {
+    if (cubeui_state_file_path(name, path) < 0 || ensure_parent_dir(path) < 0) {
         return -1;
     }
 
-    char line[CUBICLE_NAME_MAX + 2];
-    int length = snprintf(line, sizeof(line), "%s\n", workspace_name);
+    char line[CUBICLE_PATH_MAX];
+    int length = snprintf(line, sizeof(line), "%s\n", value);
     if (length < 0 || (size_t)length >= sizeof(line)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if ((size_t)length > max_length + 1) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -100,6 +118,26 @@ int cubeui_store_selected_workspace(const char *workspace_name)
     return result;
 }
 
+static void cubeui_clear_state_value(const char *name)
+{
+    char path[CUBICLE_PATH_MAX];
+    if (cubeui_state_file_path(name, path) < 0) {
+        return;
+    }
+    (void)unlink(path);
+}
+
+int cubeui_read_selected_workspace(char *buffer, size_t buffer_size)
+{
+    return cubeui_read_state_value("current-workspace", buffer, buffer_size);
+}
+
+int cubeui_store_selected_workspace(const char *workspace_name)
+{
+    return cubeui_store_state_value("current-workspace", workspace_name,
+                                    CUBICLE_NAME_MAX);
+}
+
 void cubeui_clear_selected_workspace_if_matches(const char *workspace)
 {
     char current[CUBICLE_NAME_MAX];
@@ -111,4 +149,42 @@ void cubeui_clear_selected_workspace_if_matches(const char *workspace)
         return;
     }
     (void)unlink(path);
+}
+
+int cubeui_read_desk_workspace(char *buffer, size_t buffer_size)
+{
+    return cubeui_read_state_value("desk-workspace", buffer, buffer_size);
+}
+
+int cubeui_store_desk_workspace(const char *workspace_name)
+{
+    return cubeui_store_state_value("desk-workspace", workspace_name,
+                                    CUBICLE_ENDPOINT_URI_MAX);
+}
+
+void cubeui_clear_desk_workspace_if_matches(const char *workspace)
+{
+    char current[CUBICLE_ENDPOINT_URI_MAX];
+    if (workspace == NULL ||
+        cubeui_read_desk_workspace(current, sizeof(current)) < 0 ||
+        strcmp(current, workspace) != 0) {
+        return;
+    }
+    cubeui_clear_state_value("desk-workspace");
+}
+
+int cubeui_read_desk_layout(char *buffer, size_t buffer_size)
+{
+    return cubeui_read_state_value("desk-layout", buffer, buffer_size);
+}
+
+int cubeui_store_desk_layout(const char *layout_name)
+{
+    return cubeui_store_state_value("desk-layout", layout_name,
+                                    CUBICLE_NAME_MAX);
+}
+
+void cubeui_clear_desk_layout(void)
+{
+    cubeui_clear_state_value("desk-layout");
 }
