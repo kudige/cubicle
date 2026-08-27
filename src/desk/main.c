@@ -438,6 +438,14 @@ typedef struct desk_pane {
     bool ended_notice_shown;
 } desk_pane_t;
 
+typedef struct desk_named_layout_pane {
+    char process_id[CUBICLE_ID_STRING_LENGTH];
+    char workspace_id[CUBICLE_ID_STRING_LENGTH];
+    char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
+    bool manager_relay_attachments;
+} desk_named_layout_pane_t;
+
 typedef enum desk_menu_level {
     DESK_MENU_CLOSED = 0,
     DESK_MENU_ROOT,
@@ -2255,8 +2263,32 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
     fprintf(file, "desk-named-layout-v1\n");
     fprintf(file, "workspace %s\n", session->workspace.id);
     for (size_t i = 0; i < session->pane_count; ++i) {
-        if (session->panes[i].process.id[0] != '\0') {
-            fprintf(file, "pane %zu %s\n", i + 1, session->panes[i].process.id);
+        desk_pane_t *pane = &session->panes[i];
+        if (pane->process.id[0] != '\0') {
+            const char *workspace_id =
+                pane->process.workspace_id[0] != '\0'
+                    ? pane->process.workspace_id
+                    : session->workspace.id;
+            const char *pane_manager_uri =
+                pane->manager != NULL ? pane->manager_uri
+                                      : session->manager_uri;
+            const char *pane_remote_name =
+                pane->remote_name[0] != '\0' ? pane->remote_name
+                                             : session->remote_name;
+            bool save_manager_uri =
+                pane_remote_name[0] != '\0' ||
+                (pane->manager != NULL && pane_manager_uri[0] != '\0' &&
+                 strcmp(pane_manager_uri, session->manager_uri) != 0);
+            bool relay_attachments =
+                pane->manager != NULL ? pane->manager_relay_attachments
+                                      : session->manager_relay_attachments;
+            fprintf(file, "pane %zu %s %s %d %s %s\n", i + 1,
+                    pane->process.id, workspace_id,
+                    relay_attachments ? 1 : 0,
+                    pane_remote_name[0] != '\0' ? pane_remote_name : "-",
+                    save_manager_uri && pane_manager_uri[0] != '\0'
+                        ? pane_manager_uri
+                        : "-");
         }
     }
     desk_zoom_t saved_zoom = session->layout.zoom;
@@ -2276,7 +2308,7 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
 
 static int desk_load_named_layout_file(const char *path,
                                        desk_pane_layout_t *layout,
-                                       char process_ids[32][CUBICLE_ID_STRING_LENGTH])
+                                       desk_named_layout_pane_t panes[32])
 {
     FILE *file = fopen(path, "r");
     if (file == NULL) {
@@ -2285,9 +2317,9 @@ static int desk_load_named_layout_file(const char *path,
 
     desk_pane_layout_t loaded;
     pane_layout_init_loaded(&loaded);
-    memset(process_ids, 0, 32 * CUBICLE_ID_STRING_LENGTH);
+    memset(panes, 0, 32 * sizeof(panes[0]));
 
-    char line[256];
+    char line[1024];
     if (fgets(line, sizeof(line), file) == NULL ||
         strcmp(line, "desk-named-layout-v1\n") != 0) {
         fclose(file);
@@ -2302,14 +2334,38 @@ static int desk_load_named_layout_file(const char *path,
             continue;
         }
         int pane_id = 0;
-        if (sscanf(line, "pane %d %32s", &pane_id, value) == 2) {
+        char process_id[CUBICLE_ID_STRING_LENGTH] = "";
+        char workspace_id[CUBICLE_ID_STRING_LENGTH] = "";
+        char remote_name[CUBICLE_NAME_MAX] = "";
+        char manager_uri[CUBICLE_ENDPOINT_URI_MAX] = "";
+        int relay_attachments = 0;
+        int matched = sscanf(line, "pane %d %32s %32s %d %255s %511s",
+                             &pane_id, process_id, workspace_id,
+                             &relay_attachments, remote_name, manager_uri);
+        if (matched >= 2) {
             if (pane_id <= 0 || pane_id > 32) {
                 fclose(file);
                 errno = EINVAL;
                 return -1;
             }
-            snprintf(process_ids[pane_id - 1], CUBICLE_ID_STRING_LENGTH,
-                     "%s", value);
+            desk_named_layout_pane_t *pane = &panes[pane_id - 1];
+            snprintf(pane->process_id, sizeof(pane->process_id), "%s",
+                     process_id);
+            if (matched >= 3 && strcmp(workspace_id, "-") != 0) {
+                snprintf(pane->workspace_id, sizeof(pane->workspace_id), "%s",
+                         workspace_id);
+            }
+            if (matched >= 4) {
+                pane->manager_relay_attachments = relay_attachments != 0;
+            }
+            if (matched >= 5 && strcmp(remote_name, "-") != 0) {
+                snprintf(pane->remote_name, sizeof(pane->remote_name), "%s",
+                         remote_name);
+            }
+            if (matched >= 6 && strcmp(manager_uri, "-") != 0) {
+                snprintf(pane->manager_uri, sizeof(pane->manager_uri), "%s",
+                         manager_uri);
+            }
             continue;
         }
         if (pane_layout_parse_line(&loaded, line) < 0) {
@@ -5767,8 +5823,8 @@ static int desk_apply_named_layout(desk_session_t *session,
     }
 
     desk_pane_layout_t loaded_layout;
-    char process_ids[32][CUBICLE_ID_STRING_LENGTH];
-    if (desk_load_named_layout_file(path, &loaded_layout, process_ids) < 0) {
+    desk_named_layout_pane_t pane_targets[32];
+    if (desk_load_named_layout_file(path, &loaded_layout, pane_targets) < 0) {
         snprintf(error, error_size, "failed to load layout");
         return -1;
     }
@@ -5789,23 +5845,63 @@ static int desk_apply_named_layout(desk_session_t *session,
     }
 
     cubicle_process_info_t processes[32];
+    cubicle_workspace_info_t workspaces[32];
+    cubicle_client_t *pane_managers[32];
     memset(processes, 0, sizeof(processes));
+    memset(workspaces, 0, sizeof(workspaces));
+    memset(pane_managers, 0, sizeof(pane_managers));
     for (int pane_id = 1; pane_id <= max_pane_id; ++pane_id) {
         if (!leaf_panes[pane_id - 1]) {
             continue;
         }
-        if (process_ids[pane_id - 1][0] == '\0') {
+        desk_named_layout_pane_t *target = &pane_targets[pane_id - 1];
+        if (target->process_id[0] == '\0') {
             snprintf(error, error_size, "layout is missing a cube for pane %d",
                      pane_id);
+            for (int i = 0; i < 32; ++i) {
+                cubicle_client_disconnect(pane_managers[i]);
+            }
             return -1;
         }
+        const char *workspace_id = target->workspace_id[0] != '\0'
+                                       ? target->workspace_id
+                                       : session->workspace.id;
+        cubicle_client_t *manager = session->manager;
+        bool use_pane_manager =
+            target->manager_uri[0] != '\0' &&
+            strcmp(target->manager_uri, session->manager_uri) != 0;
+        if (use_pane_manager) {
+            cubicle_error_code_t connect_code =
+                cubicle_client_connect_uri(target->manager_uri, NULL,
+                                           &pane_managers[pane_id - 1]);
+            if (connect_code != CUBICLE_OK) {
+                snprintf(error, error_size,
+                         "failed to connect to manager for pane %d", pane_id);
+                for (int i = 0; i < 32; ++i) {
+                    cubicle_client_disconnect(pane_managers[i]);
+                }
+                return -1;
+            }
+            manager = pane_managers[pane_id - 1];
+        }
         cubicle_error_code_t code = cubicle_process_get(
-            session->manager, process_ids[pane_id - 1], session->workspace.id,
+            manager, target->process_id, workspace_id,
             &processes[pane_id - 1]);
         if (code != CUBICLE_OK || !process_is_attachable(&processes[pane_id - 1])) {
             snprintf(error, error_size, "cube for pane %d is not attachable",
                      pane_id);
+            for (int i = 0; i < 32; ++i) {
+                cubicle_client_disconnect(pane_managers[i]);
+            }
             return -1;
+        }
+        if (cubicle_workspace_get(manager, workspace_id,
+                                  &workspaces[pane_id - 1]) != CUBICLE_OK) {
+            snprintf(workspaces[pane_id - 1].id,
+                     sizeof(workspaces[pane_id - 1].id), "%s", workspace_id);
+            snprintf(workspaces[pane_id - 1].name,
+                     sizeof(workspaces[pane_id - 1].name), "%s",
+                     workspace_id);
         }
     }
 
@@ -5818,13 +5914,29 @@ static int desk_apply_named_layout(desk_session_t *session,
     session->pane_count = (size_t)max_pane_id;
     for (int pane_id = 1; pane_id <= max_pane_id; ++pane_id) {
         if (leaf_panes[pane_id - 1]) {
-            session->panes[pane_id - 1].process = processes[pane_id - 1];
+            desk_pane_t *pane = &session->panes[pane_id - 1];
+            desk_named_layout_pane_t *target = &pane_targets[pane_id - 1];
+            pane->process = processes[pane_id - 1];
+            if (pane_managers[pane_id - 1] != NULL) {
+                pane->manager = pane_managers[pane_id - 1];
+                pane_managers[pane_id - 1] = NULL;
+                snprintf(pane->manager_uri, sizeof(pane->manager_uri), "%s",
+                         target->manager_uri);
+                pane->manager_relay_attachments =
+                    target->manager_relay_attachments;
+            }
+            desk_set_pane_display_context(session, pane,
+                                          &workspaces[pane_id - 1],
+                                          target->remote_name);
         }
     }
 
     bool changed = false;
     if (resize_all_panes(session, terminal, &changed) < 0 ||
         attach_all_panes(session, error, error_size) != 0) {
+        for (int i = 0; i < 32; ++i) {
+            cubicle_client_disconnect(pane_managers[i]);
+        }
         return -1;
     }
     desk_apply_pane_labels(session);
