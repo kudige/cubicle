@@ -408,6 +408,17 @@ typedef struct desk_scrollback_line {
     desk_cell_t *cells;
 } desk_scrollback_line_t;
 
+#define DESK_TIMEMACHINE_FRAME_MAX 101
+
+typedef struct desk_frame {
+    desk_cell_t *cells;
+    int rows;
+    int cols;
+    int cursor_row;
+    int cursor_col;
+    bool cursor_visible;
+} desk_frame_t;
+
 typedef struct desk_attachment {
     cubicle_client_t *manager;
     cubicle_attachment_t *attachment;
@@ -435,6 +446,9 @@ typedef struct desk_pane {
     size_t scrollback_limit;
     bool timemachine_active;
     unsigned int timemachine_percent;
+    desk_frame_t timemachine_frames[DESK_TIMEMACHINE_FRAME_MAX];
+    size_t timemachine_frame_head;
+    size_t timemachine_frame_count;
     unsigned int rows;
     unsigned int cols;
     bool ended_notice_shown;
@@ -3139,6 +3153,120 @@ static void desk_scrollback_clear(desk_pane_t *pane)
     pane->scrollback_offset = 0;
 }
 
+static void desk_frame_cleanup(desk_frame_t *frame)
+{
+    if (frame == NULL) {
+        return;
+    }
+    free(frame->cells);
+    memset(frame, 0, sizeof(*frame));
+}
+
+static bool desk_frame_matches_grid(const desk_frame_t *frame,
+                                    const desk_grid_t *grid)
+{
+    if (frame == NULL || grid == NULL || frame->cells == NULL ||
+        grid->cells == NULL || frame->rows != grid->rows ||
+        frame->cols != grid->cols ||
+        frame->cursor_row != grid->cursor_row ||
+        frame->cursor_col != grid->cursor_col ||
+        frame->cursor_visible != grid->cursor_visible) {
+        return false;
+    }
+    size_t count = (size_t)grid->rows * (size_t)grid->cols;
+    return memcmp(frame->cells, grid->cells, count * sizeof(*grid->cells)) ==
+           0;
+}
+
+static int desk_frame_copy_from_grid(desk_frame_t *frame,
+                                     const desk_grid_t *grid)
+{
+    if (frame == NULL || grid == NULL || grid->cells == NULL ||
+        grid->rows <= 0 || grid->cols <= 0) {
+        return 0;
+    }
+    desk_frame_cleanup(frame);
+    size_t count = (size_t)grid->rows * (size_t)grid->cols;
+    frame->cells = malloc(count * sizeof(*frame->cells));
+    if (frame->cells == NULL) {
+        return -1;
+    }
+    memcpy(frame->cells, grid->cells, count * sizeof(*frame->cells));
+    frame->rows = grid->rows;
+    frame->cols = grid->cols;
+    frame->cursor_row = grid->cursor_row;
+    frame->cursor_col = grid->cursor_col;
+    frame->cursor_visible = grid->cursor_visible;
+    return 0;
+}
+
+static void desk_timemachine_clear_frames(desk_pane_t *pane)
+{
+    if (pane == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < DESK_TIMEMACHINE_FRAME_MAX; ++i) {
+        desk_frame_cleanup(&pane->timemachine_frames[i]);
+    }
+    pane->timemachine_frame_head = 0;
+    pane->timemachine_frame_count = 0;
+}
+
+static const desk_frame_t *desk_timemachine_latest_frame(desk_pane_t *pane)
+{
+    if (pane == NULL || pane->timemachine_frame_count == 0) {
+        return NULL;
+    }
+    size_t index = (pane->timemachine_frame_head +
+                    pane->timemachine_frame_count - 1) %
+                   DESK_TIMEMACHINE_FRAME_MAX;
+    return &pane->timemachine_frames[index];
+}
+
+static int desk_timemachine_capture_frame(desk_pane_t *pane)
+{
+    if (pane == NULL || pane->grid.cells == NULL ||
+        pane->grid.rows <= 0 || pane->grid.cols <= 0) {
+        return 0;
+    }
+    const desk_frame_t *latest = desk_timemachine_latest_frame(pane);
+    if (desk_frame_matches_grid(latest, &pane->grid)) {
+        return 0;
+    }
+
+    size_t slot = 0;
+    if (pane->timemachine_frame_count == DESK_TIMEMACHINE_FRAME_MAX) {
+        slot = pane->timemachine_frame_head;
+        pane->timemachine_frame_head =
+            (pane->timemachine_frame_head + 1) %
+            DESK_TIMEMACHINE_FRAME_MAX;
+    } else {
+        slot = (pane->timemachine_frame_head +
+                pane->timemachine_frame_count) %
+               DESK_TIMEMACHINE_FRAME_MAX;
+        pane->timemachine_frame_count++;
+    }
+    return desk_frame_copy_from_grid(&pane->timemachine_frames[slot],
+                                     &pane->grid);
+}
+
+static const desk_frame_t *desk_timemachine_selected_frame(
+    const desk_pane_t *pane)
+{
+    if (pane == NULL || !pane->timemachine_active ||
+        pane->timemachine_frame_count == 0) {
+        return NULL;
+    }
+    unsigned int percent = pane->timemachine_percent > 100
+                               ? 100
+                               : pane->timemachine_percent;
+    size_t logical =
+        ((pane->timemachine_frame_count - 1) * (size_t)percent + 50) / 100;
+    size_t index = (pane->timemachine_frame_head + logical) %
+                   DESK_TIMEMACHINE_FRAME_MAX;
+    return &pane->timemachine_frames[index];
+}
+
 static int desk_scrollback_set_limit(desk_pane_t *pane, size_t limit)
 {
     if (pane == NULL) {
@@ -3280,11 +3408,7 @@ static void desk_timemachine_apply_position(desk_pane_t *pane)
     if (pane->timemachine_percent > 100) {
         pane->timemachine_percent = 100;
     }
-    pane->scrollback_offset =
-        ((100 - (size_t)pane->timemachine_percent) *
-             pane->scrollback_count +
-         50) /
-        100;
+    pane->scrollback_offset = 0;
 }
 
 static void desk_timemachine_disable_pane(desk_pane_t *pane)
@@ -3320,6 +3444,9 @@ static bool desk_timemachine_enter(desk_session_t *session)
     session->timemachine_pane_id = session->layout.active_pane_id;
     pane->timemachine_active = true;
     pane->timemachine_percent = 100;
+    if (pane->timemachine_frame_count == 0) {
+        (void)desk_timemachine_capture_frame(pane);
+    }
     desk_timemachine_apply_position(pane);
     session->zoomed = true;
     session->layout.zoom = DESK_ZOOM_FULL;
@@ -3432,6 +3559,9 @@ static int refresh_pane_from_model(desk_pane_t *pane)
     grid_apply_snapshot(&pane->grid, &snapshot);
     cubicle_terminal_snapshot_cleanup(&snapshot);
     cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
+    if (desk_timemachine_capture_frame(pane) < 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -3477,6 +3607,10 @@ static int reload_pane_snapshot(desk_pane_t *pane)
         return -1;
     }
     grid_apply_snapshot(&pane->grid, &snapshot);
+    if (desk_timemachine_capture_frame(pane) < 0) {
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        return -1;
+    }
     cubicle_terminal_scrollback_line_t *discarded = NULL;
     size_t discarded_count = 0;
     if (cubicle_terminal_model_take_scrollback(pane->terminal_model,
@@ -3819,13 +3953,15 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
     size_t used = 0;
     desk_rect_t rect;
     desk_grid_t *grid = &pane->grid;
-    bool scrollback_view = pane->scrollback_offset > 0;
+    const desk_frame_t *time_frame = desk_timemachine_selected_frame(pane);
+    bool timemachine_view = time_frame != NULL;
+    bool scrollback_view = !timemachine_view && pane->scrollback_offset > 0;
 
     if (!pane_content_rect_for_pane(panes, terminal, pane_id, &rect)) {
         return;
     }
 
-    if (scrollback_view) {
+    if (timemachine_view || scrollback_view) {
         dirty_only = false;
     }
 
@@ -3839,7 +3975,8 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
                         : live_start - pane->scrollback_offset;
     }
 
-    for (int row = 0; row < grid->rows; ++row) {
+    int render_rows = timemachine_view ? rect.rows : grid->rows;
+    for (int row = 0; row < render_rows; ++row) {
         if (dirty_only && grid->dirty_rows != NULL &&
             !grid->dirty_rows[row]) {
             continue;
@@ -3855,7 +3992,16 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
         for (int col = 0; col < rect.cols; ++col) {
             const char *text = " ";
             const char *sgr = "";
-            if (scrollback_view) {
+            if (timemachine_view) {
+                if (row < time_frame->rows && col < time_frame->cols) {
+                    const desk_cell_t *cell =
+                        &time_frame->cells[(size_t)row *
+                                               (size_t)time_frame->cols +
+                                           (size_t)col];
+                    text = cell->text;
+                    sgr = cell->sgr;
+                }
+            } else if (scrollback_view) {
                 size_t virtual_row = start_row + (size_t)row;
                 if (virtual_row < pane->scrollback_count) {
                     size_t index = (pane->scrollback_head + virtual_row) %
@@ -3895,7 +4041,7 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
         if (active_sgr[0] != '\0') {
             append_text(frame, sizeof(frame), &used, "\x1b[0m");
         }
-        if (grid->dirty_rows != NULL) {
+        if (!timemachine_view && grid->dirty_rows != NULL) {
             grid->dirty_rows[row] = false;
         }
     }
@@ -3905,13 +4051,24 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
     char pane_title[160];
     desk_format_pane_title(pane, pane_title, sizeof(pane_title));
     char title[192];
-    snprintf(title, sizeof(title), "%.128s%s%zu/%zu",
+    snprintf(title, sizeof(title), "%.128s%s%zu/%zu%s%u%% %zu/%zu",
              pane_title,
              scrollback_view ? " scroll " : "",
              scrollback_view ? pane->scrollback_offset : 0,
-             scrollback_view ? pane->scrollback_count : 0);
+             scrollback_view ? pane->scrollback_count : 0,
+             timemachine_view ? " time " : "",
+             timemachine_view ? pane->timemachine_percent : 0,
+             timemachine_view
+                 ? (((pane->timemachine_frame_count - 1) *
+                         (size_t)pane->timemachine_percent +
+                     50) /
+                    100) +
+                       1
+                 : 0,
+             timemachine_view ? pane->timemachine_frame_count : 0);
     desk_render_pane_title(terminal, panes, pane_id,
-                           scrollback_view ? title : pane_title,
+                           scrollback_view || timemachine_view ? title
+                                                               : pane_title,
                            mouse_titles);
     if (pane->timemachine_active) {
         desk_render_timemachine_bar(terminal, panes, pane_id, pane);
@@ -4434,6 +4591,7 @@ static void desk_cleanup_pane(desk_pane_t *pane)
     pane->terminal_model = NULL;
     grid_cleanup(&pane->grid);
     desk_scrollback_clear(pane);
+    desk_timemachine_clear_frames(pane);
     memset(pane, 0, sizeof(*pane));
 }
 
@@ -6683,6 +6841,7 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
 {
     desk_pane_t *pane = &session->panes[pane_index];
     bool pane_changed = false;
+    bool refreshed = false;
 
     if (pane->attachment == NULL) {
         return 0;
@@ -6741,13 +6900,20 @@ static int read_and_render_pane_output(const desk_terminal_t *terminal,
         if (pane->timemachine_active) {
             desk_timemachine_apply_position(pane);
         }
+        if (refresh_pane_from_model(pane) < 0) {
+            desk_debug_log("event=refresh_from_model_failed pane=%zu process=%s errno=%d",
+                           pane_index + 1, pane->process.friendly_name,
+                           errno);
+            return -1;
+        }
+        refreshed = true;
         pane_changed = true;
         if (output_seen != NULL) {
             *output_seen = true;
         }
     }
 
-    if (pane_changed && refresh_pane_from_model(pane) < 0) {
+    if (pane_changed && !refreshed && refresh_pane_from_model(pane) < 0) {
         desk_debug_log("event=refresh_from_model_failed pane=%zu process=%s errno=%d",
                        pane_index + 1, pane->process.friendly_name, errno);
         return -1;

@@ -2366,7 +2366,7 @@ def run_desk_timemachine_replay(desk, env):
                 os.write(master_fd, b"\x1b[H")
                 sent_oldest = True
 
-            if sent_timemachine and not saw_history and b"HISTORY_00" in captured:
+            if sent_timemachine and not saw_history and b"READY_TIMEMACHINE" in captured:
                 saw_history = True
                 captured.clear()
                 os.write(master_fd, b"\x1b[F")
@@ -2397,7 +2397,7 @@ def run_desk_timemachine_replay(desk, env):
             if not sent_oldest:
                 raise AssertionError("desk did not show time-machine progress bar")
             raise AssertionError(
-                f"desk did not replay oldest time-machine screen: {captured!r}"
+                f"desk did not replay oldest time-machine frame: {captured!r}"
             )
         if not sent_latest or not saw_latest:
             raise AssertionError(
@@ -3308,7 +3308,9 @@ def main():
                     "        if b'g' in data and not generated:\n"
                     "            generated=True\n"
                     "            for i in range(40):\n"
-                    "                sys.stdout.write('HISTORY_%02d\\r\\n' % i)\n"
+                    "                sys.stdout.write('\\x1b[2J\\x1b[H HISTORY_%02d' % i)\n"
+                    "                sys.stdout.flush()\n"
+                    "                time.sleep(0.01)\n"
                     "            sys.stdout.write('\\x1b[2J\\x1b[H LIVE_TIMEMACHINE')\n"
                     "            sys.stdout.flush()\n"
                     "time.sleep(1)\n"
