@@ -492,7 +492,8 @@ cube access add alice.pub --role operator --label "Alice laptop"
 cube access add alice.pub --role owner
 ```
 
-When no workspace is specified, the current workspace is used.
+When no workspace is specified, access is granted at manager scope and applies
+to all workspaces on that manager.
 
 Explicit workspace form:
 

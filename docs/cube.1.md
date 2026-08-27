@@ -476,20 +476,24 @@ Roles:
 Commands:
 
 `cube access list`
-: List authorized workspace keys.
+: List authorized manager-level keys. These keys apply to every workspace on
+  the manager.
 
 `cube access add PUBLIC_KEY_OR_FILE [--role ROLE] [--label LABEL]`
-: Add a 64-character hex public key, or read one from a file. The default role
-  is `operator`; the default label is empty.
+: Add a manager-level 64-character hex public key, or read one from a file.
+  The default role is `operator`; the default label is empty.
 
 `cube access set-role KEY_ID ROLE`
-: Replace a key's capabilities with the selected role.
+: Replace a manager-level key's capabilities with the selected role.
 
 `cube access remove KEY_ID`
-: Revoke a key.
+: Revoke a manager-level key.
 
 `cube access revoke KEY_ID`
 : Alias for `remove`.
+
+Use global `--workspace NAME` with any access command to manage keys scoped only
+to that workspace.
 
 Examples:
 
@@ -497,6 +501,7 @@ Examples:
 cube access list
 cube --json access list
 cube access add ~/.config/cubicle/keys/alice.pub --role observer --label Alice
+cube --workspace ProjectA access add alice.pub --role operator
 cube access add 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f --role operator
 cube access set-role 9bb5cf3b18d4e6c407a07e68f8c8a7dd owner
 cube access remove 9bb5cf3b18d4e6c407a07e68f8c8a7dd

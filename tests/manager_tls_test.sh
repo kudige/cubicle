@@ -55,7 +55,9 @@ done
 
 CUBICLE_MANAGER_SOCKET="$unix_socket" cube workspace create Remote \
     >"$tmpdir/workspace-create.out"
-CUBICLE_MANAGER_SOCKET="$unix_socket" cube --workspace Remote access add \
+CUBICLE_MANAGER_SOCKET="$unix_socket" cube workspace create RemoteTwo \
+    >"$tmpdir/workspace-two-create.out"
+CUBICLE_MANAGER_SOCKET="$unix_socket" cube access add \
     "$client_key" --role owner --label tls-client >"$tmpdir/access-add.out"
 CUBICLE_MANAGER_SOCKET="$unix_socket" cube shutdown >/dev/null
 wait "$manager_pid"
@@ -90,9 +92,11 @@ for _ in $(seq 1 100); do
 done
 
 grep -q 'Remote' "$tmpdir/tls-list.out"
+grep -q 'RemoteTwo' "$tmpdir/tls-list.out"
 CUBICLE_MANAGER_SOCKET="$tls_local_socket" cube workspace list \
     >"$tmpdir/tls-local-list.out"
 grep -q 'Remote' "$tmpdir/tls-local-list.out"
+grep -q 'RemoteTwo' "$tmpdir/tls-local-list.out"
 test -f "$state_dir/tls/server.crt"
 test -f "$state_dir/tls/server.key"
 

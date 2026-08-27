@@ -2388,26 +2388,37 @@ static int command_access(const char *manager_socket,
     int remaining = argc - command_index - 1;
     char **arguments = &argv[command_index + 1];
     char workspace[CUBICLE_NAME_MAX];
-    int from_selected_workspace = 0;
-    if (resolve_workspace_selection(options, manager_socket, workspace,
-                                    sizeof(workspace),
-                                    &from_selected_workspace) < 0) {
-        fprintf(stderr, "cube: no workspace selected\n");
-        return 1;
-    }
+    bool workspace_scope =
+        options->workspace != NULL && options->workspace[0] != '\0';
     char escaped_workspace[CUBICLE_NAME_MAX * 2];
-    if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
-                            workspace) < 0) {
-        fprintf(stderr, "cube: workspace name is too long\n");
-        return 2;
+    if (workspace_scope) {
+        int from_selected_workspace = 0;
+        if (resolve_workspace_selection(options, manager_socket, workspace,
+                                        sizeof(workspace),
+                                        &from_selected_workspace) < 0) {
+            fprintf(stderr, "cube: no workspace selected\n");
+            return 1;
+        }
+        if (cubicle_json_escape(escaped_workspace, sizeof(escaped_workspace),
+                                workspace) < 0) {
+            fprintf(stderr, "cube: workspace name is too long\n");
+            return 2;
+        }
     }
 
     if (remaining == 1 && strcmp(arguments[0], "list") == 0) {
         char params[1024];
-        snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
-                 escaped_workspace);
+        if (workspace_scope) {
+            snprintf(params, sizeof(params), "{\"workspace_id\":\"%s\"}",
+                     escaped_workspace);
+        } else {
+            snprintf(params, sizeof(params), "{}");
+        }
         cube_rpc_response_t response;
-        if (call_manager(manager_socket, "workspace.key.list", params,
+        if (call_manager(manager_socket,
+                         workspace_scope ? "workspace.key.list"
+                                         : "manager.key.list",
+                         params,
                          &response) < 0) {
             return print_rpc_error(&response);
         }
@@ -2490,12 +2501,22 @@ static int command_access(const char *manager_socket,
             return 2;
         }
         char params[2048];
-        snprintf(params, sizeof(params),
-                 "{\"workspace_id\":\"%s\",\"public_key\":\"%s\",\"label\":\"%s\",\"capabilities\":%llu}",
-                 escaped_workspace, public_key_hex, escaped_label,
-                 (unsigned long long)capabilities);
+        if (workspace_scope) {
+            snprintf(params, sizeof(params),
+                     "{\"workspace_id\":\"%s\",\"public_key\":\"%s\",\"label\":\"%s\",\"capabilities\":%llu}",
+                     escaped_workspace, public_key_hex, escaped_label,
+                     (unsigned long long)capabilities);
+        } else {
+            snprintf(params, sizeof(params),
+                     "{\"public_key\":\"%s\",\"label\":\"%s\",\"capabilities\":%llu}",
+                     public_key_hex, escaped_label,
+                     (unsigned long long)capabilities);
+        }
         cube_rpc_response_t response;
-        if (call_manager(manager_socket, "workspace.key.add", params,
+        if (call_manager(manager_socket,
+                         workspace_scope ? "workspace.key.add"
+                                         : "manager.key.add",
+                         params,
                          &response) < 0) {
             return print_rpc_error(&response);
         }
@@ -2529,12 +2550,21 @@ static int command_access(const char *manager_socket,
             return 2;
         }
         char params[1024];
-        snprintf(params, sizeof(params),
-                 "{\"workspace_id\":\"%s\",\"key_id\":\"%s\",\"capabilities\":%llu}",
-                 escaped_workspace, escaped_key,
-                 (unsigned long long)capabilities);
+        if (workspace_scope) {
+            snprintf(params, sizeof(params),
+                     "{\"workspace_id\":\"%s\",\"key_id\":\"%s\",\"capabilities\":%llu}",
+                     escaped_workspace, escaped_key,
+                     (unsigned long long)capabilities);
+        } else {
+            snprintf(params, sizeof(params),
+                     "{\"key_id\":\"%s\",\"capabilities\":%llu}",
+                     escaped_key, (unsigned long long)capabilities);
+        }
         cube_rpc_response_t response;
-        if (call_manager(manager_socket, "workspace.key.update", params,
+        if (call_manager(manager_socket,
+                         workspace_scope ? "workspace.key.update"
+                                         : "manager.key.update",
+                         params,
                          &response) < 0) {
             return print_rpc_error(&response);
         }
@@ -2557,11 +2587,19 @@ static int command_access(const char *manager_socket,
             return 2;
         }
         char params[1024];
-        snprintf(params, sizeof(params),
-                 "{\"workspace_id\":\"%s\",\"key_id\":\"%s\"}",
-                 escaped_workspace, escaped_key);
+        if (workspace_scope) {
+            snprintf(params, sizeof(params),
+                     "{\"workspace_id\":\"%s\",\"key_id\":\"%s\"}",
+                     escaped_workspace, escaped_key);
+        } else {
+            snprintf(params, sizeof(params), "{\"key_id\":\"%s\"}",
+                     escaped_key);
+        }
         cube_rpc_response_t response;
-        if (call_manager(manager_socket, "workspace.key.revoke", params,
+        if (call_manager(manager_socket,
+                         workspace_scope ? "workspace.key.revoke"
+                                         : "manager.key.revoke",
+                         params,
                          &response) < 0) {
             return print_rpc_error(&response);
         }

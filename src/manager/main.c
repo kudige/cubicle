@@ -1585,6 +1585,35 @@ static int workspace_key_info_json(const workspace_key_record_t *record,
     return 0;
 }
 
+static int key_record_info_json(const workspace_key_record_t *record,
+                                const char *scope,
+                                char *buffer,
+                                size_t buffer_size)
+{
+    char base[1024];
+    if (workspace_key_info_json(record, base, sizeof(base)) < 0) {
+        return -1;
+    }
+    char escaped_scope[64];
+    if (cubicle_json_escape(escaped_scope, sizeof(escaped_scope),
+                            scope == NULL ? "" : scope) < 0) {
+        return -1;
+    }
+    size_t length = strlen(base);
+    if (length == 0 || base[length - 1] != '}') {
+        errno = EINVAL;
+        return -1;
+    }
+    base[length - 1] = '\0';
+    int written = snprintf(buffer, buffer_size, "%s,\"scope\":\"%s\"}",
+                           base, escaped_scope);
+    if (written < 0 || (size_t)written >= buffer_size) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
 static int parse_workspace_macro_record(const char *line,
                                         workspace_macro_record_t *record)
 {
@@ -1770,20 +1799,18 @@ static int connection_is_manager_owner(const manager_connection_t *connection)
     return connection_is_same_uid(connection);
 }
 
-static int connection_has_workspace_capability(const manager_state_t *state,
-                                               const char *workspace_id,
-                                               const manager_connection_t *connection,
-                                               cubicle_capability_mask_t required)
+static int connection_has_key_capability(const manager_state_t *state,
+                                         const char *file_name,
+                                         const char *workspace_id,
+                                         const manager_connection_t *connection,
+                                         cubicle_capability_mask_t required)
 {
-    if (connection_is_manager_owner(connection)) {
-        return 1;
-    }
-    if (state == NULL || workspace_id == NULL || connection == NULL ||
+    if (state == NULL || file_name == NULL || connection == NULL ||
         !connection->authenticated ||
         connection->session.client_key_id[0] == '\0') {
         return 0;
     }
-    FILE *file = open_state_file_for_read(state, "workspace-keys.tsv");
+    FILE *file = open_state_file_for_read(state, file_name);
     if (file == NULL) {
         return 0;
     }
@@ -1791,7 +1818,8 @@ static int connection_has_workspace_capability(const manager_state_t *state,
     while (fgets(line, sizeof(line), file) != NULL) {
         workspace_key_record_t record;
         if (parse_workspace_key_record(line, &record) == 0 &&
-            strcmp(record.workspace_id, workspace_id) == 0 &&
+            (workspace_id == NULL ||
+             strcmp(record.workspace_id, workspace_id) == 0) &&
             strcmp(record.key_id, connection->session.client_key_id) == 0 &&
             record.revoked_at_ms == 0) {
             int allowed = (record.capabilities & required) == required;
@@ -1803,8 +1831,33 @@ static int connection_has_workspace_capability(const manager_state_t *state,
     return 0;
 }
 
-static int append_workspace_key_record(const manager_state_t *state,
-                                       const workspace_key_record_t *record)
+static int connection_has_manager_key_capability(
+    const manager_state_t *state,
+    const manager_connection_t *connection,
+    cubicle_capability_mask_t required)
+{
+    return connection_is_manager_owner(connection) ||
+           connection_has_key_capability(state, "manager-keys.tsv", NULL,
+                                         connection, required);
+}
+
+static int connection_has_workspace_capability(const manager_state_t *state,
+                                               const char *workspace_id,
+                                               const manager_connection_t *connection,
+                                               cubicle_capability_mask_t required)
+{
+    if (connection_is_manager_owner(connection)) {
+        return 1;
+    }
+    return connection_has_key_capability(state, "manager-keys.tsv", NULL,
+                                         connection, required) ||
+           connection_has_key_capability(state, "workspace-keys.tsv",
+                                         workspace_id, connection, required);
+}
+
+static int append_key_record(const manager_state_t *state,
+                             const char *file_name,
+                             const workspace_key_record_t *record)
 {
     char line[1024];
     int line_length = snprintf(
@@ -1818,7 +1871,13 @@ static int append_workspace_key_record(const manager_state_t *state,
         errno = ENOSPC;
         return -1;
     }
-    return append_line(state, "workspace-keys.tsv", line);
+    return append_line(state, file_name, line);
+}
+
+static int append_workspace_key_record(const manager_state_t *state,
+                                       const workspace_key_record_t *record)
+{
+    return append_key_record(state, "workspace-keys.tsv", record);
 }
 
 static int build_workspace_key_record_from_public_hex(
@@ -1873,16 +1932,17 @@ static int build_workspace_key_record_from_public_hex(
     return 0;
 }
 
-static int update_workspace_key_capabilities(const manager_state_t *state,
-                                             const char *workspace_id,
-                                             const char *key_id,
-                                             cubicle_capability_mask_t capabilities,
-                                             int *found)
+static int update_key_capabilities(const manager_state_t *state,
+                                   const char *file_name,
+                                   const char *workspace_id,
+                                   const char *key_id,
+                                   cubicle_capability_mask_t capabilities,
+                                   int *found)
 {
     *found = 0;
     char path[PATH_MAX];
     char temp_path[PATH_MAX];
-    if (state_path(path, state, "workspace-keys.tsv") < 0) {
+    if (state_path(path, state, file_name) < 0) {
         return -1;
     }
     int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
@@ -1924,16 +1984,27 @@ static int update_workspace_key_capabilities(const manager_state_t *state,
     return rename(temp_path, path);
 }
 
-static int update_workspace_key_revocation(const manager_state_t *state,
-                                           const char *workspace_id,
-                                           const char *key_id,
-                                           uint64_t revoked_at_ms,
-                                           int *found)
+static int update_workspace_key_capabilities(const manager_state_t *state,
+                                             const char *workspace_id,
+                                             const char *key_id,
+                                             cubicle_capability_mask_t capabilities,
+                                             int *found)
+{
+    return update_key_capabilities(state, "workspace-keys.tsv", workspace_id,
+                                   key_id, capabilities, found);
+}
+
+static int update_key_revocation(const manager_state_t *state,
+                                 const char *file_name,
+                                 const char *workspace_id,
+                                 const char *key_id,
+                                 uint64_t revoked_at_ms,
+                                 int *found)
 {
     *found = 0;
     char path[PATH_MAX];
     char temp_path[PATH_MAX];
-    if (state_path(path, state, "workspace-keys.tsv") < 0) {
+    if (state_path(path, state, file_name) < 0) {
         return -1;
     }
     int length = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
@@ -1973,6 +2044,16 @@ static int update_workspace_key_revocation(const manager_state_t *state,
         return -1;
     }
     return rename(temp_path, path);
+}
+
+static int update_workspace_key_revocation(const manager_state_t *state,
+                                           const char *workspace_id,
+                                           const char *key_id,
+                                           uint64_t revoked_at_ms,
+                                           int *found)
+{
+    return update_key_revocation(state, "workspace-keys.tsv", workspace_id,
+                                 key_id, revoked_at_ms, found);
 }
 
 static int controller_line_request(const char *socket_path,
@@ -6725,6 +6806,214 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             MANAGER_RETURN(-1);
         }
         MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "manager.key.add") == 0) {
+        char public_key_hex[512];
+        char label[CUBICLE_KEY_LABEL_MAX] = "";
+        uint64_t capabilities = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "public_key",
+                                             public_key_hex,
+                                             sizeof(public_key_hex),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "label", label,
+                                             sizeof(label), NULL,
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "capabilities",
+                                          &capabilities,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key add request",
+                                             false, 0));
+        }
+        if (!connection_has_manager_key_capability(
+                state, connection, CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "manager key management requires owner access",
+                                             false, 0));
+        }
+
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        workspace_key_record_t record;
+        if (build_workspace_key_record_from_public_hex(
+                &record, "manager", public_key_hex, label,
+                (cubicle_capability_mask_t)capabilities, now_ms) < 0) {
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid public key", false, 0));
+        }
+        if (append_key_record(state, "manager-keys.tsv", &record) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to persist key",
+                                             true, saved_errno));
+        }
+        unlock_state(lock_fd);
+
+        char result[1024];
+        if (key_record_info_json(&record, "manager", result,
+                                 sizeof(result)) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INTERNAL,
+                                             "failed to encode key",
+                                             false, errno));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "manager.key.list") == 0) {
+        if (!connection_has_manager_key_capability(
+                state, connection, CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "manager key list requires owner access",
+                                             false, 0));
+        }
+        FILE *file = open_state_file_for_read(state, "manager-keys.tsv");
+        char result[CUBICLE_PROCESS_RECORD_LINE_MAX];
+        size_t used = 0;
+        int written = snprintf(result, sizeof(result), "{\"keys\":[");
+        if (written < 0 || (size_t)written >= sizeof(result)) {
+            MANAGER_RETURN(-1);
+        }
+        used = (size_t)written;
+        size_t count = 0;
+        if (file != NULL) {
+            char line[1024];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                workspace_key_record_t record;
+                char item[1024];
+                if (parse_workspace_key_record(line, &record) != 0 ||
+                    key_record_info_json(&record, "manager", item,
+                                         sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "key list response too large", false, 0));
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+        written = snprintf(result + used, sizeof(result) - used, "]}");
+        if (written < 0 || (size_t)written >= sizeof(result) - used) {
+            MANAGER_RETURN(manager_api_error(
+                client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                "key list response too large", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, result));
+    }
+
+    if (strcmp(method, "manager.key.update") == 0) {
+        char key_id[128];
+        uint64_t capabilities = 0;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "key_id", key_id,
+                                             sizeof(key_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "capabilities",
+                                          &capabilities,
+                                          &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key update request",
+                                             false, 0));
+        }
+        if (!connection_has_manager_key_capability(
+                state, connection, CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "manager key update requires owner access",
+                                             false, 0));
+        }
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        if (update_key_capabilities(
+                state, "manager-keys.tsv", "manager", key_id,
+                (cubicle_capability_mask_t)capabilities, &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to update key", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        if (!found) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "key not found", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
+    }
+
+    if (strcmp(method, "manager.key.revoke") == 0) {
+        char key_id[128];
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "key_id", key_id,
+                                             sizeof(key_id),
+                                             &validation_error) < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid key revoke request",
+                                             false, 0));
+        }
+        if (!connection_has_manager_key_capability(
+                state, connection, CUBICLE_CAP_WORKSPACE_MANAGE_KEYS)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "manager key revoke requires owner access",
+                                             false, 0));
+        }
+        int lock_fd = lock_state(state);
+        if (lock_fd < 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to lock manager state",
+                                             true, errno));
+        }
+        int found = 0;
+        if (update_key_revocation(state, "manager-keys.tsv", "manager",
+                                  key_id, now_ms, &found) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to revoke key", true,
+                                             saved_errno));
+        }
+        unlock_state(lock_fd);
+        if (!found) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "key not found", false, 0));
+        }
+        MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
     if (strcmp(method, "workspace.key.add") == 0) {

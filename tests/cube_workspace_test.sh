@@ -74,15 +74,21 @@ printf "%s" "$json_dir_create_output" | grep -q "\"directory\":\"$workspace_dir\
 cube workspace select "Project A" >/dev/null
 
 owner_key=$(tr -d '\n' <"$xdg_config_home/cubicle/keys/client.pub")
-access_list=$(cube access list)
+manager_access_list=$(cube access list)
+printf "%s\n" "$manager_access_list" | grep -q '^KEY ID	LABEL	CAPABILITIES	REVOKED$'
+if printf "%s\n" "$manager_access_list" | grep -q '	owner	'; then
+    echo "manager access list should not include workspace owner key" >&2
+    exit 1
+fi
+access_list=$(cube --workspace "Project A" access list)
 printf "%s\n" "$access_list" | grep -q '^KEY ID	LABEL	CAPABILITIES	REVOKED$'
 printf "%s\n" "$access_list" | grep -q '	owner	.*	no$'
-access_json=$(cube --json access list)
+access_json=$(cube --json --workspace "Project A" access list)
 printf "%s" "$access_json" | grep -q '"keys"'
 printf "%s" "$access_json" | grep -q '"label":"owner"'
 
 second_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
-add_json=$(cube --json access add "$second_key" --role observer --label "Alice")
+add_json=$(cube --json --workspace "Project A" access add "$second_key" --role observer --label "Alice")
 printf "%s" "$add_json" | grep -q '"label":"Alice"'
 second_key_id=$(python3 - "$add_json" <<'PY'
 import json
@@ -90,19 +96,41 @@ import sys
 print(json.loads(sys.argv[1])["key_id"])
 PY
 )
-update_output=$(cube access set-role "$second_key_id" operator)
+update_output=$(cube --workspace "Project A" access set-role "$second_key_id" operator)
 if [ "$update_output" != "Access updated" ]; then
     echo "unexpected access set-role output: $update_output" >&2
     exit 1
 fi
-remove_output=$(cube access remove "$second_key_id")
+remove_output=$(cube --workspace "Project A" access remove "$second_key_id")
 if [ "$remove_output" != "Access removed" ]; then
     echo "unexpected access remove output: $remove_output" >&2
     exit 1
 fi
-access_after_remove=$(cube --json access list)
+access_after_remove=$(cube --json --workspace "Project A" access list)
 printf "%s" "$access_after_remove" | grep -q "\"key_id\":\"$second_key_id\""
 printf "%s" "$access_after_remove" | grep -q "\"revoked_at_ms\":[1-9]"
+manager_add_json=$(cube --json access add "$second_key" --role owner --label "Global Alice")
+printf "%s" "$manager_add_json" | grep -q '"label":"Global Alice"'
+printf "%s" "$manager_add_json" | grep -q '"scope":"manager"'
+manager_key_id=$(python3 - "$manager_add_json" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["key_id"])
+PY
+)
+manager_access_json=$(cube --json access list)
+printf "%s" "$manager_access_json" | grep -q "\"key_id\":\"$manager_key_id\""
+printf "%s" "$manager_access_json" | grep -q '"scope":"manager"'
+manager_update_output=$(cube access set-role "$manager_key_id" operator)
+if [ "$manager_update_output" != "Access updated" ]; then
+    echo "unexpected manager access set-role output: $manager_update_output" >&2
+    exit 1
+fi
+manager_remove_output=$(cube access remove "$manager_key_id")
+if [ "$manager_remove_output" != "Access removed" ]; then
+    echo "unexpected manager access remove output: $manager_remove_output" >&2
+    exit 1
+fi
 printf "%s" "$owner_key" | grep -Eq '^[0-9a-f]{64}$'
 
 json_create_output=$(cube --json workspace create "Project JSON")

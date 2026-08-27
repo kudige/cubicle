@@ -198,8 +198,8 @@
       <h2>Authorize Your Client Key</h2>
       <p>On the client machine, print your Cubicle public key:</p>
       <pre><code>cube identity pub</code></pre>
-      <p>On the remote host, add that public key to the workspace you want to access. Run this against the remote manager's local socket.</p>
-      <pre><code>cube --workspace Project access add CLIENT_PUBLIC_KEY --role owner --label laptop</code></pre>
+      <p>On the remote host, add that public key to the manager. Run this against the remote manager's local socket; the grant applies to every workspace on that manager.</p>
+      <pre><code>cube access add CLIENT_PUBLIC_KEY --role owner --label laptop</code></pre>
       <p>Use <code>operator</code> instead of <code>owner</code> when the client should run and attach to cubes but not manage workspace access keys.</p>
     </section>
 

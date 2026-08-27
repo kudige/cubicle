@@ -266,8 +266,9 @@ The selected workspace must apply predictably to later `cube` invocations. Initi
 
 ## 4A. Workspace Access Commands
 
-Access commands manage public keys for the selected workspace, or for the
-workspace passed through global `--workspace NAME`.
+Access commands manage manager-level public keys by default. These keys apply
+to all workspaces on that manager. Pass global `--workspace NAME` to manage
+keys scoped only to that workspace.
 
 ```console
 cube access list
