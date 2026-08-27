@@ -79,6 +79,7 @@ typedef struct cubicle_attachment_status {
 
 cubicle_error_code_t cubicle_attachment_request(cubicle_client_t *client, const cubicle_attachment_request_t *request, cubicle_attachment_grant_t *grant_out);
 cubicle_error_code_t cubicle_attachment_connect(const cubicle_attachment_grant_t *grant, const cubicle_attachment_options_t *options, cubicle_attachment_t **attachment_out);
+cubicle_error_code_t cubicle_attachment_connect_relay(cubicle_client_t *manager, const cubicle_attachment_grant_t *grant, const cubicle_attachment_options_t *options, cubicle_attachment_t **attachment_out);
 cubicle_channel_mask_t cubicle_attachment_channels(const cubicle_attachment_t *attachment);
 void cubicle_attachment_replay(cubicle_attachment_t *attachment, uint64_t replay_bytes);
 uint64_t cubicle_attachment_read_offset(const cubicle_attachment_t *attachment, cubicle_stream_kind_t stream);

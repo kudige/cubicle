@@ -22,8 +22,13 @@
 #include <grp.h>
 #include <limits.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -56,6 +61,8 @@ typedef struct manager_state {
 #define CUBICLE_MANAGER_MAX_SESSIONS 128
 #define CUBICLE_MANAGER_DEFAULT_MAX_CLIENTS 64
 #define CUBICLE_MANAGER_MAX_CLIENTS 1024
+#define CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE 16
+#define CUBICLE_MANAGER_CONTROLLER_CACHE_MAX_IDLE_MS 90000ULL
 
 typedef struct manager_session_record {
     int active;
@@ -73,11 +80,26 @@ typedef struct manager_session_store {
 
 typedef struct manager_runtime manager_runtime_t;
 
+typedef struct manager_controller_cache_entry {
+    int fd;
+    uint64_t last_used_ms;
+    char socket_path[CUBICLE_PATH_MAX];
+} manager_controller_cache_entry_t;
+
 typedef struct manager_worker_slot {
     int active;
     int fd;
+    int is_tls;
+    SSL *ssl;
     manager_runtime_t *runtime;
 } manager_worker_slot_t;
+
+typedef struct manager_listener {
+    int fd;
+    int is_tcp;
+    int is_tls;
+    char cleanup_path[PATH_MAX];
+} manager_listener_t;
 
 struct manager_runtime {
     const manager_state_t *state;
@@ -89,11 +111,13 @@ struct manager_runtime {
     uint64_t started_at_ms;
     int max_clients;
     int active_workers;
+    SSL_CTX *tls_ctx;
     manager_worker_slot_t workers[CUBICLE_MANAGER_MAX_CLIENTS];
 };
 
 typedef struct manager_connection {
     int has_peer_credentials;
+    int is_tls;
     uid_t peer_uid;
     gid_t peer_gid;
     pid_t peer_pid;
@@ -104,7 +128,13 @@ typedef struct manager_connection {
     unsigned char resume_secret[CUBICLE_AUTH_SECRET_BYTES];
     char client_public_key_hex[CUBICLE_AUTH_HEX_PUBLIC_KEY_LENGTH];
     manager_runtime_t *runtime;
+    manager_controller_cache_entry_t controller_cache
+        [CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE];
 } manager_connection_t;
+
+static _Thread_local SSL *g_manager_tls = NULL;
+
+static int read_all_fd(int fd, void *buffer, size_t length);
 
 typedef struct workspace_key_record {
     char workspace_id[CUBICLE_ID_STRING_LENGTH];
@@ -127,6 +157,7 @@ typedef struct workspace_macro_record {
 } workspace_macro_record_t;
 
 #define CUBICLE_API_MAX_FRAME 65536
+#define CUBICLE_CONTROLLER_PROXY_MAX_FRAME (4U * 1024U * 1024U)
 #define CUBICLE_MANAGER_MAX_SIGNAL_NUMBER 128
 #define CUBICLE_API_CAPABILITIES \
     (CUBICLE_PROTOCOL_CAP_TRANSPORT_UNIX | CUBICLE_PROTOCOL_CAP_PROCESS_STREAM | \
@@ -303,6 +334,18 @@ static int controller_log_path(char path[PATH_MAX],
     return 0;
 }
 
+static int manager_listen_uri_for_runtime(char uri[CUBICLE_ENDPOINT_URI_MAX],
+                                          const char *runtime_dir)
+{
+    int result = snprintf(uri, CUBICLE_ENDPOINT_URI_MAX,
+                          "unix://%s/manager.sock", runtime_dir);
+    if (result < 0 || result >= CUBICLE_ENDPOINT_URI_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 static int process_output_path(char path[PATH_MAX],
                                const manager_state_t *state,
                                const char *process_id,
@@ -407,6 +450,42 @@ static void log_manager_effective_config(const manager_state_t *state)
     log_manager_setting("manager.socket_group", state->socket_group);
     log_manager_setting("manager.controller_binary", state->controller_bin);
     log_manager_setting("controller.debug", state->controller_debug);
+}
+
+static int resolve_build_tree_controller(manager_state_t *state,
+                                         const char *program)
+{
+    if (access(state->controller_bin, X_OK) == 0 ||
+        program == NULL || strchr(program, '/') == NULL) {
+        return 0;
+    }
+
+    char candidate[PATH_MAX];
+    int length = snprintf(candidate, sizeof(candidate), "%s", program);
+    if (length < 0 || (size_t)length >= sizeof(candidate)) {
+        return 0;
+    }
+
+    char *slash = strrchr(candidate, '/');
+    if (slash == NULL) {
+        return 0;
+    }
+    *slash = '\0';
+
+    size_t directory_length = strlen(candidate);
+    length = snprintf(candidate + directory_length,
+                      sizeof(candidate) - directory_length,
+                      "/cubicle-controller");
+    if (length < 0 ||
+        (size_t)length >= sizeof(candidate) - directory_length) {
+        return 0;
+    }
+
+    if (access(candidate, X_OK) == 0) {
+        snprintf(state->controller_bin, sizeof(state->controller_bin), "%s",
+                 candidate);
+    }
+    return 0;
 }
 
 static int append_line(const manager_state_t *state, const char *file_name,
@@ -649,11 +728,12 @@ static int open_manager_socket(const char *path, mode_t socket_mode,
     return fd;
 }
 
-static int split_tcp_uri(const char *uri, char *host, size_t host_size,
-                         char *port, size_t port_size)
+static int split_host_port_uri(const char *uri, const char *prefix,
+                               char *host, size_t host_size,
+                               char *port, size_t port_size)
 {
-    const char prefix[] = "tcp://";
-    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+    if (uri == NULL || prefix == NULL ||
+        strncmp(uri, prefix, strlen(prefix)) != 0) {
         errno = EINVAL;
         return -1;
     }
@@ -696,7 +776,9 @@ static int open_manager_tcp_listener(const char *uri)
 {
     char host[256];
     char port[32];
-    if (split_tcp_uri(uri, host, sizeof(host), port, sizeof(port)) < 0) {
+    const char *prefix = strncmp(uri, "tls://", 6) == 0 ? "tls://" : "tcp://";
+    if (split_host_port_uri(uri, prefix, host, sizeof(host), port,
+                            sizeof(port)) < 0) {
         return -1;
     }
 
@@ -749,6 +831,121 @@ static int open_manager_tcp_listener(const char *uri)
     return fd;
 }
 
+static void manager_set_tcp_low_latency(int fd)
+{
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled,
+                     sizeof(enabled));
+}
+
+static int manager_tls_paths(const manager_state_t *state,
+                             char cert_path[PATH_MAX],
+                             char key_path[PATH_MAX])
+{
+    int cert_length = snprintf(cert_path, PATH_MAX, "%s/tls/server.crt",
+                               state->dir);
+    int key_length = snprintf(key_path, PATH_MAX, "%s/tls/server.key",
+                              state->dir);
+    if (cert_length < 0 || cert_length >= PATH_MAX ||
+        key_length < 0 || key_length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int manager_generate_tls_material(const char *cert_path,
+                                         const char *key_path)
+{
+    EVP_PKEY *pkey = EVP_RSA_gen(2048);
+    X509 *cert = X509_new();
+    if (pkey == NULL || cert == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = EIO;
+        return -1;
+    }
+
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_get_notBefore(cert), 0);
+    X509_gmtime_adj(X509_get_notAfter(cert), 10L * 365L * 24L * 60L * 60L);
+    X509_set_version(cert, 2);
+    X509_set_pubkey(cert, pkey);
+
+    X509_NAME *name = X509_get_subject_name(cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char *)"cubicle-manager",
+                               -1, -1, 0);
+    X509_set_issuer_name(cert, name);
+    if (X509_sign(cert, pkey, EVP_sha256()) <= 0) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = EIO;
+        return -1;
+    }
+
+    FILE *key_file = fopen(key_path, "w");
+    if (key_file == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        return -1;
+    }
+    int ok = PEM_write_PrivateKey(key_file, pkey, NULL, NULL, 0, NULL, NULL);
+    int close_result = fclose(key_file);
+    if (!ok || close_result != 0 || chmod(key_path, 0600) < 0) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        errno = errno == 0 ? EIO : errno;
+        return -1;
+    }
+
+    FILE *cert_file = fopen(cert_path, "w");
+    if (cert_file == NULL) {
+        EVP_PKEY_free(pkey);
+        X509_free(cert);
+        return -1;
+    }
+    ok = PEM_write_X509(cert_file, cert);
+    close_result = fclose(cert_file);
+    EVP_PKEY_free(pkey);
+    X509_free(cert);
+    if (!ok || close_result != 0) {
+        errno = errno == 0 ? EIO : errno;
+        return -1;
+    }
+    return 0;
+}
+
+static SSL_CTX *manager_tls_context_create(const manager_state_t *state)
+{
+    char cert_path[PATH_MAX];
+    char key_path[PATH_MAX];
+    if (manager_tls_paths(state, cert_path, key_path) < 0 ||
+        ensure_parent_directory(cert_path) < 0) {
+        return NULL;
+    }
+    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
+        if (manager_generate_tls_material(cert_path, key_path) < 0) {
+            return NULL;
+        }
+    }
+
+    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+    if (ctx == NULL) {
+        errno = EIO;
+        return NULL;
+    }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+    if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_check_private_key(ctx) != 1) {
+        SSL_CTX_free(ctx);
+        errno = EIO;
+        return NULL;
+    }
+    return ctx;
+}
+
 static int open_manager_listener(const manager_state_t *state, const char *uri,
                                  int allow_insecure,
                                  char cleanup_path[PATH_MAX])
@@ -776,8 +973,51 @@ static int open_manager_listener(const manager_state_t *state, const char *uri,
         return open_manager_tcp_listener(uri);
     }
 
+    if (strncmp(uri, "tls://", 6) == 0) {
+        return open_manager_tcp_listener(uri);
+    }
+
     errno = EINVAL;
     return -1;
+}
+
+static void close_manager_listeners(manager_listener_t *listeners,
+                                    size_t listener_count)
+{
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (listeners[i].fd >= 0) {
+            close(listeners[i].fd);
+            listeners[i].fd = -1;
+        }
+        if (listeners[i].cleanup_path[0] != '\0') {
+            unlink(listeners[i].cleanup_path);
+            listeners[i].cleanup_path[0] = '\0';
+        }
+    }
+}
+
+static int add_manager_listener(const manager_state_t *state,
+                                manager_listener_t *listeners,
+                                size_t *listener_count,
+                                const char *uri,
+                                int allow_insecure)
+{
+    if (*listener_count >= 2) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    manager_listener_t *listener = &listeners[*listener_count];
+    listener->fd = open_manager_listener(state, uri, allow_insecure,
+                                         listener->cleanup_path);
+    if (listener->fd < 0) {
+        return -1;
+    }
+    listener->is_tcp = strncmp(uri, "tcp://", 6) == 0 ||
+                       strncmp(uri, "tls://", 6) == 0;
+    listener->is_tls = strncmp(uri, "tls://", 6) == 0;
+    ++*listener_count;
+    return 0;
 }
 
 static int manager_id(const manager_state_t *state, char id[CUBICLE_MANAGER_ID_LENGTH + 1])
@@ -3744,10 +3984,56 @@ static int read_all_fd(int fd, void *buffer, size_t length)
     return 0;
 }
 
+static int tls_read_all(SSL *ssl, void *buffer, size_t length)
+{
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        int chunk = length > INT32_MAX ? INT32_MAX : (int)length;
+        int result = SSL_read(ssl, cursor, chunk);
+        if (result <= 0) {
+            int ssl_error = SSL_get_error(ssl, result);
+            if (ssl_error == SSL_ERROR_WANT_READ ||
+                ssl_error == SSL_ERROR_WANT_WRITE) {
+                continue;
+            }
+            errno = ECONNRESET;
+            return -1;
+        }
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
+    return 0;
+}
+
+static int tls_write_all(SSL *ssl, const void *buffer, size_t length)
+{
+    const unsigned char *cursor = buffer;
+    while (length > 0) {
+        int chunk = length > INT32_MAX ? INT32_MAX : (int)length;
+        int result = SSL_write(ssl, cursor, chunk);
+        if (result <= 0) {
+            int ssl_error = SSL_get_error(ssl, result);
+            if (ssl_error == SSL_ERROR_WANT_READ ||
+                ssl_error == SSL_ERROR_WANT_WRITE) {
+                continue;
+            }
+            errno = EIO;
+            return -1;
+        }
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
+    return 0;
+}
+
 static int read_api_frame(int client_fd, char *request, size_t request_size)
 {
     uint32_t length_network = 0;
-    if (read_all_fd(client_fd, &length_network, sizeof(length_network)) < 0) {
+    if ((g_manager_tls != NULL
+             ? tls_read_all(g_manager_tls, &length_network,
+                            sizeof(length_network))
+             : read_all_fd(client_fd, &length_network,
+                           sizeof(length_network))) < 0) {
         return -1;
     }
 
@@ -3758,27 +4044,43 @@ static int read_api_frame(int client_fd, char *request, size_t request_size)
         return -1;
     }
 
-    if (read_all_fd(client_fd, request, length) < 0) {
+    if ((g_manager_tls != NULL
+             ? tls_read_all(g_manager_tls, request, length)
+             : read_all_fd(client_fd, request, length)) < 0) {
         return -1;
     }
     request[length] = '\0';
     return 0;
 }
 
-static int write_api_frame(int client_fd, const char *response)
+static int write_api_frame_with_limit(int client_fd, const char *response,
+                                      size_t max_frame_size)
 {
     size_t length = strlen(response);
-    if (length > CUBICLE_API_MAX_FRAME) {
+    if (length > max_frame_size) {
         errno = EMSGSIZE;
         return -1;
     }
 
     uint32_t length_network = htonl((uint32_t)length);
+    if (g_manager_tls != NULL) {
+        return tls_write_all(g_manager_tls, &length_network,
+                             sizeof(length_network)) == 0 &&
+                       tls_write_all(g_manager_tls, response, length) == 0
+                   ? 0
+                   : -1;
+    }
     return cubicle_write_all(client_fd, (const char *)&length_network,
                              sizeof(length_network)) == 0 &&
                    cubicle_write_all(client_fd, response, length) == 0
                ? 0
                : -1;
+}
+
+static int write_api_frame(int client_fd, const char *response)
+{
+    return write_api_frame_with_limit(client_fd, response,
+                                      CUBICLE_API_MAX_FRAME);
 }
 
 static int manager_api_error(int client_fd, const char *request_id,
@@ -3802,6 +4104,266 @@ static int manager_api_success(int client_fd, const char *request_id,
         return -1;
     }
     return write_api_frame(client_fd, response);
+}
+
+static int manager_api_success_large(int client_fd,
+                                     const char *request_id,
+                                     const char *result)
+{
+    size_t result_length = strlen(result);
+    size_t response_size = result_length + strlen(request_id) + 256;
+    if (response_size > CUBICLE_CONTROLLER_PROXY_MAX_FRAME) {
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_RESOURCE_LIMIT,
+                                 "response too large", false, 0);
+    }
+    char *response = malloc(response_size);
+    if (response == NULL) {
+        return manager_api_error(client_fd, request_id, CUBICLE_ERR_INTERNAL,
+                                 "failed to allocate response", false, ENOMEM);
+    }
+    if (cubicle_rpc_success(response, response_size, request_id, result) < 0) {
+        int saved_errno = errno;
+        free(response);
+        return manager_api_error(client_fd, request_id,
+                                 CUBICLE_ERR_RESOURCE_LIMIT,
+                                 "response too large", false, saved_errno);
+    }
+    int write_result = write_api_frame_with_limit(
+        client_fd, response, CUBICLE_CONTROLLER_PROXY_MAX_FRAME);
+    free(response);
+    return write_result;
+}
+
+static int connect_controller_socket(const char *socket_path)
+{
+    if (socket_path == NULL ||
+        strlen(socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    return fd;
+}
+
+static void manager_controller_cache_init(manager_connection_t *connection)
+{
+    if (connection == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        connection->controller_cache[i].fd = -1;
+        connection->controller_cache[i].last_used_ms = 0;
+        connection->controller_cache[i].socket_path[0] = '\0';
+    }
+}
+
+static void manager_controller_cache_close(manager_connection_t *connection)
+{
+    if (connection == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        if (connection->controller_cache[i].fd >= 0) {
+            close(connection->controller_cache[i].fd);
+            connection->controller_cache[i].fd = -1;
+        }
+        connection->controller_cache[i].last_used_ms = 0;
+        connection->controller_cache[i].socket_path[0] = '\0';
+    }
+}
+
+static void manager_controller_cache_invalidate(
+    manager_controller_cache_entry_t *entry)
+{
+    if (entry == NULL) {
+        return;
+    }
+
+    if (entry->fd >= 0) {
+        close(entry->fd);
+        entry->fd = -1;
+    }
+    entry->last_used_ms = 0;
+    entry->socket_path[0] = '\0';
+}
+
+static manager_controller_cache_entry_t *manager_controller_cache_get(
+    manager_connection_t *connection,
+    const char *socket_path)
+{
+    if (connection == NULL || socket_path == NULL ||
+        strlen(socket_path) >= CUBICLE_PATH_MAX) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    uint64_t now_ms = manager_time_ms();
+    size_t empty_slot = CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE;
+    for (size_t i = 0; i < CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE; ++i) {
+        manager_controller_cache_entry_t *entry =
+            &connection->controller_cache[i];
+        if (entry->fd >= 0 && strcmp(entry->socket_path, socket_path) == 0) {
+            if (now_ms > 0 && entry->last_used_ms > 0 &&
+                now_ms - entry->last_used_ms >
+                    CUBICLE_MANAGER_CONTROLLER_CACHE_MAX_IDLE_MS) {
+                manager_controller_cache_invalidate(entry);
+                empty_slot = i;
+                break;
+            }
+            return entry;
+        }
+        if (entry->fd < 0 && empty_slot == CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE) {
+            empty_slot = i;
+        }
+    }
+
+    if (empty_slot == CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE) {
+        empty_slot = 0;
+        manager_controller_cache_invalidate(
+            &connection->controller_cache[empty_slot]);
+    }
+
+    manager_controller_cache_entry_t *entry =
+        &connection->controller_cache[empty_slot];
+    entry->fd = connect_controller_socket(socket_path);
+    if (entry->fd < 0) {
+        entry->socket_path[0] = '\0';
+        return NULL;
+    }
+    entry->last_used_ms = now_ms;
+    snprintf(entry->socket_path, sizeof(entry->socket_path), "%s", socket_path);
+    return entry;
+}
+
+static int controller_rpc_call_fd(int fd,
+                                  const char *method,
+                                  const char *params,
+                                  char **response_out)
+{
+    char request[CUBICLE_API_MAX_FRAME];
+    if (cubicle_rpc_request(request, sizeof(request), "relay-1",
+                            "manager-relay", method,
+                            params == NULL ? "{}" : params) < 0) {
+        return -1;
+    }
+
+    size_t length = strlen(request);
+    uint32_t length_network = htonl((uint32_t)length);
+    if (cubicle_write_all(fd, (const char *)&length_network,
+                          sizeof(length_network)) < 0 ||
+        cubicle_write_all(fd, request, length) < 0) {
+        return -1;
+    }
+
+    uint32_t response_length_network = 0;
+    if (read_all_fd(fd, &response_length_network,
+                    sizeof(response_length_network)) < 0) {
+        return -1;
+    }
+    uint32_t response_length = ntohl(response_length_network);
+    if (response_length == 0 ||
+        response_length > CUBICLE_CONTROLLER_PROXY_MAX_FRAME) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    char *response = calloc((size_t)response_length + 1, 1);
+    if (response == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (read_all_fd(fd, response, response_length) < 0) {
+        int saved_errno = errno;
+        free(response);
+        errno = saved_errno;
+        return -1;
+    }
+    response[response_length] = '\0';
+    *response_out = response;
+    return 0;
+}
+
+static int manager_connection_controller_rpc_call(
+    manager_connection_t *connection,
+    const char *socket_path,
+    const char *method,
+    const char *params,
+    char **response_out)
+{
+    manager_controller_cache_entry_t *entry =
+        manager_controller_cache_get(connection, socket_path);
+    if (entry == NULL) {
+        return -1;
+    }
+
+    if (controller_rpc_call_fd(entry->fd, method, params, response_out) == 0) {
+        entry->last_used_ms = manager_time_ms();
+        return 0;
+    }
+
+    int saved_errno = errno;
+    manager_controller_cache_invalidate(entry);
+    errno = saved_errno;
+    return -1;
+}
+
+static int manager_proxy_controller_response(int client_fd,
+                                             const char *request_id,
+                                             char *controller_response)
+{
+    cubicle_rpc_response_envelope_t envelope;
+    if (cubicle_rpc_decode_response(&envelope, controller_response,
+                                    "relay-1") < 0) {
+        return manager_api_error(client_fd, request_id, CUBICLE_ERR_PROTOCOL,
+                                 "invalid controller response", false, 0);
+    }
+
+    int result = 0;
+    if (envelope.success) {
+        char *result_json = cubicle_json_copy_value(envelope.result);
+        if (result_json == NULL) {
+            result = manager_api_error(client_fd, request_id,
+                                       CUBICLE_ERR_RESOURCE_LIMIT,
+                                       "controller response too large", false,
+                                       errno);
+        } else {
+            result = manager_api_success_large(client_fd, request_id,
+                                               result_json);
+            free(result_json);
+        }
+    } else {
+        cubicle_error_t error;
+        if (cubicle_rpc_decode_error_value(envelope.error, &error) < 0) {
+            result = manager_api_error(client_fd, request_id,
+                                       CUBICLE_ERR_PROTOCOL,
+                                       "invalid controller error", false, 0);
+        } else {
+            result = manager_api_error(client_fd, request_id, error.code,
+                                       error.message, error.retryable,
+                                       error.system_errno);
+        }
+    }
+
+    cubicle_rpc_response_envelope_cleanup(&envelope);
+    return result;
 }
 
 static void load_peer_credentials(int client_fd, manager_connection_t *connection)
@@ -4078,7 +4640,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
     uint64_t now_ms = manager_time_ms();
     if (strcmp(method, "auth.challenge") == 0) {
-        if (!connection->has_peer_credentials) {
+        if (!connection->has_peer_credentials && !connection->is_tls) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_UNSUPPORTED,
                                              "authenticated bootstrap requires Unix peer credentials",
@@ -4133,8 +4695,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         transcript.capabilities =
             CUBICLE_API_CAPABILITIES | CUBICLE_PROTOCOL_CAP_AUTH_ED25519;
         transcript.manager_generation = connection->runtime->started_at_ms;
-        transcript.peer_uid = connection->peer_uid;
-        transcript.peer_gid = connection->peer_gid;
+        transcript.peer_uid =
+            connection->has_peer_credentials ? connection->peer_uid : 0;
+        transcript.peer_gid =
+            connection->has_peer_credentials ? connection->peer_gid : 0;
         if (has_workspace_ref) {
             snprintf(transcript.workspace_ref, sizeof(transcript.workspace_ref),
                      "%s", workspace_ref);
@@ -4241,7 +4805,7 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
     }
 
     if (strcmp(method, "auth.resume") == 0) {
-        if (!connection->has_peer_credentials) {
+        if (!connection->has_peer_credentials && !connection->is_tls) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_UNSUPPORTED,
                                              "session resume requires Unix peer credentials",
@@ -4279,8 +4843,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         if (!runtime_find_session_copy(connection->runtime, session_id,
                                        &record) ||
             record.manager_generation != connection->runtime->started_at_ms ||
-            record.peer_uid != connection->peer_uid ||
-            record.peer_gid != connection->peer_gid ||
+            record.peer_uid !=
+                (connection->has_peer_credentials ? connection->peer_uid : 0) ||
+            record.peer_gid !=
+                (connection->has_peer_credentials ? connection->peer_gid : 0) ||
             (record.session.expires_at_ms > 0 &&
              record.session.expires_at_ms < now_ms)) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
@@ -4305,8 +4871,10 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                                              false, 0));
         }
         resume.manager_generation = connection->runtime->started_at_ms;
-        resume.peer_uid = connection->peer_uid;
-        resume.peer_gid = connection->peer_gid;
+        resume.peer_uid =
+            connection->has_peer_credentials ? connection->peer_uid : 0;
+        resume.peer_gid =
+            connection->has_peer_credentials ? connection->peer_gid : 0;
 
         unsigned char resume_bytes[512];
         size_t resume_length = 0;
@@ -6429,6 +6997,129 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         MANAGER_RETURN(manager_api_success(client_fd, request_id, "{}"));
     }
 
+    if (strcmp(method, "attachment.proxy") == 0) {
+        char process_id[128];
+        char grant_id[CUBICLE_ID_STRING_LENGTH];
+        char token[CUBICLE_TOKEN_MAX];
+        char attachment_mode[32];
+        char controller_method[128];
+        uint64_t channels = 0;
+        yyjson_val *controller_params = NULL;
+        cubicle_validation_error_t validation_error;
+        if (cubicle_json_get_required_string(params, "process_id",
+                                             process_id,
+                                             sizeof(process_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "grant_id", grant_id,
+                                             sizeof(grant_id),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "token", token,
+                                             sizeof(token),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_u64(params, "channels", &channels,
+                                          &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "mode",
+                                             attachment_mode,
+                                             sizeof(attachment_mode),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_string(params, "method",
+                                             controller_method,
+                                             sizeof(controller_method),
+                                             &validation_error) < 0 ||
+            cubicle_json_get_required_object(params, "params",
+                                             &controller_params,
+                                             &validation_error) < 0 ||
+            channels == 0 ||
+            (channels & ~(uint64_t)(CUBICLE_CHANNEL_STDIN |
+                                    CUBICLE_CHANNEL_STDOUT |
+                                    CUBICLE_CHANNEL_STDERR |
+                                    CUBICLE_CHANNEL_TTY)) != 0 ||
+            (strcmp(attachment_mode, "observer") != 0 &&
+             strcmp(attachment_mode, "interactive") != 0)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "invalid attachment proxy request",
+                                             false, 0));
+        }
+
+        if (strcmp(controller_method, "controller.attach") != 0 &&
+            strcmp(controller_method, "controller.read") != 0 &&
+            strcmp(controller_method, "controller.write") != 0 &&
+            strcmp(controller_method, "controller.resize") != 0 &&
+            strcmp(controller_method, "controller.close_input") != 0 &&
+            strcmp(controller_method, "controller.status") != 0 &&
+            strcmp(controller_method, "controller.snapshot") != 0 &&
+            strcmp(controller_method, "controller.detach") != 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_INVALID_ARGUMENT,
+                                             "unsupported attachment proxy method",
+                                             false, 0));
+        }
+
+        char expected_token[CUBICLE_TOKEN_MAX];
+        int token_length = snprintf(expected_token, sizeof(expected_token),
+                                    "local:%s:%s", grant_id, process_id);
+        if (token_length < 0 ||
+            (size_t)token_length >= sizeof(expected_token) ||
+            strcmp(expected_token, token) != 0) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "invalid attachment token",
+                                             false, 0));
+        }
+
+        cubicle_process_record_t process;
+        int ambiguous = 0;
+        if (find_process_record(state, process_id, NULL, &process,
+                                &ambiguous) < 0) {
+            (void)ambiguous;
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_NOT_FOUND,
+                                             "process not found", false, 0));
+        }
+
+        cubicle_capability_mask_t attachment_capability =
+            strcmp(attachment_mode, "interactive") == 0 ||
+                    (channels & CUBICLE_CHANNEL_STDIN) != 0
+                ? (CUBICLE_CAP_PROCESS_OBSERVE | CUBICLE_CAP_PROCESS_INPUT)
+                : CUBICLE_CAP_PROCESS_OBSERVE;
+        if (!connection_has_workspace_capability(
+                state, process.workspace_id, connection,
+                attachment_capability)) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_PERMISSION_DENIED,
+                                             "attachment access is required",
+                                             false, 0));
+        }
+
+        char *controller_params_json =
+            cubicle_json_copy_value(controller_params);
+        if (controller_params_json == NULL) {
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_RESOURCE_LIMIT,
+                                             "attachment proxy params too large",
+                                             false, errno));
+        }
+
+        char *controller_response = NULL;
+        if (manager_connection_controller_rpc_call(
+                connection, process.control_socket, controller_method,
+                controller_params_json, &controller_response) < 0) {
+            int saved_errno = errno;
+            free(controller_params_json);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_CONTROLLER_UNAVAILABLE,
+                                             "controller proxy failed", true,
+                                             saved_errno));
+        }
+        free(controller_params_json);
+
+        int proxy_result = manager_proxy_controller_response(
+            client_fd, request_id, controller_response);
+        free(controller_response);
+        MANAGER_RETURN(proxy_result);
+    }
+
     if (strcmp(method, "attachment.request") == 0) {
         char process_id[128];
         char mode[32] = "observer";
@@ -6942,17 +7633,23 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
 
 static int handle_manager_connection(const manager_state_t *state,
                                      int client_fd,
-                                     manager_runtime_t *runtime)
+                                     manager_runtime_t *runtime,
+                                     int is_tls)
 {
     manager_connection_t connection;
     load_peer_credentials(client_fd, &connection);
+    manager_controller_cache_init(&connection);
+    connection.is_tls = is_tls;
     connection.runtime = runtime;
     while (!runtime_shutdown_requested(runtime)) {
         if (handle_manager_client(state, client_fd, &connection) == 0) {
             continue;
         }
-        return errno == ECONNRESET ? 0 : -1;
+        int result = errno == ECONNRESET ? 0 : -1;
+        manager_controller_cache_close(&connection);
+        return result;
     }
+    manager_controller_cache_close(&connection);
     return 0;
 }
 
@@ -6991,6 +7688,8 @@ static int manager_runtime_init(manager_runtime_t *runtime,
 
 static void manager_runtime_destroy(manager_runtime_t *runtime)
 {
+    SSL_CTX_free(runtime->tls_ctx);
+    runtime->tls_ctx = NULL;
     pthread_cond_destroy(&runtime->workers_cond);
     pthread_mutex_destroy(&runtime->workers_mutex);
     pthread_mutex_destroy(&runtime->sessions_mutex);
@@ -7001,14 +7700,46 @@ static void *manager_worker_main(void *argument)
     manager_worker_slot_t *slot = argument;
     manager_runtime_t *runtime = slot->runtime;
     int client_fd = slot->fd;
+    int is_tls = slot->is_tls;
+    SSL *ssl = NULL;
 
-    if (handle_manager_connection(runtime->state, client_fd, runtime) < 0) {
+    if (is_tls) {
+        if (runtime->tls_ctx == NULL) {
+            manager_log_error(EPROTO);
+            close(client_fd);
+            goto done;
+        }
+        ssl = SSL_new(runtime->tls_ctx);
+        if (ssl == NULL) {
+            manager_log_error(EIO);
+            close(client_fd);
+            goto done;
+        }
+        SSL_set_fd(ssl, client_fd);
+        if (SSL_accept(ssl) != 1) {
+            manager_log_error(EPROTO);
+            SSL_free(ssl);
+            close(client_fd);
+            goto done;
+        }
+        g_manager_tls = ssl;
+    }
+
+    if (handle_manager_connection(runtime->state, client_fd, runtime,
+                                  is_tls) < 0) {
         manager_log_error(errno);
+    }
+    g_manager_tls = NULL;
+    if (ssl != NULL) {
+        (void)SSL_shutdown(ssl);
+        SSL_free(ssl);
     }
     close(client_fd);
 
+done:
     pthread_mutex_lock(&runtime->workers_mutex);
     slot->fd = -1;
+    slot->is_tls = 0;
     slot->active = 0;
     if (runtime->active_workers > 0) {
         --runtime->active_workers;
@@ -7019,7 +7750,8 @@ static void *manager_worker_main(void *argument)
 }
 
 static int manager_runtime_start_worker(manager_runtime_t *runtime,
-                                        int client_fd)
+                                        int client_fd,
+                                        int is_tls)
 {
     pthread_mutex_lock(&runtime->workers_mutex);
     if (runtime->shutdown_requested ||
@@ -7044,6 +7776,7 @@ static int manager_runtime_start_worker(manager_runtime_t *runtime,
 
     slot->active = 1;
     slot->fd = client_fd;
+    slot->is_tls = is_tls;
     slot->runtime = runtime;
     ++runtime->active_workers;
     pthread_mutex_unlock(&runtime->workers_mutex);
@@ -7054,6 +7787,7 @@ static int manager_runtime_start_worker(manager_runtime_t *runtime,
         pthread_mutex_lock(&runtime->workers_mutex);
         slot->active = 0;
         slot->fd = -1;
+        slot->is_tls = 0;
         if (runtime->active_workers > 0) {
             --runtime->active_workers;
         }
@@ -7090,7 +7824,7 @@ static void manager_runtime_wait_workers(manager_runtime_t *runtime)
     pthread_mutex_unlock(&runtime->workers_mutex);
 }
 
-static int daemonize_manager(void)
+static int daemonize_manager(const manager_state_t *state)
 {
     fflush(NULL);
 
@@ -7114,20 +7848,40 @@ static int daemonize_manager(void)
         _exit(0);
     }
 
+    char log_path[PATH_MAX];
+    int log_length = snprintf(log_path, sizeof(log_path), "%s/manager.log",
+                              state->log_dir);
+    if (log_length < 0 || (size_t)log_length >= sizeof(log_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
     int devnull = open("/dev/null", O_RDWR);
     if (devnull < 0) {
         return -1;
     }
-    if (dup2(devnull, STDIN_FILENO) < 0 ||
-        dup2(devnull, STDOUT_FILENO) < 0 ||
-        dup2(devnull, STDERR_FILENO) < 0) {
+    int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                      0600);
+    if (log_fd < 0) {
         int saved_errno = errno;
         close(devnull);
         errno = saved_errno;
         return -1;
     }
+    if (dup2(devnull, STDIN_FILENO) < 0 ||
+        dup2(devnull, STDOUT_FILENO) < 0 ||
+        dup2(log_fd, STDERR_FILENO) < 0) {
+        int saved_errno = errno;
+        close(devnull);
+        close(log_fd);
+        errno = saved_errno;
+        return -1;
+    }
     if (devnull > STDERR_FILENO) {
         close(devnull);
+    }
+    if (log_fd > STDERR_FILENO) {
+        close(log_fd);
     }
     return 0;
 }
@@ -7169,66 +7923,100 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                 CUBICLE_MANAGER_MAX_CLIENTS);
         return 2;
     }
-    if (requested_socket != NULL && requested_uri != NULL) {
-        fprintf(stderr,
-                "daemon accepts only one of --control-socket or --listen\n");
-        return 2;
-    }
-
     int daemon_lock_fd = lock_daemon(state);
     if (daemon_lock_fd < 0) {
         manager_log_error(errno);
         return 1;
     }
 
+    manager_listener_t listeners[2];
+    for (size_t i = 0; i < 2; ++i) {
+        listeners[i].fd = -1;
+        listeners[i].is_tcp = 0;
+        listeners[i].is_tls = 0;
+        listeners[i].cleanup_path[0] = '\0';
+    }
+    size_t listener_count = 0;
     char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
-    if (manager_listen_uri(listen_uri, state, requested_socket,
-                           requested_uri) < 0) {
-        manager_log_error(errno);
-        unlock_state(daemon_lock_fd);
-        return 1;
+
+    if (requested_uri != NULL) {
+        if (manager_listen_uri(listen_uri, state, NULL, requested_uri) < 0) {
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+        if (add_manager_listener(state, listeners, &listener_count,
+                                 listen_uri, allow_insecure) < 0) {
+            if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
+                fprintf(stderr,
+                        "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
+                        listen_uri);
+            }
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+
+        if (strncmp(listen_uri, "tcp://", 6) == 0 ||
+            strncmp(listen_uri, "tls://", 6) == 0) {
+            char local_uri[CUBICLE_ENDPOINT_URI_MAX];
+            if (manager_listen_uri(local_uri, state, requested_socket,
+                                   NULL) < 0) {
+                manager_log_error(errno);
+                close_manager_listeners(listeners, listener_count);
+                unlock_state(daemon_lock_fd);
+                return 1;
+            }
+            if (strncmp(local_uri, "unix://", 7) == 0 &&
+                strcmp(local_uri, listen_uri) != 0) {
+                if (add_manager_listener(state, listeners, &listener_count,
+                                         local_uri, 0) < 0) {
+                    manager_log_error(errno);
+                    close_manager_listeners(listeners, listener_count);
+                    unlock_state(daemon_lock_fd);
+                    return 1;
+                }
+            }
+        }
+    } else {
+        if (manager_listen_uri(listen_uri, state, requested_socket,
+                               NULL) < 0) {
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+        if (add_manager_listener(state, listeners, &listener_count,
+                                 listen_uri, allow_insecure) < 0) {
+            if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
+                fprintf(stderr,
+                        "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
+                        listen_uri);
+            }
+            manager_log_error(errno);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
     }
 
-    char cleanup_path[PATH_MAX];
-    int listen_fd = open_manager_listener(state, listen_uri, allow_insecure,
-                                          cleanup_path);
-    if (listen_fd < 0) {
-        if (errno == EACCES && strncmp(listen_uri, "tcp://", 6) == 0) {
-            fprintf(stderr,
-                    "manager: refusing unauthenticated TCP listener %s without --allow-insecure\n",
-                    listen_uri);
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (set_fd_nonblocking(listeners[i].fd) < 0) {
+            manager_log_error(errno);
+            close_manager_listeners(listeners, listener_count);
+            unlock_state(daemon_lock_fd);
+            return 1;
         }
-        manager_log_error(errno);
-        unlock_state(daemon_lock_fd);
-        return 1;
-    }
-
-    if (set_fd_nonblocking(listen_fd) < 0) {
-        manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
-        unlock_state(daemon_lock_fd);
-        return 1;
     }
 
     if (reconcile_process_records(state) < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
 
-    if (!foreground && daemonize_manager() < 0) {
+    if (!foreground && daemonize_manager(state) < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
@@ -7237,23 +8025,31 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     manager_runtime_t runtime;
     if (manager_runtime_init(&runtime, state, max_clients) < 0) {
         manager_log_error(errno);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
+        close_manager_listeners(listeners, listener_count);
         unlock_state(daemon_lock_fd);
         return 1;
     }
+    int has_tls_listener = 0;
+    for (size_t i = 0; i < listener_count; ++i) {
+        if (listeners[i].is_tls) {
+            has_tls_listener = 1;
+            break;
+        }
+    }
+    if (has_tls_listener) {
+        runtime.tls_ctx = manager_tls_context_create(state);
+        if (runtime.tls_ctx == NULL) {
+            manager_log_error(errno);
+            manager_runtime_destroy(&runtime);
+            close_manager_listeners(listeners, listener_count);
+            unlock_state(daemon_lock_fd);
+            return 1;
+        }
+    }
 
     if (autostart_restart_processes(state) < 0) {
-        manager_log_error(errno);
-        manager_runtime_destroy(&runtime);
-        close(listen_fd);
-        if (cleanup_path[0] != '\0') {
-            unlink(cleanup_path);
-        }
-        unlock_state(daemon_lock_fd);
-        return 1;
+        cubicle_log(CUBICLE_LOG_WARN, "manager",
+                    manager_error_message(errno));
     }
 
     while (!runtime_shutdown_requested(&runtime)) {
@@ -7264,8 +8060,13 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             manager_log_error(errno);
         }
 
-        struct pollfd daemon_fd = {.fd = listen_fd, .events = POLLIN};
-        int ready = poll(&daemon_fd, 1, poll_interval_ms);
+        struct pollfd daemon_fds[2];
+        for (size_t i = 0; i < listener_count; ++i) {
+            daemon_fds[i].fd = listeners[i].fd;
+            daemon_fds[i].events = POLLIN;
+            daemon_fds[i].revents = 0;
+        }
+        int ready = poll(daemon_fds, listener_count, poll_interval_ms);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -7275,45 +8076,51 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             break;
         }
 
-        if (ready == 0 || (daemon_fd.revents & POLLIN) == 0) {
+        if (ready == 0) {
             continue;
         }
 
-        for (;;) {
-            int client_fd = accept(listen_fd, NULL, NULL);
-            if (client_fd < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        for (size_t i = 0; i < listener_count; ++i) {
+            if ((daemon_fds[i].revents & POLLIN) == 0) {
+                continue;
+            }
+            for (;;) {
+                int client_fd = accept(listeners[i].fd, NULL, NULL);
+                if (client_fd < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        break;
+                    }
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    manager_log_error(errno);
+                    result = 1;
                     break;
                 }
-                if (errno == EINTR) {
-                    continue;
+                if (set_fd_cloexec(client_fd) < 0) {
+                    manager_log_error(errno);
+                    close(client_fd);
+                    result = 1;
+                    break;
                 }
-                manager_log_error(errno);
-                result = 1;
-                break;
-            }
-            if (set_fd_cloexec(client_fd) < 0) {
-                manager_log_error(errno);
-                close(client_fd);
-                result = 1;
-                break;
-            }
+                if (listeners[i].is_tcp || listeners[i].is_tls) {
+                    manager_set_tcp_low_latency(client_fd);
+                }
 
-            if (manager_runtime_start_worker(&runtime, client_fd) < 0) {
-                manager_log_error(errno);
-                shutdown(client_fd, SHUT_RDWR);
-                close(client_fd);
+                if (manager_runtime_start_worker(&runtime, client_fd,
+                                                 listeners[i].is_tls) < 0) {
+                    manager_log_error(errno);
+                    shutdown(client_fd, SHUT_RDWR);
+                    close(client_fd);
+                }
             }
         }
     }
 
-    close(listen_fd);
+    close_manager_listeners(listeners, listener_count);
     manager_runtime_shutdown_worker_sockets(&runtime);
     manager_runtime_wait_workers(&runtime);
     manager_runtime_destroy(&runtime);
-    if (cleanup_path[0] != '\0') {
-        unlink(cleanup_path);
-    }
     unlock_state(daemon_lock_fd);
     return result;
 }
@@ -7499,12 +8306,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "Runtime directory path is too long\n");
             return 2;
         }
-        result = snprintf(state.listen_uri, sizeof(state.listen_uri),
-                          "unix://%s/manager.sock", state.runtime_dir);
-        if (result < 0 || (size_t)result >= sizeof(state.listen_uri)) {
+        if (manager_listen_uri_for_runtime(state.listen_uri,
+                                           state.runtime_dir) < 0) {
             fprintf(stderr, "Manager socket path is too long\n");
             return 2;
         }
+    }
+    if (runtime_dir_overridden &&
+        manager_listen_uri_for_runtime(state.listen_uri,
+                                       state.runtime_dir) < 0) {
+        fprintf(stderr, "Manager socket path is too long\n");
+        return 2;
     }
     if (state_dir_overridden && !log_dir_overridden) {
         int result = snprintf(state.log_dir, sizeof(state.log_dir),
@@ -7514,6 +8326,7 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    (void)resolve_build_tree_controller(&state, argv[0]);
 
     log_manager_effective_config(&state);
 

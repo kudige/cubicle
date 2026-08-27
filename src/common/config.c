@@ -948,6 +948,22 @@ static const char *user_home_directory(void)
     return entry != NULL ? entry->pw_dir : NULL;
 }
 
+static int format_user_runtime_dir(char *buffer,
+                                   size_t buffer_size,
+                                   uid_t uid)
+{
+#ifdef __APPLE__
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0') {
+        tmpdir = "/tmp";
+    }
+    return snprintf(buffer, buffer_size, "%s/cubicle-%ld/cubicle",
+                    tmpdir, (long)uid);
+#else
+    return snprintf(buffer, buffer_size, "/run/user/%ld/cubicle", (long)uid);
+#endif
+}
+
 static int set_user_defaults(cubicle_config_t *config)
 {
     uid_t uid = geteuid();
@@ -985,9 +1001,9 @@ static int set_user_defaults(cubicle_config_t *config)
                           sizeof(config->manager_runtime_dir),
                           "%s/cubicle", runtime_dir);
     } else {
-        result = snprintf(config->manager_runtime_dir,
-                          sizeof(config->manager_runtime_dir),
-                          "/run/user/%ld/cubicle", (long)uid);
+        result = format_user_runtime_dir(config->manager_runtime_dir,
+                                         sizeof(config->manager_runtime_dir),
+                                         uid);
     }
     if (result < 0 || (size_t)result >= sizeof(config->manager_runtime_dir)) {
         return -1;
@@ -1070,15 +1086,31 @@ void cubicle_config_defaults(cubicle_config_t *config)
     if (geteuid() != 0 && set_user_defaults(config) < 0) {
         snprintf(config->manager_state_dir, sizeof(config->manager_state_dir),
                  "/tmp/cubicle-state-%ld", (long)geteuid());
-        snprintf(config->manager_runtime_dir,
-                 sizeof(config->manager_runtime_dir),
-                 "/run/user/%ld/cubicle", (long)geteuid());
+        int runtime_length = format_user_runtime_dir(
+            config->manager_runtime_dir, sizeof(config->manager_runtime_dir),
+            geteuid());
+        if (runtime_length < 0 ||
+            (size_t)runtime_length >= sizeof(config->manager_runtime_dir)) {
+            snprintf(config->manager_runtime_dir,
+                     sizeof(config->manager_runtime_dir),
+                     "/tmp/cubicle-runtime-%ld", (long)geteuid());
+        }
         snprintf(config->manager_log_dir, sizeof(config->manager_log_dir),
                  "/tmp/cubicle-log-%ld", (long)geteuid());
-        snprintf(config->manager_listen_uri,
-                 sizeof(config->manager_listen_uri),
-                 "unix:///run/user/%ld/cubicle/manager.sock",
-                 (long)geteuid());
+        int listen_length = snprintf(config->manager_listen_uri,
+                                     sizeof(config->manager_listen_uri),
+                                     "unix://%s/manager.sock",
+                                     config->manager_runtime_dir);
+        if (listen_length < 0 ||
+            (size_t)listen_length >= sizeof(config->manager_listen_uri)) {
+            snprintf(config->manager_runtime_dir,
+                     sizeof(config->manager_runtime_dir),
+                     "/tmp/cubicle-runtime-%ld", (long)geteuid());
+            snprintf(config->manager_listen_uri,
+                     sizeof(config->manager_listen_uri),
+                     "unix:///tmp/cubicle-runtime-%ld/manager.sock",
+                     (long)geteuid());
+        }
         snprintf(config->client_manager_uri,
                  sizeof(config->client_manager_uri), "%s",
                  config->manager_listen_uri);
@@ -1636,10 +1668,10 @@ int cubicle_config_unix_uri_path(const char *uri, char *path, size_t path_size)
     return 0;
 }
 
-static int validate_tcp_uri(const char *uri)
+static int validate_host_port_uri(const char *uri, const char *prefix)
 {
-    const char prefix[] = "tcp://";
-    if (uri == NULL || strncmp(uri, prefix, strlen(prefix)) != 0) {
+    if (uri == NULL || prefix == NULL ||
+        strncmp(uri, prefix, strlen(prefix)) != 0) {
         errno = EINVAL;
         return -1;
     }
@@ -1682,7 +1714,14 @@ static int validate_endpoint_uri(const char *uri)
                                      sizeof(endpoint_path)) == 0) {
         return 0;
     }
-    return validate_tcp_uri(uri);
+    if (strncmp(uri, "tcp://", 6) == 0) {
+        return validate_host_port_uri(uri, "tcp://");
+    }
+    if (strncmp(uri, "tls://", 6) == 0) {
+        return validate_host_port_uri(uri, "tls://");
+    }
+    errno = EINVAL;
+    return -1;
 }
 
 int cubicle_config_validate(const cubicle_config_t *config,
@@ -1706,14 +1745,14 @@ int cubicle_config_validate(const cubicle_config_t *config,
         validate_endpoint_uri(config->manager_listen_uri) < 0) {
         if (error != NULL && error_size > 0 && error[0] == '\0') {
             snprintf(error, error_size,
-                     "manager.listen must be an absolute unix:// endpoint or tcp://host:port endpoint");
+                     "manager.listen must be an absolute unix:// endpoint, tcp://host:port endpoint, or tls://host:port endpoint");
         }
         return -1;
     }
 
     if (validate_endpoint_uri(config->client_manager_uri) < 0) {
         set_error(error, error_size,
-                  "client.manager must be an absolute unix:// endpoint or tcp://host:port endpoint");
+                  "client.manager must be an absolute unix:// endpoint, tcp://host:port endpoint, or tls://host:port endpoint");
         return -1;
     }
 

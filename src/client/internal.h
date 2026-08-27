@@ -36,9 +36,11 @@ struct cubicle_signer {
 struct cubicle_attachment {
     cubicle_attachment_grant_t grant;
     cubicle_client_t *controller;
+    cubicle_client_t *manager;
     cubicle_error_t last_error;
     cubicle_channel_mask_t channels;
     cubicle_attachment_mode_t mode;
+    int relay;
     int idle_timeout_ms;
     int attached_once;
     int persistent_unsupported;

@@ -6,11 +6,16 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
 pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+pkg_check_modules(LIBSSL REQUIRED IMPORTED_TARGET libssl)
 pkg_check_modules(LIBVTERM REQUIRED IMPORTED_TARGET vterm)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
 
 option(CUBICLE_ENABLE_COVERAGE "Build with gcov/lcov coverage instrumentation" OFF)
 option(CUBICLE_ENABLE_SANITIZERS "Build with ASan/UBSan instrumentation" OFF)
@@ -50,7 +55,7 @@ add_library(cubicle_common
 
 target_include_directories(cubicle_common PUBLIC include)
 target_include_directories(cubicle_common PRIVATE third_party/yyjson)
-target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO PkgConfig::LIBVTERM)
+target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO PkgConfig::LIBSSL PkgConfig::LIBVTERM)
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -67,6 +72,7 @@ add_library(cubicle_client
     src/client/process.c
     src/client/rpc_client.c
     src/client/transport_tcp.c
+    src/client/transport_tls.c
     src/client/transport_unix.c
     src/client/workspace.c
 )
@@ -576,6 +582,16 @@ add_test(
             CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
             CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
             sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_tcp_test.sh
+)
+
+add_test(
+    NAME cubicle-manager-tls-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT=$<TARGET_FILE:cubicle-attachment-snapshot-client>
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_tls_test.sh
 )
 
 add_test(

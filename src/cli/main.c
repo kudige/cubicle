@@ -178,6 +178,8 @@ static void print_usage(FILE *stream)
             "  cube cleanup [NAME|PATTERN]\n"
             "  cube shutdown [--manager-only]\n"
             "  cube access list|add|set-role|remove|revoke ...\n"
+            "  cube identity pub\n"
+            "  cube remote list|add|inspect|remove ...\n"
             "  cube config show|effective|paths|validate\n"
             "  cube defaults show|set|reset ...\n"
             "\n"
@@ -244,7 +246,7 @@ static int print_command_usage(const char *command, FILE *stream)
     if (strcmp(command, "connect") == 0) {
         fprintf(stream,
                 "Usage:\n  cube connect [--ro] NAME\n"
-                "\nNAME may be WORKSPACE.NAME.\n");
+                "\nNAME may be WORKSPACE.NAME or WORKSPACE@REMOTE.NAME.\n");
         return 0;
     }
     if (strcmp(command, "push") == 0) {
@@ -316,6 +318,19 @@ static int print_command_usage(const char *command, FILE *stream)
                 "  cube access set-role KEY_ID observer|operator|owner\n"
                 "  cube access remove KEY_ID\n"
                 "  cube access revoke KEY_ID\n");
+        return 0;
+    }
+    if (strcmp(command, "identity") == 0) {
+        fprintf(stream, "Usage:\n  cube identity pub\n");
+        return 0;
+    }
+    if (strcmp(command, "remote") == 0) {
+        fprintf(stream,
+                "Usage:\n"
+                "  cube remote list\n"
+                "  cube remote add NAME tls://host:port [--yes]\n"
+                "  cube remote inspect NAME\n"
+                "  cube remote remove NAME\n");
         return 0;
     }
     if (strcmp(command, "config") == 0) {
@@ -424,6 +439,60 @@ static int command_requires_manager(const char *command)
            strcmp(command, "logs") == 0 ||
            strcmp(command, "events") == 0;
 }
+
+static const char *cube_user_home_directory(void);
+
+static int cube_client_key_dir(char path[CUBICLE_PATH_MAX])
+{
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    int length;
+    if (config_home != NULL && config_home[0] != '\0') {
+        length = snprintf(path, CUBICLE_PATH_MAX, "%s/cubicle/keys",
+                          config_home);
+    } else {
+        const char *home = cube_user_home_directory();
+        if (home == NULL || home[0] == '\0') {
+            errno = ENOENT;
+            return -1;
+        }
+        length = snprintf(path, CUBICLE_PATH_MAX,
+                          "%s/.config/cubicle/keys", home);
+    }
+    if (length < 0 || length >= CUBICLE_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int command_identity(int argc, char **argv, int command_index)
+{
+    if (command_index + 2 != argc ||
+        strcmp(argv[command_index + 1], "pub") != 0) {
+        fprintf(stderr, "cube: identity requires pub\n");
+        return 2;
+    }
+
+    char key_dir[CUBICLE_PATH_MAX];
+    cubicle_auth_identity_t identity;
+    if (cube_client_key_dir(key_dir) < 0 ||
+        cubicle_auth_ensure_identity(key_dir, "client.key", "client.pub",
+                                     &identity) < 0) {
+        fprintf(stderr, "cube: failed to initialize client identity: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    printf("%s\n", identity.public_key_hex);
+    return 0;
+}
+
+typedef struct cube_remote_record {
+    char name[CUBICLE_NAME_MAX];
+    char uri[CUBICLE_ENDPOINT_URI_MAX];
+    char manager_id[CUBICLE_ID_STRING_LENGTH];
+    char manager_public_key[CUBICLE_SERVER_ID_MAX];
+    uint64_t added_at_ms;
+} cube_remote_record_t;
 
 static int command_config(const cubicle_config_t *config,
                           const char *config_error,
@@ -1058,6 +1127,427 @@ static int cube_atomic_write_user_config(const char *path, const char *content)
     (void)unlink(temporary);
     errno = saved_errno;
     return -1;
+}
+
+static int cube_remote_registry_path(char path[CUBICLE_PATH_MAX])
+{
+    if (cube_user_config_path(path) < 0) {
+        return -1;
+    }
+    char *slash = strrchr(path, '/');
+    if (slash == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    ++slash;
+    int remaining = CUBICLE_PATH_MAX - (int)(slash - path);
+    int length = snprintf(slash, (size_t)remaining, "remotes.tsv");
+    if (length < 0 || length >= remaining) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int cube_remote_name_valid(const char *name)
+{
+    if (name == NULL || name[0] == '\0' || strlen(name) >= CUBICLE_NAME_MAX) {
+        return 0;
+    }
+    for (const char *cursor = name; *cursor != '\0'; ++cursor) {
+        if ((*cursor >= 'A' && *cursor <= 'Z') ||
+            (*cursor >= 'a' && *cursor <= 'z') ||
+            (*cursor >= '0' && *cursor <= '9') ||
+            *cursor == '_' || *cursor == '-' || *cursor == '.') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int cube_remote_field_valid(const char *value)
+{
+    return value != NULL && strchr(value, '\t') == NULL &&
+           strchr(value, '\n') == NULL && strchr(value, '\r') == NULL;
+}
+
+static int cube_remote_parse_line(const char *line, cube_remote_record_t *record)
+{
+    char copy[1024];
+    int length = snprintf(copy, sizeof(copy), "%s", line == NULL ? "" : line);
+    if (length < 0 || (size_t)length >= sizeof(copy)) {
+        return -1;
+    }
+    copy[strcspn(copy, "\n")] = '\0';
+
+    char *cursor = copy;
+    char *fields[5];
+    for (size_t i = 0; i < 5; ++i) {
+        fields[i] = cursor;
+        char *tab = strchr(cursor, '\t');
+        if (tab == NULL && i < 4) {
+            return -1;
+        }
+        if (tab != NULL) {
+            *tab = '\0';
+            cursor = tab + 1;
+        }
+    }
+    if (strchr(fields[4], '\t') != NULL) {
+        return -1;
+    }
+
+    memset(record, 0, sizeof(*record));
+    if (!cube_remote_name_valid(fields[0]) ||
+        !cube_remote_field_valid(fields[1]) ||
+        !cube_remote_field_valid(fields[2]) ||
+        !cube_remote_field_valid(fields[3])) {
+        return -1;
+    }
+    snprintf(record->name, sizeof(record->name), "%s", fields[0]);
+    snprintf(record->uri, sizeof(record->uri), "%s", fields[1]);
+    snprintf(record->manager_id, sizeof(record->manager_id), "%s", fields[2]);
+    snprintf(record->manager_public_key, sizeof(record->manager_public_key),
+             "%s", fields[3]);
+    record->added_at_ms = strtoull(fields[4], NULL, 10);
+    return 0;
+}
+
+static int cube_remote_load(cube_remote_record_t **records_out,
+                            size_t *count_out)
+{
+    *records_out = NULL;
+    *count_out = 0;
+
+    char path[CUBICLE_PATH_MAX];
+    if (cube_remote_registry_path(path) < 0) {
+        return -1;
+    }
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return errno == ENOENT ? 0 : -1;
+    }
+
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        cube_remote_record_t record;
+        if (cube_remote_parse_line(line, &record) < 0) {
+            free(records);
+            fclose(file);
+            errno = EINVAL;
+            return -1;
+        }
+        cube_remote_record_t *next =
+            realloc(records, (count + 1) * sizeof(*records));
+        if (next == NULL) {
+            free(records);
+            fclose(file);
+            errno = ENOMEM;
+            return -1;
+        }
+        records = next;
+        records[count++] = record;
+    }
+    if (ferror(file)) {
+        free(records);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    *records_out = records;
+    *count_out = count;
+    return 0;
+}
+
+static int cube_remote_save(const cube_remote_record_t *records, size_t count)
+{
+    char path[CUBICLE_PATH_MAX];
+    if (cube_remote_registry_path(path) < 0) {
+        return -1;
+    }
+
+    cubicle_json_builder_t output = {0};
+    for (size_t i = 0; i < count; ++i) {
+        if (cubicle_json_builder_appendf(
+                &output, "%s\t%s\t%s\t%s\t%llu\n",
+                records[i].name, records[i].uri, records[i].manager_id,
+                records[i].manager_public_key,
+                (unsigned long long)records[i].added_at_ms) < 0) {
+            cubicle_json_builder_cleanup(&output);
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    int result = cube_atomic_write_user_config(path, output.data == NULL ? "" :
+                                               output.data);
+    cubicle_json_builder_cleanup(&output);
+    return result;
+}
+
+static int cube_remote_find(const cube_remote_record_t *records, size_t count,
+                            const char *name)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(records[i].name, name) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int cube_split_remote_workspace(const char *input,
+                                       char *workspace,
+                                       size_t workspace_size,
+                                       char *remote,
+                                       size_t remote_size)
+{
+    const char *separator = strrchr(input, '@');
+    if (separator == NULL) {
+        return 0;
+    }
+    if (separator == input || separator[1] == '\0') {
+        fprintf(stderr, "cube: invalid remote workspace reference\n");
+        return -1;
+    }
+
+    size_t workspace_length = (size_t)(separator - input);
+    size_t remote_length = strlen(separator + 1);
+    if (workspace_length >= workspace_size || remote_length >= remote_size) {
+        fprintf(stderr, "cube: remote workspace reference is too long\n");
+        return -1;
+    }
+    memcpy(workspace, input, workspace_length);
+    workspace[workspace_length] = '\0';
+    memcpy(remote, separator + 1, remote_length + 1);
+    return 1;
+}
+
+static int cube_remote_uri_for_name(const char *name,
+                                    char uri[CUBICLE_ENDPOINT_URI_MAX])
+{
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int index = cube_remote_find(records, count, name);
+    if (index < 0) {
+        fprintf(stderr, "cube: remote '%s' is not configured\n", name);
+        free(records);
+        return 1;
+    }
+    snprintf(uri, CUBICLE_ENDPOINT_URI_MAX, "%s", records[index].uri);
+    free(records);
+    return 0;
+}
+
+static int command_remote_list(void)
+{
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    if (count == 0) {
+        printf("No remotes configured\n");
+        return 0;
+    }
+    printf("REMOTE\tENDPOINT\tMANAGER\n");
+    for (size_t i = 0; i < count; ++i) {
+        printf("%s\t%s\t%s\n", records[i].name, records[i].uri,
+               records[i].manager_id);
+    }
+    free(records);
+    return 0;
+}
+
+static int command_remote_inspect(const char *name)
+{
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int index = cube_remote_find(records, count, name);
+    if (index < 0) {
+        free(records);
+        fprintf(stderr, "cube: remote '%s' is not configured\n", name);
+        return 1;
+    }
+    cube_remote_record_t *record = &records[index];
+    printf("name=%s\n", record->name);
+    printf("manager=%s\n", record->uri);
+    printf("manager_id=%s\n", record->manager_id);
+    printf("manager_public_key=%s\n", record->manager_public_key);
+    printf("added_at_ms=%llu\n", (unsigned long long)record->added_at_ms);
+    free(records);
+    return 0;
+}
+
+static int command_remote_remove(const char *name)
+{
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int index = cube_remote_find(records, count, name);
+    if (index < 0) {
+        free(records);
+        fprintf(stderr, "cube: remote '%s' is not configured\n", name);
+        return 1;
+    }
+    for (size_t i = (size_t)index + 1; i < count; ++i) {
+        records[i - 1] = records[i];
+    }
+    if (cube_remote_save(records, count - 1) < 0) {
+        free(records);
+        fprintf(stderr, "cube: failed to write remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    free(records);
+    return 0;
+}
+
+static int command_remote_add(int argc, char **argv, int command_index)
+{
+    if (command_index + 4 > argc) {
+        fprintf(stderr, "cube: remote add requires NAME and tls://host:port\n");
+        return 2;
+    }
+    const char *name = argv[command_index + 2];
+    const char *uri = argv[command_index + 3];
+    int assume_yes = 0;
+    for (int i = command_index + 4; i < argc; ++i) {
+        if (strcmp(argv[i], "--yes") == 0 || strcmp(argv[i], "-y") == 0) {
+            assume_yes = 1;
+        } else {
+            fprintf(stderr, "cube: invalid remote add option '%s'\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!cube_remote_name_valid(name)) {
+        fprintf(stderr,
+                "cube: remote name must use letters, numbers, '.', '_', or '-'\n");
+        return 2;
+    }
+    if (strncmp(uri, "tls://", 6) != 0 || !cube_remote_field_valid(uri)) {
+        fprintf(stderr, "cube: remote add requires a tls://host:port endpoint\n");
+        return 2;
+    }
+
+    cubicle_client_t *client = NULL;
+    cubicle_error_code_t code = cubicle_client_connect_uri(uri, NULL, &client);
+    if (code != CUBICLE_OK) {
+        fprintf(stderr, "cube: failed to connect to remote '%s'\n", name);
+        return 1;
+    }
+    cubicle_session_info_t session;
+    code = cubicle_client_session_info(client, &session);
+    cubicle_client_disconnect(client);
+    if (code != CUBICLE_OK || session.manager_public_key[0] == '\0') {
+        fprintf(stderr, "cube: remote did not provide a manager identity\n");
+        return 1;
+    }
+
+    printf("Remote: %s\n", name);
+    printf("Endpoint: %s\n", uri);
+    printf("Manager ID: %s\n", session.manager_id);
+    printf("Manager public key: %s\n", session.manager_public_key);
+    if (!assume_yes) {
+        printf("Trust this remote? [y/N] ");
+        fflush(stdout);
+        char answer[16];
+        if (fgets(answer, sizeof(answer), stdin) == NULL ||
+            (answer[0] != 'y' && answer[0] != 'Y')) {
+            return 1;
+        }
+    }
+
+    cube_remote_record_t *records = NULL;
+    size_t count = 0;
+    if (cube_remote_load(&records, &count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int existing = cube_remote_find(records, count, name);
+    size_t index = existing >= 0 ? (size_t)existing : count;
+    if (existing < 0) {
+        cube_remote_record_t *next =
+            realloc(records, (count + 1) * sizeof(*records));
+        if (next == NULL) {
+            free(records);
+            fprintf(stderr, "cube: failed to allocate remote registry\n");
+            return 1;
+        }
+        records = next;
+        ++count;
+    }
+    memset(&records[index], 0, sizeof(records[index]));
+    snprintf(records[index].name, sizeof(records[index].name), "%s", name);
+    snprintf(records[index].uri, sizeof(records[index].uri), "%s", uri);
+    snprintf(records[index].manager_id, sizeof(records[index].manager_id),
+             "%s", session.manager_id);
+    snprintf(records[index].manager_public_key,
+             sizeof(records[index].manager_public_key), "%s",
+             session.manager_public_key);
+    records[index].added_at_ms = (uint64_t)time(NULL) * 1000U;
+    if (cube_remote_save(records, count) < 0) {
+        free(records);
+        fprintf(stderr, "cube: failed to write remote registry: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    free(records);
+    return 0;
+}
+
+static int command_remote(int argc, char **argv, int command_index)
+{
+    if (command_index + 1 >= argc) {
+        fprintf(stderr, "cube: remote requires list, add, inspect, or remove\n");
+        return 2;
+    }
+    const char *subcommand = argv[command_index + 1];
+    if (strcmp(subcommand, "list") == 0) {
+        if (command_index + 2 != argc) {
+            fprintf(stderr, "cube: remote list takes no arguments\n");
+            return 2;
+        }
+        return command_remote_list();
+    }
+    if (strcmp(subcommand, "add") == 0) {
+        return command_remote_add(argc, argv, command_index);
+    }
+    if (strcmp(subcommand, "inspect") == 0) {
+        if (command_index + 3 != argc) {
+            fprintf(stderr, "cube: remote inspect requires NAME\n");
+            return 2;
+        }
+        return command_remote_inspect(argv[command_index + 2]);
+    }
+    if (strcmp(subcommand, "remove") == 0) {
+        if (command_index + 3 != argc) {
+            fprintf(stderr, "cube: remote remove requires NAME\n");
+            return 2;
+        }
+        return command_remote_remove(argv[command_index + 2]);
+    }
+    fprintf(stderr, "cube: unknown remote command '%s'\n", subcommand);
+    return 2;
 }
 
 static int cube_update_user_defaults(const cube_defaults_update_t *update,
@@ -2402,8 +2892,13 @@ static int append_all_workspace_processes_json(cubicle_json_builder_t *output,
     return result;
 }
 
-static int process_list_all_workspaces(const char *manager_socket,
-                                       const cube_options_t *options)
+static int process_list_all_workspaces_from_manager(
+    const char *manager_socket,
+    const char *remote_name,
+    const cube_options_t *options,
+    cubicle_json_builder_t *json_output,
+    int *first_text_block,
+    int *first_json_item)
 {
     cube_rpc_response_t workspace_response;
     if (call_manager(manager_socket, "workspace.list", "{}",
@@ -2426,18 +2921,7 @@ static int process_list_all_workspaces(const char *manager_socket,
         return 2;
     }
 
-    cubicle_json_builder_t json_output = {0};
-    if (options->json &&
-        cubicle_json_builder_append(&json_output, "{\"workspaces\":[") < 0) {
-        cubicle_json_cleanup(&document);
-        cleanup_rpc_response(&workspace_response);
-        fprintf(stderr, "cube: failed to format process list response\n");
-        return 2;
-    }
-
     int result = 0;
-    int first_text_block = 1;
-    int first_json_item = 1;
     size_t index;
     size_t max;
     yyjson_val *item;
@@ -2451,6 +2935,19 @@ static int process_list_all_workspaces(const char *manager_socket,
             break;
         }
 
+        char display_name[CUBICLE_NAME_MAX + CUBICLE_NAME_MAX + 2];
+        if (remote_name != NULL && remote_name[0] != '\0') {
+            int length = snprintf(display_name, sizeof(display_name), "%s@%s",
+                                  name, remote_name);
+            if (length < 0 || (size_t)length >= sizeof(display_name)) {
+                fprintf(stderr, "cube: remote workspace name is too long\n");
+                result = 2;
+                break;
+            }
+        } else {
+            snprintf(display_name, sizeof(display_name), "%s", name);
+        }
+
         cube_rpc_response_t process_response;
         if (process_list_for_workspace(manager_socket, id,
                                        &process_response) < 0) {
@@ -2459,27 +2956,64 @@ static int process_list_all_workspaces(const char *manager_socket,
         }
 
         if (options->json) {
-            if ((!first_json_item &&
-                 cubicle_json_builder_append(&json_output, ",") < 0) ||
-                append_all_workspace_processes_json(&json_output, id, name,
+            if ((!*first_json_item &&
+                 cubicle_json_builder_append(json_output, ",") < 0) ||
+                append_all_workspace_processes_json(json_output, id,
+                                                    display_name,
                                                     &process_response) < 0) {
                 cleanup_rpc_response(&process_response);
                 result = 2;
                 break;
             }
-            first_json_item = 0;
+            *first_json_item = 0;
         } else {
-            if (!first_text_block) {
+            if (!*first_text_block) {
                 printf("\n");
             }
-            result = print_process_list_result(name, &process_response);
-            first_text_block = 0;
+            result = print_process_list_result(display_name,
+                                               &process_response);
+            *first_text_block = 0;
         }
         cleanup_rpc_response(&process_response);
         if (result != 0) {
             break;
         }
     }
+
+    cubicle_json_cleanup(&document);
+    cleanup_rpc_response(&workspace_response);
+    return result;
+}
+
+static int process_list_all_workspaces(const char *manager_socket,
+                                       const cube_options_t *options)
+{
+    cubicle_json_builder_t json_output = {0};
+    if (options->json &&
+        cubicle_json_builder_append(&json_output, "{\"workspaces\":[") < 0) {
+        fprintf(stderr, "cube: failed to format process list response\n");
+        return 2;
+    }
+
+    int first_text_block = 1;
+    int first_json_item = 1;
+    int result = process_list_all_workspaces_from_manager(
+        manager_socket, NULL, options, &json_output, &first_text_block,
+        &first_json_item);
+
+    cube_remote_record_t *remotes = NULL;
+    size_t remote_count = 0;
+    if (result == 0 && cube_remote_load(&remotes, &remote_count) < 0) {
+        fprintf(stderr, "cube: failed to read remote registry: %s\n",
+                strerror(errno));
+        result = 1;
+    }
+    for (size_t i = 0; result == 0 && i < remote_count; ++i) {
+        result = process_list_all_workspaces_from_manager(
+            remotes[i].uri, remotes[i].name, options, &json_output,
+            &first_text_block, &first_json_item);
+    }
+    free(remotes);
 
     if (result == 0 && options->json) {
         if (cubicle_json_builder_append(&json_output, "]}") < 0) {
@@ -2491,8 +3025,6 @@ static int process_list_all_workspaces(const char *manager_socket,
     }
 
     cubicle_json_builder_cleanup(&json_output);
-    cubicle_json_cleanup(&document);
-    cleanup_rpc_response(&workspace_response);
     return result;
 }
 
@@ -5092,15 +5624,28 @@ static int attach_to_process_id(const char *manager_socket,
         cubicle_client_disconnect(client);
         return 2;
     }
-    cubicle_client_disconnect(client);
-
     cubicle_attachment_t *attachment = NULL;
     cubicle_attachment_options_t attachment_options;
     memset(&attachment_options, 0, sizeof(attachment_options));
-    code = cubicle_attachment_connect(&grant, &attachment_options,
-                                      &attachment);
+    int relay_attachment = strncmp(manager_socket, "tls://", 6) == 0;
+    code = relay_attachment
+               ? cubicle_attachment_connect_relay(client, &grant,
+                                                  &attachment_options,
+                                                  &attachment)
+               : cubicle_attachment_connect(&grant, &attachment_options,
+                                            &attachment);
     if (code != CUBICLE_OK) {
-        fprintf(stderr, "cube: failed to attach to process\n");
+        const cubicle_error_t *error =
+            attachment != NULL ? cubicle_attachment_last_error(attachment)
+                               : NULL;
+        if (error == NULL || error->message[0] == '\0') {
+            error = cubicle_client_last_error(client);
+        }
+        fprintf(stderr, "cube: %s\n",
+                error != NULL && error->message[0] != '\0'
+                    ? error->message
+                    : "failed to attach to process");
+        cubicle_client_disconnect(client);
         return 2;
     }
 
@@ -5110,6 +5655,7 @@ static int attach_to_process_id(const char *manager_socket,
         fprintf(stderr,
                 "cube: attachment grant did not include requested channels\n");
         cubicle_attachment_disconnect(attachment);
+        cubicle_client_disconnect(client);
         return 2;
     }
 
@@ -5117,6 +5663,7 @@ static int attach_to_process_id(const char *manager_socket,
                                  mode, read_only, replay_bytes);
     (void)cubicle_attachment_detach(attachment);
     cubicle_attachment_disconnect(attachment);
+    cubicle_client_disconnect(client);
     return result;
 }
 
@@ -5369,17 +5916,77 @@ static int process_connect(const char *manager_socket,
         return 2;
     }
 
+    const char *effective_manager_socket = manager_socket;
+    cube_options_t effective_options = *options;
+    char remote_manager_socket[CUBICLE_ENDPOINT_URI_MAX];
+    char remote_workspace[CUBICLE_NAME_MAX];
+    char remote_name[CUBICLE_NAME_MAX];
+    char remote_process[CUBICLE_NAME_MAX];
+    const char *process_selector = argv[argument_index];
+    int selected_remote = 0;
+
+    int split_process_workspace = split_qualified_process_ref(
+        argv[argument_index],
+        &(cube_process_ref_t){0});
+    if (split_process_workspace < 0) {
+        return 2;
+    }
+    const char *separator = strrchr(argv[argument_index], '.');
+    if (separator != NULL) {
+        cube_process_ref_t ref;
+        memset(&ref, 0, sizeof(ref));
+        if (split_qualified_process_ref(argv[argument_index], &ref) < 0) {
+            return 2;
+        }
+        int remote_result = cube_split_remote_workspace(
+            ref.workspace, remote_workspace, sizeof(remote_workspace),
+            remote_name, sizeof(remote_name));
+        if (remote_result < 0) {
+            return 2;
+        }
+        if (remote_result > 0) {
+            int lookup_result =
+                cube_remote_uri_for_name(remote_name, remote_manager_socket);
+            if (lookup_result != 0) {
+                return lookup_result;
+            }
+            snprintf(remote_process, sizeof(remote_process), "%s",
+                     ref.process);
+            effective_manager_socket = remote_manager_socket;
+            effective_options.workspace = remote_workspace;
+            process_selector = remote_process;
+            selected_remote = 1;
+        }
+    }
+    if (!selected_remote && options->workspace != NULL) {
+        int remote_result = cube_split_remote_workspace(
+            options->workspace, remote_workspace, sizeof(remote_workspace),
+            remote_name, sizeof(remote_name));
+        if (remote_result < 0) {
+            return 2;
+        }
+        if (remote_result > 0) {
+            int lookup_result =
+                cube_remote_uri_for_name(remote_name, remote_manager_socket);
+            if (lookup_result != 0) {
+                return lookup_result;
+            }
+            effective_manager_socket = remote_manager_socket;
+            effective_options.workspace = remote_workspace;
+        }
+    }
+
     char process_id[CUBICLE_ID_STRING_LENGTH];
     char mode[32];
     int resolve_result = resolve_process_metadata(
-        manager_socket, options, argv[argument_index], process_id,
+        effective_manager_socket, &effective_options, process_selector, process_id,
         sizeof(process_id), mode, sizeof(mode));
     if (resolve_result != 0) {
         return resolve_result;
     }
 
-    return attach_to_process_id(manager_socket, process_id,
-                                argv[argument_index], mode, read_only,
+    return attach_to_process_id(effective_manager_socket, process_id,
+                                process_selector, mode, read_only,
                                 CUBE_CONNECT_REPLAY_BYTES);
 }
 
@@ -5702,6 +6309,14 @@ int main(int argc, char **argv)
     if (strcmp(command, "config") == 0) {
         return command_config(&config, config_error, argc, argv,
                               command_index);
+    }
+
+    if (strcmp(command, "identity") == 0) {
+        return command_identity(argc, argv, command_index);
+    }
+
+    if (strcmp(command, "remote") == 0) {
+        return command_remote(argc, argv, command_index);
     }
 
     if (strcmp(command, "defaults") == 0) {

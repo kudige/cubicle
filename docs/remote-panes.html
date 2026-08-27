@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cubicle Remote Panes</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8f9fb;
+      --text: #17202a;
+      --muted: #5d6875;
+      --panel: #ffffff;
+      --border: #d8dee8;
+      --code-bg: #111820;
+      --code-text: #e7edf4;
+      --accent: #1d6f8f;
+      --warn-bg: #fff8e6;
+      --warn-border: #e2b84c;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111417;
+        --text: #e8edf2;
+        --muted: #a7b0bb;
+        --panel: #181d22;
+        --border: #333b45;
+        --code-bg: #080b0f;
+        --code-text: #eef4fb;
+        --accent: #7db7ff;
+        --warn-bg: #2a2414;
+        --warn-border: #8d7026;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    header {
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.2;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem);
+    }
+
+    h2 {
+      font-size: 1.45rem;
+      margin-top: 36px;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      margin-top: 24px;
+      margin-bottom: 8px;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 0.95em;
+    }
+
+    pre {
+      overflow-x: auto;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 12px 0 18px;
+      line-height: 1.45;
+    }
+
+    pre code {
+      color: inherit;
+      font-size: 0.92rem;
+    }
+
+    ul,
+    ol {
+      margin: 0 0 18px 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    .lead {
+      color: var(--muted);
+      font-size: 1.1rem;
+      max-width: 760px;
+      margin-top: 12px;
+    }
+
+    .panel,
+    .warning {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 18px;
+      margin: 18px 0;
+    }
+
+    .warning {
+      background: var(--warn-bg);
+      border-color: var(--warn-border);
+    }
+
+    .summary {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin: 24px 0 30px;
+    }
+
+    .summary div {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+    }
+
+    .summary strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Remote Panes</h1>
+      <p class="lead">How to expose a Cubicle manager over TLS, trust it from another machine, list remote workspaces, and attach to remote panes.</p>
+    </header>
+
+    <section class="summary" aria-label="Status summary">
+      <div>
+        <strong>Works today</strong>
+        <span class="muted">TLS manager connections, remote registration, <code>cube ps -a</code>, and remote <code>cube connect</code>.</span>
+      </div>
+      <div>
+        <strong>Desk</strong>
+        <span class="muted"><code>desk --workspace name@remote</code> opens a remote workspace through the saved remote.</span>
+      </div>
+      <div>
+        <strong>Not complete yet</strong>
+        <span class="muted">One Desk session still targets one manager; mixed local and remote panes in the same Desk layout are future work.</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Start A TLS Manager</h2>
+      <p>On the remote host, start the manager with a TLS listener. The manager also keeps its local Unix socket available for local clients.</p>
+      <pre><code>cubicle-manager daemon --listen tls://0.0.0.0:7443</code></pre>
+      <p>Use a specific bind address if you only want to expose it on one interface:</p>
+      <pre><code>cubicle-manager daemon --listen tls://192.0.2.10:7443</code></pre>
+      <p>The TLS certificate and key are generated under the manager state directory when missing.</p>
+    </section>
+
+    <section>
+      <h2>Authorize Your Client Key</h2>
+      <p>On the client machine, print your Cubicle public key:</p>
+      <pre><code>cube identity pub</code></pre>
+      <p>On the remote host, add that public key to the workspace you want to access. Run this against the remote manager's local socket.</p>
+      <pre><code>cube --workspace Project access add CLIENT_PUBLIC_KEY --role owner --label laptop</code></pre>
+      <p>Use <code>operator</code> instead of <code>owner</code> when the client should run and attach to cubes but not manage workspace access keys.</p>
+    </section>
+
+    <section>
+      <h2>Register The Remote</h2>
+      <p>On the client machine, add the remote manager by name. The name is local to this client.</p>
+      <pre><code>cube remote add lab tls://lab.example.com:7443</code></pre>
+      <p><code>cube remote add</code> connects to the remote manager, prints the manager public key, and asks whether to trust it. For non-interactive setup, use:</p>
+      <pre><code>cube remote add lab tls://lab.example.com:7443 --yes</code></pre>
+      <p>Inspect or remove the saved remote with:</p>
+      <pre><code>cube remote list
+cube remote inspect lab
+cube remote remove lab</code></pre>
+    </section>
+
+    <section>
+      <h2>List Remote Workspaces And Cubes</h2>
+      <p>After registration, <code>cube ps -a</code> includes remote workspaces. Remote workspace names are shown with the remote suffix.</p>
+      <pre><code>cube ps -a</code></pre>
+      <p>Example output shape:</p>
+      <pre><code>Workspace Local
+  shell       term      running
+
+Workspace Project@lab
+  build       term      running
+  test        stream    completed</code></pre>
+      <p>The <code>@lab</code> suffix means the workspace was discovered through the local remote named <code>lab</code>.</p>
+    </section>
+
+    <section>
+      <h2>Connect To A Remote Cube</h2>
+      <p>After the remote is registered, use the remote-qualified workspace name with <code>cube connect</code>:</p>
+      <pre><code>cube --workspace Project@lab connect build</code></pre>
+      <p>You can also put the workspace and cube in one selector:</p>
+      <pre><code>cube connect Project@lab.build</code></pre>
+      <p><code>cube</code> connects to the remote manager over TLS and relays controller I/O through that manager connection, so the client does not need direct access to controller Unix sockets on the remote host.</p>
+      <p>Direct manager selection also works:</p>
+      <pre><code>cube --manager-socket tls://lab.example.com:7443 --workspace Project connect build</code></pre>
+    </section>
+
+    <section>
+      <h2>Use Desk With A Remote Workspace</h2>
+      <p>After the remote is registered, open a remote workspace by suffixing the workspace with the remote name:</p>
+      <pre><code>desk --workspace Project@lab</code></pre>
+      <p>Desk connects to the saved TLS manager for <code>lab</code> and relays pane attachment through that manager.</p>
+      <p>You can also point Desk directly at a remote TLS manager:</p>
+      <pre><code>CUBICLE_MANAGER_SOCKET=tls://lab.example.com:7443 desk --workspace Project</code></pre>
+      <p>You can also put the remote endpoint in client configuration as <code>client.manager</code>, then run <code>desk --workspace Project</code>.</p>
+
+      <div class="warning">
+        <h3>Current Desk limitation</h3>
+        <p>A Desk session currently targets one manager. <code>desk --workspace Project@lab</code> opens remote panes from <code>lab</code>, but the same Desk layout cannot yet mix local panes with panes from another remote.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Troubleshooting</h2>
+      <h3>The remote does not connect</h3>
+      <ul>
+        <li>Verify the manager is listening with <code>cubicle-manager daemon --listen tls://HOST:PORT</code>.</li>
+        <li>Verify the port is reachable from the client host.</li>
+        <li>Use <code>cube remote inspect NAME</code> to confirm the saved endpoint.</li>
+      </ul>
+
+      <h3>The remote workspace is listed but attachment fails</h3>
+      <p>Make sure both client and manager are from a build that includes remote attachment relay support. Older managers return only remote Unix controller socket paths, which clients on another host cannot open.</p>
+
+      <h3>The local socket is missing after starting TLS</h3>
+      <p>Recent builds keep the local Unix socket when the manager is started with <code>--listen tls://...</code>. Rebuild and restart the manager if an older daemon is still running.</p>
+    </section>
+  </main>
+</body>
+</html>
