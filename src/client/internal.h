@@ -75,6 +75,7 @@ cubicle_error_code_t set_client_error(cubicle_client_t *client,
                                       const char *message);
 cubicle_error_code_t unsupported_client(cubicle_client_t *client,
                                         const char *message);
+cubicle_error_code_t cubicle_client_reconnect(cubicle_client_t *client);
 
 int json_bool_field(const char *json, const char *key, bool *value_out);
 int json_u64_field(const char *json, const char *key, uint64_t *value_out);

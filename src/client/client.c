@@ -634,6 +634,44 @@ cubicle_error_code_t cubicle_client_connect(const cubicle_client_options_t *opti
     return CUBICLE_OK;
 }
 
+cubicle_error_code_t cubicle_client_reconnect(cubicle_client_t *client)
+{
+    if (client == NULL || client->transport == NULL ||
+        client->transport->vtable == NULL ||
+        client->transport->vtable->connect == NULL) {
+        return set_client_error(client, CUBICLE_ERR_INVALID_ARGUMENT, 0,
+                                "client transport does not support reconnect");
+    }
+    if (client->transport->vtable->close != NULL) {
+        client->transport->vtable->close(client->transport);
+    }
+
+    cubicle_library_debug_log("client.reconnect", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
+    cubicle_error_code_t result = client->transport->vtable->connect(
+        client->transport, &client->endpoint, &client->last_error);
+    if (result != CUBICLE_OK) {
+        cubicle_library_debug_log("client.reconnect.result",
+                                  client->endpoint.uri, result, 0, 0,
+                                  &client->last_error);
+        return result;
+    }
+
+    result = authenticate_unix_session(client);
+    if (result != CUBICLE_OK) {
+        cubicle_library_debug_log("client.reconnect.result",
+                                  client->endpoint.uri, result, 0, 0,
+                                  &client->last_error);
+        if (client->transport->vtable->close != NULL) {
+            client->transport->vtable->close(client->transport);
+        }
+        return result;
+    }
+    cubicle_library_debug_log("client.reconnect.result", client->endpoint.uri,
+                              CUBICLE_OK, 0, 0, NULL);
+    return CUBICLE_OK;
+}
+
 cubicle_error_code_t cubicle_client_connect_uri(
     const char *uri,
     const cubicle_auth_options_t *auth,

@@ -4334,6 +4334,10 @@ static manager_controller_cache_entry_t *manager_controller_cache_get(
     return entry;
 }
 
+static int controller_rpc_read_all_timeout(int fd,
+                                           void *buffer,
+                                           size_t length,
+                                           int timeout_ms);
 static int controller_rpc_call_fd(int fd,
                                   const char *method,
                                   const char *params,
@@ -4355,8 +4359,9 @@ static int controller_rpc_call_fd(int fd,
     }
 
     uint32_t response_length_network = 0;
-    if (read_all_fd(fd, &response_length_network,
-                    sizeof(response_length_network)) < 0) {
+    if (controller_rpc_read_all_timeout(fd, &response_length_network,
+                                        sizeof(response_length_network),
+                                        2000) < 0) {
         return -1;
     }
     uint32_t response_length = ntohl(response_length_network);
@@ -4371,7 +4376,8 @@ static int controller_rpc_call_fd(int fd,
         errno = ENOMEM;
         return -1;
     }
-    if (read_all_fd(fd, response, response_length) < 0) {
+    if (controller_rpc_read_all_timeout(fd, response, response_length,
+                                        2000) < 0) {
         int saved_errno = errno;
         free(response);
         errno = saved_errno;
@@ -4379,6 +4385,47 @@ static int controller_rpc_call_fd(int fd,
     }
     response[response_length] = '\0';
     *response_out = response;
+    return 0;
+}
+
+static int controller_rpc_read_all_timeout(int fd,
+                                           void *buffer,
+                                           size_t length,
+                                           int timeout_ms)
+{
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int ready;
+        do {
+            ready = poll(&pfd, 1, timeout_ms);
+        } while (ready < 0 && errno == EINTR);
+        if (ready == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (ready < 0) {
+            return -1;
+        }
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 &&
+            (pfd.revents & POLLIN) == 0) {
+            errno = ECONNRESET;
+            return -1;
+        }
+        ssize_t result = read(fd, cursor, length);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (result == 0) {
+            errno = ECONNRESET;
+            return -1;
+        }
+        cursor += (size_t)result;
+        length -= (size_t)result;
+    }
     return 0;
 }
 

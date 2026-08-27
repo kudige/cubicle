@@ -393,6 +393,7 @@ static cubicle_error_code_t ensure_controller_client(
 static bool attachment_rpc_can_retry(const char *method)
 {
     return strcmp(method, "controller.read") == 0 ||
+           strcmp(method, "controller.write") == 0 ||
            strcmp(method, "controller.status") == 0 ||
            strcmp(method, "controller.snapshot") == 0 ||
            strcmp(method, "controller.resize") == 0 ||
@@ -403,7 +404,69 @@ static bool attachment_is_transport_error(cubicle_error_code_t code)
 {
     return code == CUBICLE_ERR_IO ||
            code == CUBICLE_ERR_MANAGER_UNAVAILABLE ||
+           code == CUBICLE_ERR_CONTROLLER_UNAVAILABLE ||
            code == CUBICLE_ERR_TIMEOUT;
+}
+
+static cubicle_error_code_t attachment_refresh_relay_grant(
+    cubicle_attachment_t *attachment)
+{
+    if (attachment == NULL || !attachment->relay ||
+        attachment->manager == NULL) {
+        return attachment_set_error(attachment, CUBICLE_ERR_INVALID_STATE, 0,
+                                    "relay attachment cannot refresh grant");
+    }
+
+    uint64_t stdout_offset = attachment->stdout_offset;
+    uint64_t stderr_offset = attachment->stderr_offset;
+    uint64_t tty_offset = attachment->tty_offset;
+
+    cubicle_attachment_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.process_id = attachment->grant.process_id;
+    request.channels = attachment->grant.granted_channels;
+    request.mode = attachment->grant.mode;
+    request.stdout_offset = stdout_offset;
+    request.stderr_offset = stderr_offset;
+    request.tty_offset = tty_offset;
+
+    cubicle_attachment_grant_t grant;
+    cubicle_error_code_t code =
+        cubicle_attachment_request(attachment->manager, &request, &grant);
+    if (code != CUBICLE_OK && attachment_is_transport_error(code)) {
+        if (cubicle_client_reconnect(attachment->manager) == CUBICLE_OK) {
+            code = cubicle_attachment_request(attachment->manager, &request,
+                                              &grant);
+        } else {
+            const cubicle_error_t *error =
+                cubicle_client_last_error(attachment->manager);
+            if (error != NULL) {
+                attachment->last_error = *error;
+            }
+        }
+    }
+    if (code != CUBICLE_OK) {
+        const cubicle_error_t *error =
+            cubicle_client_last_error(attachment->manager);
+        if (error != NULL) {
+            attachment->last_error = *error;
+        }
+        return code;
+    }
+
+    attachment->grant = grant;
+    attachment->channels = CUBICLE_CHANNEL_NONE;
+    attachment->stdout_offset = stdout_offset;
+    attachment->stderr_offset = stderr_offset;
+    attachment->tty_offset = tty_offset;
+    attachment->attached_once = 0;
+    code = attach_controller(attachment);
+    if (code == CUBICLE_OK) {
+        attachment->stdout_offset = stdout_offset;
+        attachment->stderr_offset = stderr_offset;
+        attachment->tty_offset = tty_offset;
+    }
+    return code;
 }
 
 static cubicle_stream_kind_t attachment_read_stream(
@@ -457,6 +520,40 @@ static cubicle_channel_mask_t channel_for_stream(cubicle_stream_kind_t stream)
     return CUBICLE_CHANNEL_STDOUT;
 }
 
+static int attachment_build_relay_proxy_params(
+    const cubicle_attachment_t *attachment,
+    const char *method,
+    const char *params,
+    cubicle_json_builder_t *builder)
+{
+    if (cubicle_json_builder_append(builder, "{\"grant_id\":") < 0 ||
+        cubicle_json_builder_append_string(builder,
+                                           attachment->grant.grant_id) < 0 ||
+        cubicle_json_builder_append(builder, ",\"process_id\":") < 0 ||
+        cubicle_json_builder_append_string(builder,
+                                           attachment->grant.process_id) < 0 ||
+        cubicle_json_builder_append(builder, ",\"token\":") < 0 ||
+        cubicle_json_builder_append_string(builder, attachment->grant.token) <
+            0 ||
+        cubicle_json_builder_appendf(
+            builder, ",\"channels\":%u,\"mode\":",
+            (unsigned int)attachment->grant.granted_channels) < 0 ||
+        cubicle_json_builder_append_string(
+            builder,
+            attachment->grant.mode == CUBICLE_ATTACHMENT_INTERACTIVE
+                ? "interactive"
+                : "observer") < 0 ||
+        cubicle_json_builder_append(builder, ",\"method\":") < 0 ||
+        cubicle_json_builder_append_string(builder, method) < 0 ||
+        cubicle_json_builder_append(builder, ",\"params\":") < 0 ||
+        cubicle_json_builder_append(builder, params == NULL ? "{}" : params) <
+            0 ||
+        cubicle_json_builder_append(builder, "}") < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
                                            const char *method,
                                            const char *params,
@@ -464,32 +561,8 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
 {
     if (attachment->relay) {
         cubicle_json_builder_t builder = {0};
-        if (cubicle_json_builder_append(&builder, "{\"grant_id\":") < 0 ||
-            cubicle_json_builder_append_string(&builder,
-                                               attachment->grant.grant_id) <
-                0 ||
-            cubicle_json_builder_append(&builder, ",\"process_id\":") < 0 ||
-            cubicle_json_builder_append_string(&builder,
-                                               attachment->grant.process_id) <
-                0 ||
-            cubicle_json_builder_append(&builder, ",\"token\":") < 0 ||
-            cubicle_json_builder_append_string(&builder,
-                                               attachment->grant.token) <
-                0 ||
-            cubicle_json_builder_appendf(
-                &builder, ",\"channels\":%u,\"mode\":",
-                (unsigned int)attachment->grant.granted_channels) < 0 ||
-            cubicle_json_builder_append_string(
-                &builder,
-                attachment->grant.mode == CUBICLE_ATTACHMENT_INTERACTIVE
-                    ? "interactive"
-                    : "observer") < 0 ||
-            cubicle_json_builder_append(&builder, ",\"method\":") < 0 ||
-            cubicle_json_builder_append_string(&builder, method) < 0 ||
-            cubicle_json_builder_append(&builder, ",\"params\":") < 0 ||
-            cubicle_json_builder_append(&builder,
-                                        params == NULL ? "{}" : params) < 0 ||
-            cubicle_json_builder_append(&builder, "}") < 0) {
+        if (attachment_build_relay_proxy_params(attachment, method, params,
+                                                &builder) < 0) {
             cubicle_json_builder_cleanup(&builder);
             return attachment_set_error(attachment,
                                         CUBICLE_ERR_RESOURCE_LIMIT, 0,
@@ -499,13 +572,37 @@ static cubicle_error_code_t attachment_rpc(cubicle_attachment_t *attachment,
         cubicle_error_code_t code = rpc_object(
             attachment->manager, "attachment.proxy", builder.data,
             response_out);
-        cubicle_json_builder_cleanup(&builder);
         if (code != CUBICLE_OK) {
             const cubicle_error_t *error =
                 cubicle_client_last_error(attachment->manager);
             if (error != NULL) {
                 attachment->last_error = *error;
             }
+            if (attachment_rpc_can_retry(method) &&
+                attachment_is_transport_error(code) &&
+                attachment_refresh_relay_grant(attachment) == CUBICLE_OK) {
+                cubicle_json_builder_cleanup(&builder);
+                memset(&builder, 0, sizeof(builder));
+                if (attachment_build_relay_proxy_params(attachment, method,
+                                                        params,
+                                                        &builder) < 0) {
+                    cubicle_json_builder_cleanup(&builder);
+                    return attachment_set_error(
+                        attachment, CUBICLE_ERR_RESOURCE_LIMIT, 0,
+                        "relay request is too large");
+                }
+                code = rpc_object(attachment->manager, "attachment.proxy",
+                                  builder.data, response_out);
+                if (code != CUBICLE_OK) {
+                    error = cubicle_client_last_error(attachment->manager);
+                    if (error != NULL) {
+                        attachment->last_error = *error;
+                    }
+                }
+            }
+        }
+        cubicle_json_builder_cleanup(&builder);
+        if (code != CUBICLE_OK) {
             return code;
         }
         attachment->last_activity_ms = attachment_now_ms();
