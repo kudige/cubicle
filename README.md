@@ -347,12 +347,13 @@ requested direction based on current desk layout.
 ### Menus And Cube Picker
 
 ```text
-Prefix-o      Open workspace/cube menu
+Prefix-o      Open workspace/cube/layout menu
 Prefix-m      Toggle mouse title selection
 ```
 
 The menu opens in the middle of the terminal, highlights the last opened
-workspace by default, and lets you pick cubes from any workspace. Inactive pane
+workspace by default, and lets you pick cubes from any workspace or load a
+saved layout. Inactive pane
 titles can be clicked when mouse title selection is enabled. A non-title mouse
 press temporarily releases mouse reporting so the outer terminal can handle
 normal text selection.

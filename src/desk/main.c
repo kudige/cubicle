@@ -469,7 +469,8 @@ typedef enum desk_menu_item_kind {
     DESK_MENU_ITEM_BINDING,
     DESK_MENU_ITEM_MACRO,
     DESK_MENU_ITEM_MACRO_NEW,
-    DESK_MENU_ITEM_MACRO_TARGET
+    DESK_MENU_ITEM_MACRO_TARGET,
+    DESK_MENU_ITEM_SECTION
 } desk_menu_item_kind_t;
 
 typedef struct desk_menu_item {
@@ -4612,6 +4613,20 @@ static bool desk_layout_name_matches_filter(const char *name,
     return false;
 }
 
+static int desk_menu_add_section(desk_session_t *session, const char *label)
+{
+    if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
+        return 0;
+    }
+    desk_menu_item_t *item =
+        &session->open_menu.items[session->open_menu.item_count++];
+    memset(item, 0, sizeof(*item));
+    item->kind = DESK_MENU_ITEM_SECTION;
+    item->disabled = true;
+    snprintf(item->description, sizeof(item->description), "%s", label);
+    return 0;
+}
+
 static int desk_menu_add_layout(desk_session_t *session, const char *name)
 {
     if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS) {
@@ -4625,25 +4640,20 @@ static int desk_menu_add_layout(desk_session_t *session, const char *name)
     return 0;
 }
 
-static int desk_load_layout_picker_items(desk_session_t *session)
+static int desk_menu_add_named_layouts(desk_session_t *session,
+                                       const char *filter,
+                                       bool include_section)
 {
     desk_open_menu_t *menu = &session->open_menu;
-    char filter[sizeof(menu->command)];
-    snprintf(filter, sizeof(filter), "%s", menu->command);
-    menu->item_count = 0;
-    menu->selected = 0;
-    menu->scroll_offset = 0;
-    menu->status[0] = '\0';
+    size_t starting_count = menu->item_count;
+    bool section_added = false;
 
     char dir[PATH_MAX];
     if (desk_named_layout_dir(dir) < 0) {
-        snprintf(menu->status, sizeof(menu->status),
-                 "failed to open layout directory");
         return -1;
     }
     DIR *handle = opendir(dir);
     if (handle == NULL) {
-        snprintf(menu->status, sizeof(menu->status), "no saved layouts");
         return 0;
     }
 
@@ -4658,11 +4668,35 @@ static int desk_load_layout_picker_items(desk_session_t *session)
         if (length > strlen(".layout")) {
             name[length - strlen(".layout")] = '\0';
         }
-        if (desk_layout_name_matches_filter(name, filter)) {
-            (void)desk_menu_add_layout(session, name);
+        if (!desk_layout_name_matches_filter(name, filter)) {
+            continue;
         }
+        if (include_section && !section_added) {
+            (void)desk_menu_add_section(session, "Layouts");
+            section_added = true;
+        }
+        (void)desk_menu_add_layout(session, name);
     }
     closedir(handle);
+    return menu->item_count > starting_count ? 1 : 0;
+}
+
+static int desk_load_layout_picker_items(desk_session_t *session)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    char filter[sizeof(menu->command)];
+    snprintf(filter, sizeof(filter), "%s", menu->command);
+    menu->item_count = 0;
+    menu->selected = 0;
+    menu->scroll_offset = 0;
+    menu->status[0] = '\0';
+
+    int result = desk_menu_add_named_layouts(session, filter, false);
+    if (result < 0) {
+        snprintf(menu->status, sizeof(menu->status),
+                 "failed to open layout directory");
+        return -1;
+    }
     if (menu->item_count == 0) {
         snprintf(menu->status, sizeof(menu->status),
                  filter[0] == '\0' ? "no saved layouts" : "no matching layouts");
@@ -5108,6 +5142,11 @@ static int desk_open_root_menu(desk_session_t *session)
                     remote->relay_attachments, remote->name);
             }
         }
+    }
+    int layout_result = desk_menu_add_named_layouts(session, NULL, true);
+    if (layout_result < 0 && menu->status[0] == '\0') {
+        snprintf(menu->status, sizeof(menu->status),
+                 "failed to read saved layouts");
     }
     (void)desk_menu_add_new_process(session);
     if (menu->item_count == 0) {
@@ -6281,7 +6320,12 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                                 ? "\x1b[1;7;48;5;236m"
                                 : (item->disabled ? "\x1b[2;48;5;236m"
                                                   : "\x1b[48;5;236m");
-        if (item->kind == DESK_MENU_ITEM_NEW) {
+        if (item->kind == DESK_MENU_ITEM_SECTION) {
+            length = snprintf(line, sizeof(line),
+                              "\x1b[%d;%dH\x1b[2;48;5;236m%.*s\x1b[0m",
+                              row, box_col + 3, inner_cols,
+                              item->description);
+        } else if (item->kind == DESK_MENU_ITEM_NEW) {
             int name_cols = inner_cols > 2 ? inner_cols - 2 : 0;
             length = snprintf(line, sizeof(line),
                               "\x1b[%d;%dH%s%.*s\x1b[0m",
@@ -6370,10 +6414,18 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
             if (length > 0 && (size_t)length < sizeof(line)) {
                 append_text(frame, sizeof(frame), &used, line);
             }
+            char layout_label[CUBICLE_NAME_MAX + 16];
+            if (menu->level == DESK_MENU_ROOT) {
+                snprintf(layout_label, sizeof(layout_label), "layout: %s",
+                         item->layout_name);
+            } else {
+                snprintf(layout_label, sizeof(layout_label), "%s",
+                         item->layout_name);
+            }
             length = snprintf(line, sizeof(line),
                               "\x1b[%d;%dH%s%.*s\x1b[0m",
                               row, box_col + 5, style, name_cols,
-                              item->layout_name);
+                              layout_label);
         } else if (item->kind == DESK_MENU_ITEM_BINDING) {
             int command_cols = inner_cols / 3;
             if (command_cols < 18) {

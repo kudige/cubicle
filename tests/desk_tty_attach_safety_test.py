@@ -615,6 +615,9 @@ def run_desk_save_and_load_layout(desk, env):
     saw_save_prompt = False
     sent_save_name = False
     saved_file = None
+    sent_root_menu = False
+    saw_root_layout = False
+    closed_root_menu = False
     sent_picker = False
     saw_picker = False
     sent_filter = False
@@ -652,7 +655,7 @@ def run_desk_save_and_load_layout(desk, env):
                 if os.path.exists(candidate):
                     saved_file = candidate
 
-            if saved_file is not None and not sent_picker:
+            if saved_file is not None and not sent_root_menu:
                 with open(saved_file, "r", encoding="utf-8") as handle:
                     saved_content = handle.read()
                 if "desk-named-layout-v1" not in saved_content:
@@ -663,6 +666,21 @@ def run_desk_save_and_load_layout(desk, env):
                     raise AssertionError(
                         f"saved layout missing pane mapping:\n{saved_content}"
                     )
+                captured.clear()
+                os.write(master_fd, b"\x18o")
+                sent_root_menu = True
+
+            if sent_root_menu and not saw_root_layout:
+                if b"Open cube" in captured and b"layout: saved-alpha" in captured:
+                    saw_root_layout = True
+                    os.write(master_fd, b"q")
+
+            if saw_root_layout and not closed_root_menu:
+                time.sleep(0.1)
+                captured.clear()
+                closed_root_menu = True
+
+            if closed_root_menu and not sent_picker:
                 captured.clear()
                 os.write(master_fd, b"\x18;")
                 sent_picker = True
@@ -697,6 +715,10 @@ def run_desk_save_and_load_layout(desk, env):
             raise AssertionError("desk was not sent a layout name")
         if saved_file is None:
             raise AssertionError("desk did not save named layout")
+        if not sent_root_menu:
+            raise AssertionError("desk did not open root menu after saving layout")
+        if not saw_root_layout:
+            raise AssertionError(f"desk root menu did not show saved layout: {captured!r}")
         if not sent_filter:
             raise AssertionError(f"desk did not show layout picker: {captured!r}")
         if not saw_picker:
