@@ -3,6 +3,14 @@ set -eu
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
+file_mode() {
+    if stat -c '%a' "$1" >/dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%Lp' "$1"
+    fi
+}
+
 state_dir="$tmpdir/manager"
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" workspace list \
@@ -10,8 +18,8 @@ state_dir="$tmpdir/manager"
 
 test -f "$state_dir/keys/manager.key"
 test -f "$state_dir/keys/manager.pub"
-test "$(stat -c '%a' "$state_dir/keys")" = "700"
-test "$(stat -c '%a' "$state_dir/keys/manager.key")" = "600"
+test "$(file_mode "$state_dir/keys")" = "700"
+test "$(file_mode "$state_dir/keys/manager.key")" = "600"
 
 first_public=$(cat "$state_dir/keys/manager.pub")
 "$CUBICLE_MANAGER" --state-dir "$state_dir" workspace list \

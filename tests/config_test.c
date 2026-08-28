@@ -57,7 +57,17 @@ static void test_defaults(void)
                       "unix:///run/cubicle/manager.sock") == 0);
     } else {
         assert(strstr(config.manager_state_dir, "/cubicle") != NULL);
+#ifdef __APPLE__
+        char expected_runtime_dir[CUBICLE_PATH_MAX];
+        int runtime_length = snprintf(expected_runtime_dir,
+                                      sizeof(expected_runtime_dir),
+                                      "/tmp/cubicle-%ld", (long)geteuid());
+        assert(runtime_length >= 0 &&
+               (size_t)runtime_length < sizeof(expected_runtime_dir));
+        assert(strcmp(config.manager_runtime_dir, expected_runtime_dir) == 0);
+#else
         assert(strstr(config.manager_runtime_dir, "/cubicle") != NULL);
+#endif
         assert(strstr(config.manager_log_dir, "/cubicle/log") != NULL);
         assert(strncmp(config.manager_listen_uri, "unix://", 7) == 0);
         assert(strstr(config.manager_listen_uri, "/manager.sock") != NULL);

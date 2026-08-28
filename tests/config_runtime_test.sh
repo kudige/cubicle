@@ -3,6 +3,14 @@ set -eu
 tmpdir=$(mktemp -d)
 manager_pid=
 
+file_mode() {
+    if stat -c '%a' "$1" >/dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%Lp' "$1"
+    fi
+}
+
 cleanup() {
     if [ -n "${manager_pid:-}" ]; then
         CUBICLE_CONFIG="$config_file" python3 "$CUBICLE_API_CLIENT" "$socket_path" shutdown \
@@ -70,10 +78,10 @@ grep -q "manager.config: manager.listen=unix://$socket_path" "$tmpdir/manager-co
 [ -d "$state_dir" ]
 [ -d "$runtime_dir" ]
 [ -d "$log_dir" ]
-test "$(stat -c '%a' "$state_dir")" = "700"
-test "$(stat -c '%a' "$runtime_dir")" = "700"
-test "$(stat -c '%a' "$log_dir")" = "700"
-socket_mode=$(stat -c '%a' "$socket_path")
+test "$(file_mode "$state_dir")" = "700"
+test "$(file_mode "$runtime_dir")" = "700"
+test "$(file_mode "$log_dir")" = "700"
+socket_mode=$(file_mode "$socket_path")
 if [ "$socket_mode" != "664" ]; then
     echo "configured socket mode was not applied: $socket_mode" >&2
     exit 1

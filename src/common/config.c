@@ -953,12 +953,7 @@ static int format_user_runtime_dir(char *buffer,
                                    uid_t uid)
 {
 #ifdef __APPLE__
-    const char *tmpdir = getenv("TMPDIR");
-    if (tmpdir == NULL || tmpdir[0] == '\0') {
-        tmpdir = "/tmp";
-    }
-    return snprintf(buffer, buffer_size, "%s/cubicle-%ld/cubicle",
-                    tmpdir, (long)uid);
+    return snprintf(buffer, buffer_size, "/tmp/cubicle-%ld", (long)uid);
 #else
     return snprintf(buffer, buffer_size, "/run/user/%ld/cubicle", (long)uid);
 #endif
@@ -1784,7 +1779,11 @@ static int cubicle_config_load_with_user_policy(cubicle_config_t *config,
     }
 
     const char *system_paths[] = {
+#ifdef __APPLE__
+        "/usr/local/lib/cubicle/config.cfg",
+#else
         "/usr/lib/cubicle/config.cfg",
+#endif
         "/etc/cubicle/config.cfg",
         "/run/cubicle/config.cfg",
     };

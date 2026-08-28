@@ -84,7 +84,6 @@ def send_socket_command(socket_path, command):
     try:
         client.connect(socket_path)
         client.sendall(command.encode() + b"\n")
-        client.shutdown(socket.SHUT_WR)
         response = bytearray()
         while True:
             chunk = client.recv(4096)

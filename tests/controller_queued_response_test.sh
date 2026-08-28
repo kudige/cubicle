@@ -48,7 +48,6 @@ path, ready_path = sys.argv[1], sys.argv[2]
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(path)
 client.sendall(b"read stdout 0 65536\n")
-client.shutdown(socket.SHUT_WR)
 open(ready_path, "w").close()
 time.sleep(1.0)
 client.close()

@@ -70,8 +70,8 @@ Recommended sources, from lowest to highest precedence:
 
 ```text
 1. compiled-in defaults
-2. /usr/lib/cubicle/config.cfg
-3. /usr/lib/cubicle/config.cfg.d/*.cfg
+2. /usr/lib/cubicle/config.cfg (`/usr/local/lib/cubicle/config.cfg` on macOS)
+3. /usr/lib/cubicle/config.cfg.d/*.cfg (`/usr/local/lib/cubicle/config.cfg.d/*.cfg` on macOS)
 4. /etc/cubicle/config.cfg
 5. /etc/cubicle/config.cfg.d/*.cfg
 6. /run/cubicle/config.cfg
@@ -82,7 +82,10 @@ Recommended sources, from lowest to highest precedence:
 
 Drop-in files are applied in lexical filename order within each directory.
 
-`/usr/lib/cubicle` contains package/vendor defaults. `/etc/cubicle` contains administrator policy. `/run/cubicle` contains temporary overrides that do not survive reboot.
+`/usr/lib/cubicle` contains package/vendor defaults on Linux;
+`/usr/local/lib/cubicle` serves that role on macOS. `/etc/cubicle` contains
+administrator policy. `/run/cubicle` contains temporary overrides that do not
+survive reboot.
 
 ### 4.2 User client and user manager
 

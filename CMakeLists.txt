@@ -15,6 +15,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 if(APPLE)
     add_compile_definitions(_DARWIN_C_SOURCE)
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 endif()
 
 option(CUBICLE_ENABLE_COVERAGE "Build with gcov/lcov coverage instrumentation" OFF)
@@ -443,6 +444,58 @@ else()
     add_custom_target(pacman-package
         COMMAND ${CMAKE_COMMAND} -E false
         COMMENT "makepkg was not found; install pacman/package tools to build pacman packages"
+        VERBATIM
+    )
+endif()
+
+if(CMAKE_OSX_ARCHITECTURES)
+    string(REPLACE ";" "-" CUBICLE_MACOS_PACKAGE_ARCH
+           "${CMAKE_OSX_ARCHITECTURES}")
+else()
+    set(CUBICLE_MACOS_PACKAGE_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+set(CUBICLE_MACOS_PACKAGE_ROOT
+    "${CMAKE_CURRENT_BINARY_DIR}/macos-package-root")
+set(CUBICLE_MACOS_PACKAGE_FILE
+    "${CMAKE_CURRENT_BINARY_DIR}/${CPACK_PACKAGE_NAME}-${PROJECT_VERSION}-macos-${CUBICLE_MACOS_PACKAGE_ARCH}.pkg")
+
+if(APPLE)
+    find_program(PKGBUILD_EXECUTABLE pkgbuild)
+    if(PKGBUILD_EXECUTABLE)
+        add_custom_target(macos-package
+            COMMAND ${CMAKE_COMMAND} -E rm -rf
+                    ${CUBICLE_MACOS_PACKAGE_ROOT}
+            COMMAND ${CMAKE_COMMAND} -E rm -f
+                    ${CUBICLE_MACOS_PACKAGE_FILE}
+            COMMAND ${CMAKE_COMMAND} -E env
+                    DESTDIR=${CUBICLE_MACOS_PACKAGE_ROOT}
+                    ${CMAKE_COMMAND} --install ${CMAKE_CURRENT_BINARY_DIR}
+                    --prefix /usr/local
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/config.macos.cfg
+                    ${CUBICLE_MACOS_PACKAGE_ROOT}/usr/local/lib/cubicle/config.cfg
+            COMMAND ${PKGBUILD_EXECUTABLE}
+                    --root ${CUBICLE_MACOS_PACKAGE_ROOT}
+                    --identifier com.github.kudige.cubicle
+                    --version ${PROJECT_VERSION}
+                    --install-location /
+                    ${CUBICLE_MACOS_PACKAGE_FILE}
+            DEPENDS cube desk cubicle-manager cubicle-controller
+            COMMENT "Building macOS installer package"
+            VERBATIM
+        )
+    else()
+        add_custom_target(macos-package
+            COMMAND ${CMAKE_COMMAND} -E false
+            COMMENT "pkgbuild was not found; install the Xcode command line tools"
+            VERBATIM
+        )
+    endif()
+else()
+    add_custom_target(macos-package
+        COMMAND ${CMAKE_COMMAND} -E false
+        COMMENT "macos-package is only available when building on macOS"
         VERBATIM
     )
 endif()

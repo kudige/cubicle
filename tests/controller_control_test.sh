@@ -32,7 +32,6 @@ path, command = sys.argv[1], sys.argv[2]
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(path)
 client.sendall(command.encode("utf-8") + b"\n")
-client.shutdown(socket.SHUT_WR)
 while True:
     chunk = client.recv(4096)
     if not chunk:
@@ -110,7 +109,6 @@ path = sys.argv[1]
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(path)
 client.sendall(b"status\r\n")
-client.shutdown(socket.SHUT_WR)
 while True:
     chunk = client.recv(4096)
     if not chunk:
@@ -135,7 +133,6 @@ path = sys.argv[1]
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(path)
 client.sendall(b"status\0\n")
-client.shutdown(socket.SHUT_WR)
 while True:
     chunk = client.recv(4096)
     if not chunk:
@@ -157,7 +154,6 @@ path = sys.argv[1]
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.connect(path)
 client.sendall(b"x" * 300 + b"\n")
-client.shutdown(socket.SHUT_WR)
 try:
     while True:
         chunk = client.recv(4096)

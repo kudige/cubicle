@@ -25,7 +25,7 @@ def read_socket_response(client):
     return response
 
 
-def send_request(socket_path, command, shutdown_write=True):
+def send_request(socket_path, command, shutdown_write=False):
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         client.connect(socket_path)
@@ -190,8 +190,7 @@ def send_command(socket_path, command):
             client.close()
         return
 
-    response = send_request(socket_path, command,
-                            shutdown_write=True)
+    response = send_request(socket_path, command)
     sys.stdout.buffer.write(response)
     sys.stdout.buffer.flush()
 
