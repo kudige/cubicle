@@ -69,7 +69,20 @@ cmake --build build --target pacman-package
 sudo pacman -U ./build/cubicle-0.1.0-1-*.pkg.tar.*
 ```
 
-The package installs:
+Create and install a native macOS package:
+
+```console
+brew install cmake pkg-config libeconf openssl libvterm
+cmake -S . -B build
+cmake --build build --target macos-package
+sudo installer -pkg ./build/cubicle-0.1.0-macos-*.pkg -target /
+```
+
+The macOS package installs under `/usr/local`, including its package defaults
+at `/usr/local/lib/cubicle/config.cfg`. Runtime library dependencies installed
+with Homebrew remain external to the package.
+
+The Debian and pacman packages install:
 
 ```text
 /usr/bin/cube
@@ -94,6 +107,9 @@ logs:    $XDG_STATE_HOME/cubicle/log
 socket:  $XDG_RUNTIME_DIR/cubicle/manager.sock
 config:  $XDG_CONFIG_HOME/cubicle/config.cfg, or ~/.config/cubicle/config.cfg
 ```
+
+On macOS, the default runtime directory is `/tmp/cubicle-$UID` so manager and
+controller Unix socket paths stay within the platform's shorter path limit.
 
 Useful commands:
 

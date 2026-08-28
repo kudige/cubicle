@@ -628,7 +628,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if (clients[i].kind == CONTROL_CLIENT_READING &&
-                (revents & POLLIN) != 0 &&
+                (revents & (POLLIN | POLLHUP)) != 0 &&
                 read_control_client_request(&clients[i], state, child_pid,
                                             &child_stdin_fd, resize_fd,
                                             stderr_resize_fd,
@@ -640,7 +640,7 @@ static int stream_event_loop(stream_pipe_t pipes[2],
             }
 
             if (clients[i].kind == CONTROL_CLIENT_ATTACHED_STDIN &&
-                (revents & POLLIN) != 0 &&
+                (revents & (POLLIN | POLLHUP)) != 0 &&
                 forward_attached_stdin(&clients[i], state, child_stdin_fd) < 0) {
                 cubicle_log(CUBICLE_LOG_ERROR, "controller",
                             "failed forwarding stdin attachment");
@@ -898,7 +898,7 @@ static int completed_retention_loop(controller_state_t *state,
             }
 
             if (clients[i].kind == CONTROL_CLIENT_READING &&
-                (revents & POLLIN) != 0) {
+                (revents & (POLLIN | POLLHUP)) != 0) {
                 int closed_stdin_fd = -1;
                 if (read_control_client_request(
                         &clients[i], state, child_pid, &closed_stdin_fd, -1,

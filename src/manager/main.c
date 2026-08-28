@@ -63,6 +63,7 @@ typedef struct manager_state {
 #define CUBICLE_MANAGER_MAX_CLIENTS 1024
 #define CUBICLE_MANAGER_CONTROLLER_CACHE_SIZE 16
 #define CUBICLE_MANAGER_CONTROLLER_CACHE_MAX_IDLE_MS 90000ULL
+#define CUBICLE_MANAGER_MIN_WORKER_STACK_SIZE (2U * 1024U * 1024U)
 
 typedef struct manager_session_record {
     int active;
@@ -523,6 +524,16 @@ static int set_fd_nonblocking(int fd)
     }
 
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int set_fd_blocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 }
 
 static int set_fd_cloexec(int fd)
@@ -2083,8 +2094,7 @@ static int controller_line_request(const char *socket_path,
     }
 
     if (cubicle_write_all(fd, command, strlen(command)) < 0 ||
-        cubicle_write_all(fd, "\n", 1) < 0 ||
-        shutdown(fd, SHUT_WR) < 0) {
+        cubicle_write_all(fd, "\n", 1) < 0) {
         close(fd);
         return -1;
     }
@@ -4506,6 +4516,15 @@ static void load_peer_credentials(int client_fd, manager_connection_t *connectio
         connection->peer_uid = credentials.uid;
         connection->peer_gid = credentials.gid;
         connection->peer_pid = credentials.pid;
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+    uid_t peer_uid;
+    gid_t peer_gid;
+    if (getpeereid(client_fd, &peer_uid, &peer_gid) == 0) {
+        connection->has_peer_credentials = 1;
+        connection->peer_uid = peer_uid;
+        connection->peer_gid = peer_gid;
     }
 #else
     (void)client_fd;
@@ -8117,8 +8136,27 @@ static int manager_runtime_start_worker(manager_runtime_t *runtime,
     ++runtime->active_workers;
     pthread_mutex_unlock(&runtime->workers_mutex);
 
+    pthread_attr_t attributes;
+    int result = pthread_attr_init(&attributes);
+    int attributes_initialized = result == 0;
+    if (result == 0) {
+        size_t stack_size = 0;
+        result = pthread_attr_getstacksize(&attributes, &stack_size);
+        if (result == 0 &&
+            stack_size < CUBICLE_MANAGER_MIN_WORKER_STACK_SIZE) {
+            result = pthread_attr_setstacksize(
+                &attributes, CUBICLE_MANAGER_MIN_WORKER_STACK_SIZE);
+        }
+    }
+
     pthread_t thread;
-    int result = pthread_create(&thread, NULL, manager_worker_main, slot);
+    if (result == 0) {
+        result = pthread_create(&thread, &attributes, manager_worker_main,
+                                slot);
+    }
+    if (attributes_initialized) {
+        pthread_attr_destroy(&attributes);
+    }
     if (result != 0) {
         pthread_mutex_lock(&runtime->workers_mutex);
         slot->active = 0;
@@ -8433,7 +8471,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
                     result = 1;
                     break;
                 }
-                if (set_fd_cloexec(client_fd) < 0) {
+                if (set_fd_blocking(client_fd) < 0 ||
+                    set_fd_cloexec(client_fd) < 0) {
                     manager_log_error(errno);
                     close(client_fd);
                     result = 1;

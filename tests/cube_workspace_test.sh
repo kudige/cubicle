@@ -30,6 +30,7 @@ debug=library
 EOF
 workspace_dir="$tmpdir/workspace-dir"
 mkdir -p "$workspace_dir"
+workspace_dir=$(cd "$workspace_dir" && pwd -P)
 
 "$CUBICLE_MANAGER" --state-dir "$state_dir" daemon --foreground \
     --control-socket "$socket_path" --event-interval-ms 50 &
