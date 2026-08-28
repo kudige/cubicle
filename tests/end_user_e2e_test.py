@@ -67,7 +67,7 @@ def run_desk_less_arrows(harness):
         desk.output.clear()
 
         desk.send_user_arrow("down", "desk")
-        desk.wait_for_text("LESS_LINE_0002")
+        desk.wait_for_text("LESS_LINE_0023")
         desk.output.clear()
 
         desk.send_user_arrow("up", "desk")

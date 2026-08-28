@@ -745,6 +745,30 @@ int cubicle_terminal_model_encode_key(cubicle_terminal_model_t *model,
         return -1;
     }
 
+    if (key == CUBICLE_TERMINAL_KEY_UP ||
+        key == CUBICLE_TERMINAL_KEY_DOWN ||
+        key == CUBICLE_TERMINAL_KEY_LEFT ||
+        key == CUBICLE_TERMINAL_KEY_RIGHT) {
+        if (length < 3) {
+            errno = ENOSPC;
+            return -1;
+        }
+        unsigned char final = 'A';
+        if (key == CUBICLE_TERMINAL_KEY_DOWN) {
+            final = 'B';
+        } else if (key == CUBICLE_TERMINAL_KEY_RIGHT) {
+            final = 'C';
+        } else if (key == CUBICLE_TERMINAL_KEY_LEFT) {
+            final = 'D';
+        }
+        unsigned char *out = buffer;
+        out[0] = 0x1b;
+        out[1] = model->application_cursor ? 'O' : '[';
+        out[2] = final;
+        *written_out = 3;
+        return 0;
+    }
+
     size_t previous_response_length = model->response_length;
     vterm_keyboard_key(model->term, vterm_key, VTERM_MOD_NONE);
     size_t generated = model->response_length - previous_response_length;
