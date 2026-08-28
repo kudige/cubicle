@@ -551,6 +551,17 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-end-user-e2e-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            DESK=$<TARGET_FILE:desk>
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_CONTROLLER=$<TARGET_FILE:cubicle-controller>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/end_user_e2e_test.py
+)
+
+add_test(
     NAME cubicle-config-runtime-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBE=$<TARGET_FILE:cube>

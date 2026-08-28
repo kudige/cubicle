@@ -19,6 +19,7 @@ typedef struct cubicle_terminal_snapshot {
     unsigned int cursor_row;
     unsigned int cursor_col;
     bool cursor_visible;
+    bool application_cursor;
     uint64_t offset;
     cubicle_terminal_cell_t *cells;
 } cubicle_terminal_snapshot_t;

@@ -8,7 +8,7 @@ local_endpoint=
 
 cleanup() {
     if [ -n "${local_manager_pid:-}" ] && [ -n "${local_endpoint:-}" ]; then
-        XDG_CONFIG_HOME="$tmpdir/config" \
+        XDG_CONFIG_HOME="$tmpdir/local-config" \
             XDG_STATE_HOME="$tmpdir/client-state" \
             XDG_RUNTIME_DIR="$tmpdir/runtime" \
             CUBICLE_MANAGER_SOCKET="$local_endpoint" \
@@ -17,7 +17,7 @@ cleanup() {
     fi
     if [ -n "${manager_pid:-}" ]; then
         if [ -n "${endpoint:-}" ]; then
-            XDG_CONFIG_HOME="$tmpdir/config" \
+            XDG_CONFIG_HOME="$tmpdir/local-config" \
                 XDG_STATE_HOME="$tmpdir/client-state" \
                 XDG_RUNTIME_DIR="$tmpdir/runtime" \
                 CUBICLE_MANAGER_SOCKET="$endpoint" \
@@ -30,12 +30,26 @@ cleanup() {
 
 trap cleanup EXIT
 
-mkdir -p "$tmpdir/runtime"
+mkdir -p "$tmpdir/runtime" "$tmpdir/remote-runtime"
 state_dir="$tmpdir/manager"
 unix_socket="$tmpdir/manager.sock"
 
+remote_cube() {
+    XDG_CONFIG_HOME="$tmpdir/remote-config" \
+        XDG_STATE_HOME="$tmpdir/remote-client-state" \
+        XDG_RUNTIME_DIR="$tmpdir/remote-runtime" \
+        "$CUBE" "$@"
+}
+
+stale_cube() {
+    XDG_CONFIG_HOME="$tmpdir/stale-local-config" \
+        XDG_STATE_HOME="$tmpdir/stale-local-state" \
+        XDG_RUNTIME_DIR="$tmpdir/runtime" \
+        "$CUBE" "$@"
+}
+
 cube() {
-    XDG_CONFIG_HOME="$tmpdir/config" \
+    XDG_CONFIG_HOME="$tmpdir/local-config" \
         XDG_STATE_HOME="$tmpdir/client-state" \
         XDG_RUNTIME_DIR="$tmpdir/runtime" \
         "$CUBE" "$@"
@@ -53,13 +67,13 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 
-CUBICLE_MANAGER_SOCKET="$unix_socket" cube workspace create Remote \
+CUBICLE_MANAGER_SOCKET="$unix_socket" remote_cube workspace create Remote \
     >"$tmpdir/workspace-create.out"
-CUBICLE_MANAGER_SOCKET="$unix_socket" cube workspace create RemoteTwo \
+CUBICLE_MANAGER_SOCKET="$unix_socket" remote_cube workspace create RemoteTwo \
     >"$tmpdir/workspace-two-create.out"
-CUBICLE_MANAGER_SOCKET="$unix_socket" cube access add \
+CUBICLE_MANAGER_SOCKET="$unix_socket" remote_cube access add \
     "$client_key" --role owner --label tls-client >"$tmpdir/access-add.out"
-CUBICLE_MANAGER_SOCKET="$unix_socket" cube shutdown >/dev/null
+CUBICLE_MANAGER_SOCKET="$unix_socket" remote_cube shutdown >/dev/null
 wait "$manager_pid"
 manager_pid=
 
@@ -80,10 +94,13 @@ tls_local_socket="$state_dir/manager.sock"
 manager_pid=$!
 
 for _ in $(seq 1 100); do
-    [ -S "$tls_local_socket" ] || {
-        sleep 0.05
-        continue
-    }
+    [ -S "$tls_local_socket" ] && break
+    sleep 0.05
+done
+
+stale_cube remote add stale "$endpoint" --yes >"$tmpdir/stale-remote-add.out"
+
+for _ in $(seq 1 100); do
     if CUBICLE_MANAGER_SOCKET="$endpoint" cube workspace list \
         >"$tmpdir/tls-list.out" 2>"$tmpdir/tls-list.err"; then
         break
@@ -119,7 +136,7 @@ CUBICLE_MANAGER_SOCKET="$endpoint" cube --json --workspace Remote run --bg --tty
     >"$tmpdir/relay-snapshot-run.out"
 relay_snapshot_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' \
     "$tmpdir/relay-snapshot-run.out")
-XDG_CONFIG_HOME="$tmpdir/config" \
+XDG_CONFIG_HOME="$tmpdir/local-config" \
     XDG_STATE_HOME="$tmpdir/client-state" \
     XDG_RUNTIME_DIR="$tmpdir/runtime" \
     "$CUBICLE_ATTACHMENT_SNAPSHOT_CLIENT" --relay "$endpoint" \

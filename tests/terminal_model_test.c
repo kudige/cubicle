@@ -83,6 +83,72 @@ static void test_resize_and_terminal_response(void)
     cubicle_terminal_model_destroy(model);
 }
 
+static void test_keyboard_encoding_tracks_cursor_mode(void)
+{
+    cubicle_terminal_model_t *model = NULL;
+    char output[16];
+    size_t output_length = 0;
+
+    expect_true(cubicle_terminal_model_create(2, 4, &model) == 0,
+                "expected terminal model creation to succeed");
+    if (model == NULL) {
+        return;
+    }
+
+    expect_true(cubicle_terminal_model_encode_key(
+                    model, CUBICLE_TERMINAL_KEY_UP, output, sizeof(output),
+                    &output_length) == 0,
+                "expected normal cursor key encoding to succeed");
+    expect_true(output_length == 3 &&
+                    memcmp(output, "\x1b[A", output_length) == 0,
+                "expected normal cursor Up sequence");
+
+    expect_true(cubicle_terminal_model_feed(model, "\x1b[?1h", 5) == 0,
+                "expected application cursor mode feed to succeed");
+    output_length = 0;
+    expect_true(cubicle_terminal_model_encode_key(
+                    model, CUBICLE_TERMINAL_KEY_UP, output, sizeof(output),
+                    &output_length) == 0,
+                "expected application cursor key encoding to succeed");
+    expect_true(output_length == 3 &&
+                    memcmp(output, "\x1bOA", output_length) == 0,
+                "expected application cursor Up sequence");
+
+    cubicle_terminal_snapshot_t snapshot;
+    cubicle_terminal_model_t *restored = NULL;
+    expect_true(cubicle_terminal_model_snapshot(model, 0, &snapshot) == 0,
+                "expected application cursor snapshot to succeed");
+    expect_true(snapshot.application_cursor,
+                "expected snapshot to preserve application cursor mode");
+    expect_true(cubicle_terminal_model_create(2, 4, &restored) == 0,
+                "expected restored terminal model creation to succeed");
+    expect_true(cubicle_terminal_model_load_snapshot(restored, &snapshot) == 0,
+                "expected application cursor snapshot load to succeed");
+    output_length = 0;
+    expect_true(cubicle_terminal_model_encode_key(
+                    restored, CUBICLE_TERMINAL_KEY_DOWN, output,
+                    sizeof(output), &output_length) == 0,
+                "expected restored application cursor encoding to succeed");
+    expect_true(output_length == 3 &&
+                    memcmp(output, "\x1bOB", output_length) == 0,
+                "expected restored application cursor Down sequence");
+    cubicle_terminal_model_destroy(restored);
+    cubicle_terminal_snapshot_cleanup(&snapshot);
+
+    expect_true(cubicle_terminal_model_feed(model, "\x1b[?1l", 5) == 0,
+                "expected normal cursor mode feed to succeed");
+    output_length = 0;
+    expect_true(cubicle_terminal_model_encode_key(
+                    model, CUBICLE_TERMINAL_KEY_DOWN, output, sizeof(output),
+                    &output_length) == 0,
+                "expected restored cursor key encoding to succeed");
+    expect_true(output_length == 3 &&
+                    memcmp(output, "\x1b[B", output_length) == 0,
+                "expected normal cursor Down sequence");
+
+    cubicle_terminal_model_destroy(model);
+}
+
 static void test_resize_growth_restores_scrollback(void)
 {
     cubicle_terminal_model_t *model = NULL;
@@ -194,6 +260,7 @@ int main(void)
 {
     test_text_cursor_and_attrs();
     test_resize_and_terminal_response();
+    test_keyboard_encoding_tracks_cursor_mode();
     test_resize_growth_restores_scrollback();
     test_scrollback_capture_limit_and_take();
     test_dirty_rows();
