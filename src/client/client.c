@@ -342,10 +342,16 @@ static int endpoint_is_plain_tcp(const cubicle_endpoint_t *endpoint)
     return strncmp(endpoint->uri, "tcp://", 6) == 0;
 }
 
-static cubicle_error_code_t resume_unix_session(cubicle_client_t *client)
+static cubicle_error_code_t resume_unix_session(
+    cubicle_client_t *client,
+    const cubicle_auth_identity_t *identity)
 {
     client_cached_session_t cached;
     if (load_cached_session(&client->endpoint, &cached) < 0) {
+        return CUBICLE_ERR_SESSION_EXPIRED;
+    }
+    if (identity == NULL ||
+        strcmp(cached.session.client_key_id, identity->key_id) != 0) {
         return CUBICLE_ERR_SESSION_EXPIRED;
     }
 
@@ -433,12 +439,6 @@ static cubicle_error_code_t authenticate_unix_session(cubicle_client_t *client)
         return bootstrap_local_session(client);
     }
 
-    cubicle_error_code_t resume_code = resume_unix_session(client);
-    if (resume_code == CUBICLE_OK) {
-        return CUBICLE_OK;
-    }
-    memset(&client->last_error, 0, sizeof(client->last_error));
-
     char key_dir[CUBICLE_PATH_MAX];
     char private_key_path[CUBICLE_PATH_MAX];
     cubicle_auth_identity_t identity;
@@ -450,6 +450,12 @@ static cubicle_error_code_t authenticate_unix_session(cubicle_client_t *client)
         return set_client_error(client, CUBICLE_ERR_IO, errno,
                                 "failed to initialize client identity");
     }
+
+    cubicle_error_code_t resume_code = resume_unix_session(client, &identity);
+    if (resume_code == CUBICLE_OK) {
+        return CUBICLE_OK;
+    }
+    memset(&client->last_error, 0, sizeof(client->last_error));
 
     unsigned char client_nonce[CUBICLE_AUTH_NONCE_BYTES];
     char client_nonce_hex[CUBICLE_AUTH_NONCE_BYTES * 2 + 1];
