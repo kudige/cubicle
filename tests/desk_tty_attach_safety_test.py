@@ -1365,8 +1365,16 @@ def run_desk_open_other_workspace_process(desk, cube, env):
     sent_macro = False
     saw_macro = False
     saw_macro_at = 0.0
+    focused_return_pane = False
+    checked_return_macros = False
+    requested_return_macro_menu = False
+    opened_return_macro_menu = False
+    return_macros_closed_at = 0.0
+    sent_return_macro = False
+    saw_return_macro = False
+    saw_return_macro_at = 0.0
     sent_quit = False
-    deadline = time.time() + 7
+    deadline = time.time() + 10
     try:
         while time.time() < deadline:
             fds = [master_fd]
@@ -1510,8 +1518,78 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 ):
                     saw_last_workspace_highlight = True
 
-            if saw_macro and saw_last_workspace_highlight and not sent_quit:
-                if time.time() - saw_macro_at > 0.2:
+            if (
+                saw_macro
+                and saw_last_workspace_highlight
+                and not focused_return_pane
+                and time.time() - saw_macro_at > 0.2
+            ):
+                os.write(master_fd, b"\x18n")
+                focused_return_pane = True
+                captured.clear()
+
+            if (
+                focused_return_pane
+                and not opened_return_macro_menu
+                and not checked_return_macros
+                and b"desk-safe-macro" in captured
+            ):
+                captured.clear()
+                os.write(master_fd, b"\x18o")
+                opened_return_macro_menu = True
+
+            if (
+                opened_return_macro_menu
+                and not requested_return_macro_menu
+                and not checked_return_macros
+                and b"Open cube" in captured
+            ):
+                os.write(master_fd, b"m")
+                requested_return_macro_menu = True
+                captured.clear()
+
+            if opened_return_macro_menu and not checked_return_macros and b"Macros" in captured:
+                if b"1. safe-only" not in captured:
+                    continue
+                if b"other-only" in captured:
+                    raise AssertionError(
+                        f"returned safe workspace macro menu leaked other macro: {captured!r}"
+                    )
+                checked_return_macros = True
+                os.write(master_fd, b"q")
+                captured.clear()
+                return_macros_closed_at = time.time()
+
+            if (
+                return_macros_closed_at > 0.0
+                and not sent_return_macro
+                and time.time() - return_macros_closed_at > 0.2
+            ):
+                os.write(master_fd, b"\x181")
+                sent_return_macro = True
+
+            if sent_return_macro and not saw_return_macro:
+                logs = subprocess.run(
+                    [
+                        cube,
+                        "--workspace",
+                        "DeskSafe",
+                        "logs",
+                        "--stdout",
+                        "desk-safe-macro",
+                    ],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_SAFE_MACRO" in logs.stdout:
+                    saw_return_macro = True
+                    saw_return_macro_at = time.time()
+                    captured.clear()
+
+            if saw_return_macro and not sent_quit:
+                if time.time() - saw_return_macro_at > 0.2:
                     os.write(master_fd, b"\x18q")
                     sent_quit = True
 
@@ -1539,6 +1617,18 @@ def run_desk_open_other_workspace_process(desk, cube, env):
         if not saw_last_workspace_highlight:
             raise AssertionError(
                 f"desk did not highlight the last opened workspace: {captured!r}"
+            )
+        if not focused_return_pane:
+            raise AssertionError("desk was not asked to refocus the safe workspace pane")
+        if not checked_return_macros:
+            raise AssertionError(
+                f"desk did not restore safe workspace macros: {captured!r}"
+            )
+        if not sent_return_macro:
+            raise AssertionError("desk did not run the returned safe workspace macro")
+        if not saw_return_macro:
+            raise AssertionError(
+                f"returned safe workspace macro did not reach target: {captured!r}"
             )
         if not sent_quit:
             raise AssertionError("desk was not asked to quit")
@@ -2864,7 +2954,7 @@ def main():
             1,
             "safe-only",
             "SAFE_MACRO",
-            "desk-safe",
+            "desk-safe-macro",
         )
         seed_workspace_macro(
             state_dir,
@@ -2908,6 +2998,38 @@ def main():
                     "            sys.stdout.flush()\n"
                     "            saw_macro=True\n"
                     "        if saw_open and saw_macro:\n"
+                    "            break\n"
+                    "time.sleep(10)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskSafe",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "desk-safe-macro",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY desk-safe-macro\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+12\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "        if b'SAFE_MACRO' in data:\n"
+                    "            sys.stdout.write('GOT_SAFE_MACRO\\n')\n"
+                    "            sys.stdout.flush()\n"
                     "            break\n"
                     "time.sleep(10)\n"
                 ),
