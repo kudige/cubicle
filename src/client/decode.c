@@ -418,6 +418,10 @@ int parse_macro_info(const char *json, cubicle_workspace_macro_info_t *out)
     if (result == 0 &&
         (cubicle_json_get_optional_u64(parsed.root, "target_pane",
                                        &out->target_pane, NULL, &error) < 0 ||
+         cubicle_json_get_optional_string(parsed.root, "target_process_name",
+                                          out->target_process_name,
+                                          sizeof(out->target_process_name),
+                                          NULL, &error) < 0 ||
          cubicle_json_get_optional_string(parsed.root, "key_name",
                                           out->key_name,
                                           sizeof(out->key_name), NULL,

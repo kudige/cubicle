@@ -10,9 +10,9 @@ Cubicle macros are saved per workspace. A macro has a numeric position, a name,
 command text, an optional custom key binding, and a target policy.
 
 Running a macro sends its saved text followed by Enter. The target can be the
-current pane at the moment the macro runs, or a preset pane number in the
-current workspace. If a preset pane is no longer available or is detached, Desk
-sends the macro to the current active pane instead.
+current pane at the moment the macro runs, or a preset cube name in that
+workspace. If a preset cube is not open in the current Desk layout, Desk leaves
+the pane unchanged and shows a short notice.
 
 Macros are managed from `desk`. CLI management is not implemented yet.
 
@@ -37,6 +37,11 @@ m
 ```
 
 This opens the macro manager for the current workspace.
+
+When a Desk layout contains panes from multiple workspaces, the current
+workspace is the workspace of the active pane. Moving focus to another pane can
+therefore change which macros appear and which `Prefix-1` through `Prefix-0`
+bindings are active.
 
 ## Creating A Macro
 
@@ -109,15 +114,18 @@ Active Pane
 
 selects whichever pane is active when the macro runs.
 
-The remaining entries are the cube names currently open in the workspace:
+The remaining entries are the cube names currently open from the active pane's
+workspace:
 
 ```text
-1. build-shell
-2. test-runner
+build-shell
+test-runner
 ```
 
-Selecting a cube name presets the macro to that pane. If that pane is later
-missing or detached, Desk falls back to the current active pane.
+Selecting a cube name presets the macro to that cube. The target follows the
+cube name even if the layout changes and the cube moves to another pane number.
+If that cube is later missing or detached, Desk reports that the macro target is
+not open and does not send the macro elsewhere.
 
 ## Deleting Macros
 

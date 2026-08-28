@@ -82,6 +82,7 @@ typedef struct cubicle_workspace_macro_info {
     char name[CUBICLE_WORKSPACE_MACRO_NAME_MAX];
     char text[CUBICLE_WORKSPACE_MACRO_TEXT_MAX];
     uint64_t target_pane;
+    char target_process_name[CUBICLE_NAME_MAX];
     char key_name[CUBICLE_WORKSPACE_MACRO_KEY_MAX];
 } cubicle_workspace_macro_info_t;
 
@@ -91,6 +92,7 @@ typedef struct cubicle_workspace_macro_save_options {
     const char *name;
     const char *text;
     uint64_t target_pane;
+    const char *target_process_name;
     const char *key_name;
 } cubicle_workspace_macro_save_options_t;
 

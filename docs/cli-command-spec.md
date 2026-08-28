@@ -1052,10 +1052,11 @@ The following are intentional and should not be changed casually:
 # Workspace Macros
 
 Desk supports workspace-specific macros that send saved text plus Enter to the
-current pane, or to the pane captured when the macro is created if that pane is
-still available. Default bindings are `Prefix-1` through `Prefix-9` for macros
-1 through 9 and `Prefix-0` for macro 10; custom macro keymaps can be set from
-Desk's key bindings overlay.
+current pane, or to a cube name selected when the macro is created. In mixed
+layouts, the active pane's workspace determines which macros are active.
+Default bindings are `Prefix-1` through `Prefix-9` for macros 1 through 9 and
+`Prefix-0` for macro 10; custom macro keymaps can be set from Desk's key
+bindings overlay.
 
 TODO: add `cube` CLI commands for listing, creating, editing, deleting, and
 reordering workspace macros. The first implementation is intentionally Desk UI

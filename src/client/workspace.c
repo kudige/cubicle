@@ -296,6 +296,10 @@ cubicle_error_code_t cubicle_workspace_macro_save(cubicle_client_t *client,
     cubicle_json_builder_append(&params, ",\"text\":");
     cubicle_json_builder_append_string(&params, options->text);
     cubicle_json_builder_appendf(&params, ",\"target_pane\":%llu", (unsigned long long)options->target_pane);
+    if (options->target_process_name != NULL) {
+        cubicle_json_builder_append(&params, ",\"target_process_name\":");
+        cubicle_json_builder_append_string(&params, options->target_process_name);
+    }
     if (options->key_name != NULL) {
         cubicle_json_builder_append(&params, ",\"key_name\":");
         cubicle_json_builder_append_string(&params, options->key_name);

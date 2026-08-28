@@ -321,6 +321,23 @@ def workspace_layout_file(env, workspace_id):
     )
 
 
+def seed_workspace_macro(
+    state_dir,
+    workspace_id,
+    ordinal,
+    name,
+    text,
+    target_process_name="",
+    key_name="",
+):
+    path = os.path.join(state_dir, "workspace-macros.tsv")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(
+            f"{workspace_id}\t{ordinal}\t{name}\t{text}\t0\t"
+            f"{target_process_name}\t{key_name}\n"
+        )
+
+
 def desk_default_workspace_file(env):
     return os.path.join(env["XDG_STATE_HOME"], "cubicle", "desk-workspace")
 
@@ -1337,9 +1354,17 @@ def run_desk_open_other_workspace_process(desk, cube, env):
     selected_process = False
     sent_payload = False
     saw_payload = False
+    checked_safe_macros = False
+    opened_safe_macro_menu = False
+    safe_macros_closed_at = 0.0
     reopened_menu = False
     saw_last_workspace_highlight = False
-    closed_highlighted_menu_at = 0.0
+    checked_other_macros = False
+    opened_other_macro_menu = False
+    other_macros_closed_at = 0.0
+    sent_macro = False
+    saw_macro = False
+    saw_macro_at = 0.0
     sent_quit = False
     deadline = time.time() + 7
     try:
@@ -1357,7 +1382,36 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 elif proc.stderr is not None:
                     os.read(proc.stderr.fileno(), 4096)
 
-            if not opened_menu and b"desk-safe" in captured:
+            if not checked_safe_macros and b"desk-safe" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18o")
+                checked_safe_macros = True
+
+            if (
+                checked_safe_macros
+                and not opened_safe_macro_menu
+                and not opened_menu
+                and b"Open cube" in captured
+            ):
+                os.write(master_fd, b"m")
+                opened_safe_macro_menu = True
+
+            if opened_safe_macro_menu and not opened_menu and b"Macros" in captured:
+                if b"1. safe-only" not in captured:
+                    continue
+                if b"other-only" in captured:
+                    raise AssertionError(
+                        f"safe workspace macro menu leaked other macro: {captured!r}"
+                    )
+                os.write(master_fd, b"q")
+                captured.clear()
+                safe_macros_closed_at = time.time()
+
+            if (
+                safe_macros_closed_at > 0.0
+                and not opened_menu
+                and time.time() - safe_macros_closed_at > 0.2
+            ):
                 os.write(master_fd, b"\x18o")
                 opened_menu = True
 
@@ -1407,6 +1461,48 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 os.write(master_fd, b"\x18o")
                 reopened_menu = True
 
+            if (
+                reopened_menu
+                and not opened_other_macro_menu
+                and not checked_other_macros
+                and b"Open cube" in captured
+            ):
+                os.write(master_fd, b"m")
+                opened_other_macro_menu = True
+
+            if opened_other_macro_menu and not checked_other_macros and b"Macros" in captured:
+                if b"1. other-only" not in captured:
+                    continue
+                if b"safe-only" in captured:
+                    raise AssertionError(
+                        f"other workspace macro menu leaked safe macro: {captured!r}"
+                    )
+                checked_other_macros = True
+                os.write(master_fd, b"q")
+                captured.clear()
+                other_macros_closed_at = time.time()
+
+            if (
+                other_macros_closed_at > 0.0
+                and not sent_macro
+                and time.time() - other_macros_closed_at > 0.2
+            ):
+                os.write(master_fd, b"\x181")
+                sent_macro = True
+
+            if sent_macro and not saw_macro:
+                logs = subprocess.run(
+                    [cube, "--workspace", "DeskOther", "logs", "--stdout", "desk-other"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_OTHER_MACRO" in logs.stdout:
+                    saw_macro = True
+                    saw_macro_at = time.time()
+                    captured.clear()
+
             if reopened_menu and not saw_last_workspace_highlight:
                 if re.search(
                     rb"\x1b\[[0-9]+;[0-9]+H\x1b\[1;7;48;5;236mworkspace: DeskOther",
@@ -1414,11 +1510,8 @@ def run_desk_open_other_workspace_process(desk, cube, env):
                 ):
                     saw_last_workspace_highlight = True
 
-            if saw_last_workspace_highlight and not sent_quit:
-                if closed_highlighted_menu_at == 0.0:
-                    os.write(master_fd, b"q")
-                    closed_highlighted_menu_at = time.time()
-                elif time.time() - closed_highlighted_menu_at > 0.2:
+            if saw_macro and saw_last_workspace_highlight and not sent_quit:
+                if time.time() - saw_macro_at > 0.2:
                     os.write(master_fd, b"\x18q")
                     sent_quit = True
 
@@ -1427,6 +1520,8 @@ def run_desk_open_other_workspace_process(desk, cube, env):
 
         if not opened_menu:
             raise AssertionError(f"desk did not render initial pane: {captured!r}")
+        if not checked_safe_macros:
+            raise AssertionError(f"desk did not show safe workspace macros: {captured!r}")
         if not selected_workspace:
             raise AssertionError(f"desk open menu did not show other workspace: {captured!r}")
         if not checked_workspace_scope:
@@ -1435,10 +1530,18 @@ def run_desk_open_other_workspace_process(desk, cube, env):
             raise AssertionError(f"desk open menu did not show other process: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"newly opened pane did not receive input: {captured!r}")
+        if not checked_other_macros:
+            raise AssertionError(f"desk did not show other workspace macros: {captured!r}")
+        if not sent_macro:
+            raise AssertionError("desk did not run the other workspace macro")
+        if not saw_macro:
+            raise AssertionError(f"other workspace macro did not reach target: {captured!r}")
         if not saw_last_workspace_highlight:
             raise AssertionError(
                 f"desk did not highlight the last opened workspace: {captured!r}"
             )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:
@@ -2753,6 +2856,24 @@ def main():
         run_checked([cube, "--workspace", "DeskEnter", "kill", "--all", "--cleanup"], env)
 
         run_checked([cube, "workspace", "create", "DeskOther"], env)
+        safe_workspace_id = find_workspace_id(cube, env, "DeskSafe")
+        other_workspace_id = find_workspace_id(cube, env, "DeskOther")
+        seed_workspace_macro(
+            state_dir,
+            safe_workspace_id,
+            1,
+            "safe-only",
+            "SAFE_MACRO",
+            "desk-safe",
+        )
+        seed_workspace_macro(
+            state_dir,
+            other_workspace_id,
+            1,
+            "other-only",
+            "OTHER_MACRO",
+            "desk-other",
+        )
         run_checked(
             [
                 cube,
@@ -2772,13 +2893,21 @@ def main():
                     "sys.stdout.flush()\n"
                     "deadline=time.time()+10\n"
                     "data=b''\n"
+                    "saw_open=False\n"
+                    "saw_macro=False\n"
                     "while time.time()<deadline:\n"
                     "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
                     "    if r:\n"
                     "        data+=os.read(0,64)\n"
-                    "        if b'OPEN' in data:\n"
+                    "        if not saw_open and b'OPEN' in data:\n"
                     "            sys.stdout.write('GOT_OPEN\\n')\n"
                     "            sys.stdout.flush()\n"
+                    "            saw_open=True\n"
+                    "        if not saw_macro and b'OTHER_MACRO' in data:\n"
+                    "            sys.stdout.write('GOT_OTHER_MACRO\\n')\n"
+                    "            sys.stdout.flush()\n"
+                    "            saw_macro=True\n"
+                    "        if saw_open and saw_macro:\n"
                     "            break\n"
                     "time.sleep(10)\n"
                 ),

@@ -154,6 +154,7 @@ typedef struct workspace_macro_record {
     char name[CUBICLE_WORKSPACE_MACRO_NAME_MAX];
     char text[CUBICLE_WORKSPACE_MACRO_TEXT_MAX];
     uint64_t target_pane;
+    char target_process_name[CUBICLE_NAME_MAX];
     char key_name[CUBICLE_WORKSPACE_MACRO_KEY_MAX];
 } workspace_macro_record_t;
 
@@ -1634,18 +1635,28 @@ static int parse_workspace_macro_record(const char *line,
         return -1;
     }
 
-    char *fields[6];
+    char *fields[7];
     char *cursor = copy;
+    size_t field_count = 0;
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
         fields[i] = cursor;
         char *separator = strpbrk(cursor, "\t\n");
+        char separator_char = separator != NULL ? *separator : '\0';
         if (separator == NULL && i + 1 < sizeof(fields) / sizeof(fields[0])) {
-            return -1;
+            field_count = i + 1;
+            break;
         }
         if (separator != NULL) {
             *separator = '\0';
             cursor = separator + 1;
         }
+        field_count = i + 1;
+        if (separator_char == '\n' || separator_char == '\0') {
+            break;
+        }
+    }
+    if (field_count != 6 && field_count != 7) {
+        return -1;
     }
 
     memset(record, 0, sizeof(*record));
@@ -1655,7 +1666,13 @@ static int parse_workspace_macro_record(const char *line,
     snprintf(record->name, sizeof(record->name), "%s", fields[2]);
     snprintf(record->text, sizeof(record->text), "%s", fields[3]);
     record->target_pane = strtoull(fields[4], NULL, 10);
-    snprintf(record->key_name, sizeof(record->key_name), "%s", fields[5]);
+    if (field_count == 7) {
+        snprintf(record->target_process_name,
+                 sizeof(record->target_process_name), "%s", fields[5]);
+        snprintf(record->key_name, sizeof(record->key_name), "%s", fields[6]);
+    } else {
+        snprintf(record->key_name, sizeof(record->key_name), "%s", fields[5]);
+    }
     return record->workspace_id[0] != '\0' && record->ordinal > 0 &&
                    record->name[0] != '\0'
                ? 0
@@ -1665,11 +1682,11 @@ static int parse_workspace_macro_record(const char *line,
 static int write_workspace_macro_record(FILE *file,
                                         const workspace_macro_record_t *record)
 {
-    return fprintf(file, "%s\t%llu\t%s\t%s\t%llu\t%s\n",
+    return fprintf(file, "%s\t%llu\t%s\t%s\t%llu\t%s\t%s\n",
                    record->workspace_id,
                    (unsigned long long)record->ordinal, record->name,
                    record->text, (unsigned long long)record->target_pane,
-                   record->key_name) < 0
+                   record->target_process_name, record->key_name) < 0
                ? -1
                : 0;
 }
@@ -1680,21 +1697,24 @@ static int workspace_macro_info_json(const workspace_macro_record_t *record,
 {
     char escaped_name[CUBICLE_WORKSPACE_MACRO_NAME_MAX * 2];
     char escaped_text[CUBICLE_WORKSPACE_MACRO_TEXT_MAX * 2];
+    char escaped_target[CUBICLE_NAME_MAX * 2];
     char escaped_key[CUBICLE_WORKSPACE_MACRO_KEY_MAX * 2];
     if (cubicle_json_escape(escaped_name, sizeof(escaped_name),
                             record->name) < 0 ||
         cubicle_json_escape(escaped_text, sizeof(escaped_text),
                             record->text) < 0 ||
+        cubicle_json_escape(escaped_target, sizeof(escaped_target),
+                            record->target_process_name) < 0 ||
         cubicle_json_escape(escaped_key, sizeof(escaped_key),
                             record->key_name) < 0) {
         return -1;
     }
     int length = snprintf(
         buffer, buffer_size,
-        "{\"workspace_id\":\"%s\",\"ordinal\":%llu,\"name\":\"%s\",\"text\":\"%s\",\"target_pane\":%llu,\"key_name\":\"%s\"}",
+        "{\"workspace_id\":\"%s\",\"ordinal\":%llu,\"name\":\"%s\",\"text\":\"%s\",\"target_pane\":%llu,\"target_process_name\":\"%s\",\"key_name\":\"%s\"}",
         record->workspace_id, (unsigned long long)record->ordinal,
         escaped_name, escaped_text, (unsigned long long)record->target_pane,
-        escaped_key);
+        escaped_target, escaped_key);
     if (length < 0 || (size_t)length >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -5510,12 +5530,18 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
             cubicle_json_get_optional_u64(params, "target_pane",
                                           &macro.target_pane, NULL,
                                           &validation_error) < 0 ||
+            cubicle_json_get_optional_string(params, "target_process_name",
+                                             macro.target_process_name,
+                                             sizeof(macro.target_process_name),
+                                             NULL, &validation_error) < 0 ||
             cubicle_json_get_optional_string(params, "key_name",
                                              macro.key_name,
                                              sizeof(macro.key_name), NULL,
                                              &validation_error) < 0 ||
             macro.ordinal == 0 || validate_field(macro.name, "macro name") < 0 ||
             validate_field(macro.text, "macro text") < 0 ||
+            (macro.target_process_name[0] != '\0' &&
+             validate_field(macro.target_process_name, "macro target") < 0) ||
             (macro.key_name[0] != '\0' &&
              validate_field(macro.key_name, "macro key") < 0)) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,

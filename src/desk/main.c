@@ -487,7 +487,18 @@ typedef struct desk_menu_item {
     char key_text[128];
     size_t macro_index;
     uint64_t target_pane;
+    char target_process_name[CUBICLE_NAME_MAX];
 } desk_menu_item_t;
+
+typedef struct desk_macro_cache {
+    char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    cubicle_workspace_id_t workspace_id;
+    char workspace_name[CUBICLE_NAME_MAX];
+    cubicle_workspace_macro_info_t macros[CUBICLE_WORKSPACE_MACRO_MAX];
+    size_t macro_count;
+    bool valid;
+    bool unsupported;
+} desk_macro_cache_t;
 
 typedef struct desk_open_menu {
     desk_menu_level_t level;
@@ -553,8 +564,9 @@ typedef struct desk_session {
     size_t key_binding_count;
     cubicle_desk_key_binding_t startup_key_bindings[CUBICLE_DESK_KEY_BINDING_MAX];
     size_t startup_key_binding_count;
-    cubicle_workspace_macro_info_t macros[CUBICLE_WORKSPACE_MACRO_MAX];
-    size_t macro_count;
+    desk_macro_cache_t *macro_caches;
+    size_t macro_cache_count;
+    size_t macro_cache_capacity;
     desk_remote_cache_t *remote_caches;
     size_t remote_cache_count;
     time_t remote_registry_mtime;
@@ -819,9 +831,26 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   bool mouse_titles);
 static long long desk_monotonic_ms(void);
 static bool desk_string_equals_case(const char *left, const char *right);
-static int desk_load_workspace_macros(desk_session_t *session,
-                                      char *error,
-                                      size_t error_size);
+static desk_macro_cache_t *desk_active_macro_cache(desk_session_t *session,
+                                                   bool load,
+                                                   char *error,
+                                                   size_t error_size);
+static int desk_load_all_pane_macro_caches(desk_session_t *session,
+                                           char *error,
+                                           size_t error_size);
+static int desk_load_macro_cache_for_pane(desk_session_t *session,
+                                          desk_pane_t *pane,
+                                          char *error,
+                                          size_t error_size);
+static desk_pane_t *desk_active_pane(desk_session_t *session);
+static const char *desk_pane_manager_uri(const desk_session_t *session,
+                                         const desk_pane_t *pane);
+static const char *desk_pane_workspace_id(const desk_session_t *session,
+                                          const desk_pane_t *pane);
+static size_t desk_active_macro_count(desk_session_t *session);
+static cubicle_workspace_macro_info_t *desk_active_macro_at(
+    desk_session_t *session,
+    size_t index);
 static int desk_save_macro(desk_session_t *session,
                            const cubicle_workspace_macro_info_t *macro,
                            char *error,
@@ -4147,7 +4176,8 @@ static int refresh_pane_sizes(desk_session_t *session,
 static cubicle_client_t *desk_pane_manager(desk_session_t *session,
                                            desk_pane_t *pane)
 {
-    return pane->manager != NULL ? pane->manager : session->manager;
+    return pane != NULL && pane->manager != NULL ? pane->manager
+                                                 : session->manager;
 }
 
 static bool desk_pane_uses_relay(const desk_session_t *session,
@@ -4559,7 +4589,7 @@ static int desk_switch_workspace(desk_session_t *session,
     session->terminal_size_dirty = true;
     int result = load_or_create_layout(session, error, error_size);
     if (result == 0) {
-        result = desk_load_workspace_macros(session, error, error_size);
+        result = desk_load_all_pane_macro_caches(session, error, error_size);
     }
     bool changed = false;
     if (result == 0 &&
@@ -4806,8 +4836,9 @@ static int desk_menu_add_new_process(desk_session_t *session)
 
 static int desk_menu_add_macro(desk_session_t *session, size_t macro_index)
 {
+    size_t macro_count = desk_active_macro_count(session);
     if (session->open_menu.item_count >= DESK_MENU_MAX_ITEMS ||
-        macro_index >= session->macro_count) {
+        macro_index >= macro_count) {
         return 0;
     }
     desk_menu_item_t *item =
@@ -4835,8 +4866,18 @@ static void desk_begin_macro_list(desk_session_t *session)
     desk_open_menu_t *menu = &session->open_menu;
     memset(menu, 0, sizeof(*menu));
     menu->level = DESK_MENU_MACROS;
-    menu->workspace = session->workspace;
-    for (size_t i = 0; i < session->macro_count; ++i) {
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    if (cache != NULL) {
+        snprintf(menu->workspace.id, sizeof(menu->workspace.id), "%s",
+                 cache->workspace_id);
+        snprintf(menu->workspace.name, sizeof(menu->workspace.name), "%s",
+                 cache->workspace_name[0] != '\0' ? cache->workspace_name
+                                                   : cache->workspace_id);
+    } else {
+        menu->workspace = session->workspace;
+    }
+    size_t macro_count = cache != NULL ? cache->macro_count : 0;
+    for (size_t i = 0; i < macro_count; ++i) {
         (void)desk_menu_add_macro(session, i);
     }
     (void)desk_menu_add_new_macro(session);
@@ -4851,12 +4892,21 @@ static void desk_begin_macro_name_prompt(desk_session_t *session,
     menu->level = DESK_MENU_MACRO_NAME;
     menu->workspace = session->workspace;
     menu->edit_macro_index = macro_index;
-    if (macro_index < session->macro_count) {
-        menu->edit_macro_ordinal = session->macros[macro_index].ordinal;
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    size_t macro_count = cache != NULL ? cache->macro_count : 0;
+    if (cache != NULL) {
+        snprintf(menu->workspace.id, sizeof(menu->workspace.id), "%s",
+                 cache->workspace_id);
+        snprintf(menu->workspace.name, sizeof(menu->workspace.name), "%s",
+                 cache->workspace_name[0] != '\0' ? cache->workspace_name
+                                                   : cache->workspace_id);
+    }
+    if (macro_index < macro_count) {
+        menu->edit_macro_ordinal = cache->macros[macro_index].ordinal;
         snprintf(menu->command, sizeof(menu->command), "%s",
-                 session->macros[macro_index].name);
+                 cache->macros[macro_index].name);
     } else {
-        menu->edit_macro_ordinal = session->macro_count + 1;
+        menu->edit_macro_ordinal = macro_count + 1;
     }
     menu->command_length = strlen(menu->command);
     snprintf(menu->status, sizeof(menu->status), "Macro name");
@@ -4880,9 +4930,11 @@ static void desk_begin_macro_text_prompt(desk_session_t *session)
     menu->edit_macro_ordinal = ordinal;
     menu->edit_macro_index = macro_index;
     menu->level = DESK_MENU_MACRO_TEXT;
-    if (macro_index < session->macro_count) {
+    cubicle_workspace_macro_info_t *macro =
+        desk_active_macro_at(session, macro_index);
+    if (macro != NULL) {
         snprintf(menu->command, sizeof(menu->command), "%s",
-                 session->macros[macro_index].text);
+                 macro->text);
         menu->command_length = strlen(menu->command);
     }
     snprintf(menu->status, sizeof(menu->status), "Macro text");
@@ -4915,23 +4967,35 @@ static void desk_begin_macro_target_prompt(desk_session_t *session)
         item->target_pane = 0;
         snprintf(item->description, sizeof(item->description), "Active Pane");
     }
-    uint64_t selected_target =
-        menu->edit_macro_index < session->macro_count
-            ? session->macros[menu->edit_macro_index].target_pane
-            : 0;
+    const char *selected_target = "";
+    cubicle_workspace_macro_info_t *editing_macro =
+        desk_active_macro_at(session, menu->edit_macro_index);
+    if (editing_macro != NULL) {
+        selected_target = editing_macro->target_process_name;
+    }
+    desk_pane_t *active_pane = desk_active_pane(session);
+    const char *active_manager_uri = desk_pane_manager_uri(session, active_pane);
+    const char *active_workspace_id =
+        desk_pane_workspace_id(session, active_pane);
     for (size_t i = 0; i < session->pane_count &&
                        menu->item_count < DESK_MENU_MAX_ITEMS;
          ++i) {
+        desk_pane_t *pane = &session->panes[i];
+        if (strcmp(desk_pane_manager_uri(session, pane),
+                   active_manager_uri) != 0 ||
+            strcmp(desk_pane_workspace_id(session, pane),
+                   active_workspace_id) != 0) {
+            continue;
+        }
         desk_menu_item_t *item = &menu->items[menu->item_count++];
         memset(item, 0, sizeof(*item));
         item->kind = DESK_MENU_ITEM_MACRO_TARGET;
-        item->target_pane = (uint64_t)(i + 1);
-        const char *name = session->panes[i].process.friendly_name[0] != '\0'
-                               ? session->panes[i].process.friendly_name
-                               : session->panes[i].process.id;
-        snprintf(item->description, sizeof(item->description), "%llu. %.80s",
-                 (unsigned long long)item->target_pane, name);
-        if (selected_target == item->target_pane) {
+        const char *name = desk_pane_base_name(pane);
+        snprintf(item->target_process_name, sizeof(item->target_process_name),
+                 "%s", name);
+        snprintf(item->description, sizeof(item->description), "%.80s", name);
+        if (selected_target[0] != '\0' &&
+            strcmp(selected_target, item->target_process_name) == 0) {
             menu->selected = menu->item_count - 1;
         }
     }
@@ -4939,7 +5003,7 @@ static void desk_begin_macro_target_prompt(desk_session_t *session)
 }
 
 static int desk_apply_macro_target_selection(desk_session_t *session,
-                                             uint64_t target_pane)
+                                             const char *target_process_name)
 {
     desk_open_menu_t *menu = &session->open_menu;
     if (menu->macro_name[0] == '\0' || menu->macro_text[0] == '\0') {
@@ -4950,15 +5014,19 @@ static int desk_apply_macro_target_selection(desk_session_t *session,
 
     cubicle_workspace_macro_info_t macro;
     memset(&macro, 0, sizeof(macro));
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
     snprintf(macro.workspace_id, sizeof(macro.workspace_id), "%s",
-             session->workspace.id);
+             cache != NULL ? cache->workspace_id : session->workspace.id);
     macro.ordinal = menu->edit_macro_ordinal;
     snprintf(macro.name, sizeof(macro.name), "%s", menu->macro_name);
     snprintf(macro.text, sizeof(macro.text), "%s", menu->macro_text);
-    macro.target_pane = target_pane;
-    if (menu->edit_macro_index < session->macro_count) {
+    snprintf(macro.target_process_name, sizeof(macro.target_process_name), "%s",
+             target_process_name != NULL ? target_process_name : "");
+    cubicle_workspace_macro_info_t *editing_macro =
+        desk_active_macro_at(session, menu->edit_macro_index);
+    if (editing_macro != NULL) {
         snprintf(macro.key_name, sizeof(macro.key_name), "%s",
-                 session->macros[menu->edit_macro_index].key_name);
+                 editing_macro->key_name);
     }
     char error[256];
     if (desk_save_macro(session, &macro, error, sizeof(error)) < 0) {
@@ -5408,8 +5476,10 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "menu.open");
     desk_add_bindings_item(session, "mouse.toggle");
     desk_add_bindings_item(session, "quit");
-    for (size_t i = 0; i < session->macro_count; ++i) {
-        desk_add_macro_bindings_item(session, &session->macros[i]);
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    size_t macro_count = cache != NULL ? cache->macro_count : 0;
+    for (size_t i = 0; i < macro_count; ++i) {
+        desk_add_macro_bindings_item(session, &cache->macros[i]);
     }
 }
 
@@ -5482,7 +5552,7 @@ static void desk_remove_bindings_for_command(desk_session_t *session,
     }
 }
 
-static const char *desk_find_binding_conflict(const desk_session_t *session,
+static const char *desk_find_binding_conflict(desk_session_t *session,
                                              const char *command,
                                              const cubicle_desk_key_binding_t *candidate)
 {
@@ -5498,8 +5568,10 @@ static const char *desk_find_binding_conflict(const desk_session_t *session,
         }
         return binding->command;
     }
-    for (size_t i = 0; i < session->macro_count; ++i) {
-        const cubicle_workspace_macro_info_t *macro = &session->macros[i];
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    size_t macro_count = cache != NULL ? cache->macro_count : 0;
+    for (size_t i = 0; i < macro_count; ++i) {
+        const cubicle_workspace_macro_info_t *macro = &cache->macros[i];
         if (macro->key_name[0] == '\0') {
             continue;
         }
@@ -5829,6 +5901,9 @@ static int desk_replace_active_pane_process(desk_session_t *session,
     if (code != CUBICLE_OK) {
         return -1;
     }
+    if (desk_load_macro_cache_for_pane(session, pane, error, error_size) < 0) {
+        return -1;
+    }
     desk_apply_pane_labels(session);
     return 0;
 }
@@ -6057,6 +6132,9 @@ static int desk_apply_named_layout(desk_session_t *session,
         for (int i = 0; i < 32; ++i) {
             cubicle_client_disconnect(pane_managers[i]);
         }
+        return -1;
+    }
+    if (desk_load_all_pane_macro_caches(session, error, error_size) < 0) {
         return -1;
     }
     desk_apply_pane_labels(session);
@@ -6383,9 +6461,8 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         } else if (item->kind == DESK_MENU_ITEM_MACRO) {
             int name_cols = inner_cols > 8 ? inner_cols - 8 : 0;
             const cubicle_workspace_macro_info_t *macro =
-                item->macro_index < session->macro_count
-                    ? &session->macros[item->macro_index]
-                    : NULL;
+                desk_active_macro_at((desk_session_t *)session,
+                                     item->macro_index);
             char macro_text[160];
             if (macro != NULL) {
                 snprintf(macro_text, sizeof(macro_text), "%llu. %s",
@@ -6698,33 +6775,193 @@ static int flush_active_input(desk_session_t *session,
     return write_active_pane(session, input + start, end - start);
 }
 
-static int desk_load_workspace_macros(desk_session_t *session,
-                                      char *error,
-                                      size_t error_size)
+static const char *desk_pane_manager_uri(const desk_session_t *session,
+                                         const desk_pane_t *pane)
 {
+    return pane != NULL && pane->manager_uri[0] != '\0'
+               ? pane->manager_uri
+               : session->manager_uri;
+}
+
+static const char *desk_pane_workspace_id(const desk_session_t *session,
+                                          const desk_pane_t *pane)
+{
+    return pane != NULL && pane->process.workspace_id[0] != '\0'
+               ? pane->process.workspace_id
+               : session->workspace.id;
+}
+
+static const char *desk_pane_workspace_name(const desk_session_t *session,
+                                            const desk_pane_t *pane)
+{
+    return pane != NULL && pane->workspace_name[0] != '\0'
+               ? pane->workspace_name
+               : session->workspace.name;
+}
+
+static desk_pane_t *desk_active_pane(desk_session_t *session)
+{
+    int active = session->layout.active_pane_id;
+    if (active <= 0 || (size_t)active > session->pane_count) {
+        return NULL;
+    }
+    return &session->panes[(size_t)active - 1];
+}
+
+static desk_macro_cache_t *desk_find_macro_cache(desk_session_t *session,
+                                                 const char *manager_uri,
+                                                 const char *workspace_id)
+{
+    for (size_t i = 0; i < session->macro_cache_count; ++i) {
+        desk_macro_cache_t *cache = &session->macro_caches[i];
+        if (strcmp(cache->manager_uri, manager_uri) == 0 &&
+            strcmp(cache->workspace_id, workspace_id) == 0) {
+            return cache;
+        }
+    }
+    return NULL;
+}
+
+static desk_macro_cache_t *desk_get_macro_cache(desk_session_t *session,
+                                                cubicle_client_t *manager,
+                                                const char *manager_uri,
+                                                const char *workspace_id,
+                                                const char *workspace_name,
+                                                bool load,
+                                                char *error,
+                                                size_t error_size)
+{
+    if (manager == NULL || manager_uri == NULL || manager_uri[0] == '\0' ||
+        workspace_id == NULL || workspace_id[0] == '\0') {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "missing macro workspace");
+        }
+        return NULL;
+    }
+
+    desk_macro_cache_t *cache =
+        desk_find_macro_cache(session, manager_uri, workspace_id);
+    if (cache == NULL) {
+        if (session->macro_cache_count >= session->macro_cache_capacity) {
+            size_t next_capacity =
+                session->macro_cache_capacity == 0
+                    ? 4
+                    : session->macro_cache_capacity * 2;
+            desk_macro_cache_t *next =
+                realloc(session->macro_caches,
+                        next_capacity * sizeof(*session->macro_caches));
+            if (next == NULL) {
+                if (error != NULL && error_size > 0) {
+                    snprintf(error, error_size,
+                             "failed to allocate macro cache");
+                }
+                return NULL;
+            }
+            session->macro_caches = next;
+            memset(session->macro_caches + session->macro_cache_capacity, 0,
+                   (next_capacity - session->macro_cache_capacity) *
+                       sizeof(*session->macro_caches));
+            session->macro_cache_capacity = next_capacity;
+        }
+        cache = &session->macro_caches[session->macro_cache_count++];
+        memset(cache, 0, sizeof(*cache));
+        snprintf(cache->manager_uri, sizeof(cache->manager_uri), "%s",
+                 manager_uri);
+        snprintf(cache->workspace_id, sizeof(cache->workspace_id), "%s",
+                 workspace_id);
+    }
+    if (workspace_name != NULL && workspace_name[0] != '\0') {
+        snprintf(cache->workspace_name, sizeof(cache->workspace_name), "%s",
+                 workspace_name);
+    }
+    if (!load || cache->valid) {
+        return cache;
+    }
+
     cubicle_workspace_macro_info_t *macros = NULL;
     size_t count = 0;
-    cubicle_error_code_t code = cubicle_workspace_macro_list(
-        session->manager, session->workspace.id, &macros, &count);
+    cubicle_error_code_t code =
+        cubicle_workspace_macro_list(manager, workspace_id, &macros, &count);
     if (code != CUBICLE_OK) {
-        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        const cubicle_error_t *last = cubicle_client_last_error(manager);
         if (last != NULL && last->code == CUBICLE_ERR_UNSUPPORTED) {
-            session->macro_count = 0;
-            return 0;
+            cache->macro_count = 0;
+            cache->valid = true;
+            cache->unsupported = true;
+            return cache;
         }
-        snprintf(error, error_size, "%s",
-                 last != NULL && last->message[0] != '\0'
-                     ? last->message
-                     : "macro list failed");
-        return -1;
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "%s",
+                     last != NULL && last->message[0] != '\0'
+                         ? last->message
+                         : "macro list failed");
+        }
+        return NULL;
     }
     if (count > CUBICLE_WORKSPACE_MACRO_MAX) {
         count = CUBICLE_WORKSPACE_MACRO_MAX;
     }
-    memcpy(session->macros, macros, count * sizeof(session->macros[0]));
-    session->macro_count = count;
+    memcpy(cache->macros, macros, count * sizeof(cache->macros[0]));
+    cache->macro_count = count;
+    cache->valid = true;
+    cache->unsupported = false;
     cubicle_workspace_macro_list_free(macros);
+    return cache;
+}
+
+static desk_macro_cache_t *desk_active_macro_cache(desk_session_t *session,
+                                                   bool load,
+                                                   char *error,
+                                                   size_t error_size)
+{
+    desk_pane_t *pane = desk_active_pane(session);
+    return desk_get_macro_cache(session, desk_pane_manager(session, pane),
+                                desk_pane_manager_uri(session, pane),
+                                desk_pane_workspace_id(session, pane),
+                                desk_pane_workspace_name(session, pane),
+                                load, error, error_size);
+}
+
+static int desk_load_macro_cache_for_pane(desk_session_t *session,
+                                          desk_pane_t *pane,
+                                          char *error,
+                                          size_t error_size)
+{
+    return desk_get_macro_cache(session, desk_pane_manager(session, pane),
+                                desk_pane_manager_uri(session, pane),
+                                desk_pane_workspace_id(session, pane),
+                                desk_pane_workspace_name(session, pane),
+                                true, error, error_size) == NULL
+               ? -1
+               : 0;
+}
+
+static int desk_load_all_pane_macro_caches(desk_session_t *session,
+                                           char *error,
+                                           size_t error_size)
+{
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        if (desk_load_macro_cache_for_pane(session, &session->panes[i], error,
+                                          error_size) < 0) {
+            return -1;
+        }
+    }
     return 0;
+}
+
+static size_t desk_active_macro_count(desk_session_t *session)
+{
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    return cache != NULL ? cache->macro_count : 0;
+}
+
+static cubicle_workspace_macro_info_t *desk_active_macro_at(
+    desk_session_t *session,
+    size_t index)
+{
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    return cache != NULL && index < cache->macro_count ? &cache->macros[index]
+                                                       : NULL;
 }
 
 static bool desk_macro_command_ordinal(const char *command,
@@ -6748,9 +6985,13 @@ static cubicle_workspace_macro_info_t *desk_find_macro_by_ordinal(
     desk_session_t *session,
     uint64_t ordinal)
 {
-    for (size_t i = 0; i < session->macro_count; ++i) {
-        if (session->macros[i].ordinal == ordinal) {
-            return &session->macros[i];
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    if (cache == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cache->macro_count; ++i) {
+        if (cache->macros[i].ordinal == ordinal) {
+            return &cache->macros[i];
         }
     }
     return NULL;
@@ -6780,24 +7021,38 @@ static int desk_save_macro(desk_session_t *session,
 {
     cubicle_workspace_macro_save_options_t options;
     memset(&options, 0, sizeof(options));
-    options.workspace_id = session->workspace.id;
+    char load_error[256];
+    desk_macro_cache_t *cache =
+        desk_active_macro_cache(session, true, load_error, sizeof(load_error));
+    if (cache == NULL) {
+        snprintf(error, error_size, "%s",
+                 load_error[0] != '\0' ? load_error : "macro list failed");
+        return -1;
+    }
+    cubicle_client_t *manager =
+        desk_pane_manager(session, desk_active_pane(session));
+    options.workspace_id = cache->workspace_id;
     options.ordinal = macro->ordinal;
     options.name = macro->name;
     options.text = macro->text;
     options.target_pane = macro->target_pane;
+    options.target_process_name = macro->target_process_name;
     options.key_name = macro->key_name;
     cubicle_workspace_macro_info_t saved;
     cubicle_error_code_t code =
-        cubicle_workspace_macro_save(session->manager, &options, &saved);
+        cubicle_workspace_macro_save(manager, &options, &saved);
     if (code != CUBICLE_OK) {
-        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
+        const cubicle_error_t *last = cubicle_client_last_error(manager);
         snprintf(error, error_size, "%s",
                  last != NULL && last->message[0] != '\0'
                      ? last->message
                      : "macro save failed");
         return -1;
     }
-    return desk_load_workspace_macros(session, error, error_size);
+    cache->valid = false;
+    return desk_active_macro_cache(session, true, error, error_size) == NULL
+               ? -1
+               : 0;
 }
 
 static int desk_run_macro(desk_session_t *session,
@@ -6808,9 +7063,38 @@ static int desk_run_macro(desk_session_t *session,
     if (length < 0 || (size_t)length >= sizeof(buffer)) {
         return -1;
     }
-    int pane_id = macro->target_pane == 0 || macro->target_pane > INT_MAX
-                      ? session->layout.active_pane_id
-                      : (int)macro->target_pane;
+    int pane_id = session->layout.active_pane_id;
+    if (macro->target_process_name[0] != '\0') {
+        desk_pane_t *active_pane = desk_active_pane(session);
+        const char *active_manager_uri =
+            desk_pane_manager_uri(session, active_pane);
+        const char *active_workspace_id =
+            desk_pane_workspace_id(session, active_pane);
+        pane_id = 0;
+        for (size_t i = 0; i < session->pane_count; ++i) {
+            desk_pane_t *pane = &session->panes[i];
+            if (strcmp(desk_pane_manager_uri(session, pane),
+                       active_manager_uri) != 0 ||
+                strcmp(desk_pane_workspace_id(session, pane),
+                       active_workspace_id) != 0) {
+                continue;
+            }
+            const char *name = desk_pane_base_name(pane);
+            if (strcmp(name, macro->target_process_name) == 0) {
+                pane_id = (int)i + 1;
+                break;
+            }
+        }
+        if (pane_id == 0) {
+            char notice[256];
+            snprintf(notice, sizeof(notice), "macro target '%.200s' is not open",
+                     macro->target_process_name);
+            desk_show_notice(session, notice);
+            return 0;
+        }
+    } else if (macro->target_pane != 0 && macro->target_pane <= INT_MAX) {
+        pane_id = (int)macro->target_pane;
+    }
     return write_pane_by_id(session, pane_id, (const unsigned char *)buffer,
                             (size_t)length);
 }
@@ -7083,7 +7367,7 @@ static int desk_open_menu_select(desk_session_t *session,
         return 0;
     }
     if (selected.kind == DESK_MENU_ITEM_MACRO_NEW) {
-        desk_begin_macro_name_prompt(session, session->macro_count);
+        desk_begin_macro_name_prompt(session, desk_active_macro_count(session));
         return 0;
     }
     if (selected.kind == DESK_MENU_ITEM_MACRO) {
@@ -7092,7 +7376,7 @@ static int desk_open_menu_select(desk_session_t *session,
     }
     if (selected.kind == DESK_MENU_ITEM_MACRO_TARGET) {
         return desk_apply_macro_target_selection(session,
-                                                 selected.target_pane);
+                                                 selected.target_process_name);
     }
     if (selected.kind == DESK_MENU_ITEM_LAYOUT) {
         char error[256];
@@ -7644,14 +7928,18 @@ static int handle_open_menu_input(desk_session_t *session,
                 session->open_menu.selected < session->open_menu.item_count
                     ? &session->open_menu.items[session->open_menu.selected]
                     : NULL;
+            desk_macro_cache_t *cache =
+                desk_active_macro_cache(session, true, NULL, 0);
             if (item != NULL && item->kind == DESK_MENU_ITEM_MACRO &&
-                item->macro_index < session->macro_count) {
-                uint64_t ordinal = session->macros[item->macro_index].ordinal;
+                cache != NULL && item->macro_index < cache->macro_count) {
+                uint64_t ordinal = cache->macros[item->macro_index].ordinal;
+                cubicle_client_t *manager =
+                    desk_pane_manager(session, desk_active_pane(session));
                 cubicle_error_code_t code = cubicle_workspace_macro_delete(
-                    session->manager, session->workspace.id, ordinal);
+                    manager, cache->workspace_id, ordinal);
                 if (code != CUBICLE_OK) {
                     const cubicle_error_t *last =
-                        cubicle_client_last_error(session->manager);
+                        cubicle_client_last_error(manager);
                     snprintf(session->open_menu.status,
                              sizeof(session->open_menu.status), "%s",
                              last != NULL && last->message[0] != '\0'
@@ -7659,8 +7947,9 @@ static int handle_open_menu_input(desk_session_t *session,
                                  : "macro delete failed");
                 } else {
                     char error[256];
-                    (void)desk_load_workspace_macros(session, error,
-                                                     sizeof(error));
+                    cache->valid = false;
+                    (void)desk_active_macro_cache(session, true, error,
+                                                 sizeof(error));
                     desk_begin_macro_list(session);
                     snprintf(session->open_menu.status,
                              sizeof(session->open_menu.status),
@@ -7675,22 +7964,26 @@ static int handle_open_menu_input(desk_session_t *session,
                 session->open_menu.selected < session->open_menu.item_count
                     ? &session->open_menu.items[session->open_menu.selected]
                     : NULL;
+            desk_macro_cache_t *cache =
+                desk_active_macro_cache(session, true, NULL, 0);
             if (item != NULL && item->kind == DESK_MENU_ITEM_MACRO &&
-                item->macro_index < session->macro_count) {
+                cache != NULL && item->macro_index < cache->macro_count) {
                 cubicle_workspace_macro_info_t *macro =
-                    &session->macros[item->macro_index];
+                    &cache->macros[item->macro_index];
                 uint64_t target =
                     input[i] == 'u'
                         ? (macro->ordinal > 1 ? macro->ordinal - 1 : 1)
                         : macro->ordinal + 1;
                 if (target != macro->ordinal) {
+                    cubicle_client_t *manager =
+                        desk_pane_manager(session, desk_active_pane(session));
                     cubicle_error_code_t code =
                         cubicle_workspace_macro_reorder(
-                            session->manager, session->workspace.id,
-                            macro->ordinal, target);
+                            manager, cache->workspace_id, macro->ordinal,
+                            target);
                     if (code != CUBICLE_OK) {
                         const cubicle_error_t *last =
-                            cubicle_client_last_error(session->manager);
+                            cubicle_client_last_error(manager);
                         snprintf(session->open_menu.status,
                                  sizeof(session->open_menu.status), "%s",
                                  last != NULL && last->message[0] != '\0'
@@ -7698,8 +7991,9 @@ static int handle_open_menu_input(desk_session_t *session,
                                      : "macro reorder failed");
                     } else {
                         char error[256];
-                        (void)desk_load_workspace_macros(session, error,
-                                                         sizeof(error));
+                        cache->valid = false;
+                        (void)desk_active_macro_cache(session, true, error,
+                                                     sizeof(error));
                         desk_begin_macro_list(session);
                     }
                 }
@@ -7787,8 +8081,10 @@ static cubicle_workspace_macro_info_t *desk_find_custom_macro_binding(
     size_t *consumed,
     bool *partial)
 {
-    for (size_t i = 0; i < session->macro_count; ++i) {
-        cubicle_workspace_macro_info_t *macro = &session->macros[i];
+    desk_macro_cache_t *cache = desk_active_macro_cache(session, true, NULL, 0);
+    size_t macro_count = cache != NULL ? cache->macro_count : 0;
+    for (size_t i = 0; i < macro_count; ++i) {
+        cubicle_workspace_macro_info_t *macro = &cache->macros[i];
         if (macro->key_name[0] == '\0') {
             continue;
         }
@@ -8508,6 +8804,10 @@ static void desk_session_cleanup(desk_session_t *session)
     for (size_t i = 0; i < session->pane_count; ++i) {
         desk_cleanup_pane(&session->panes[i]);
     }
+    free(session->macro_caches);
+    session->macro_caches = NULL;
+    session->macro_cache_count = 0;
+    session->macro_cache_capacity = 0;
     desk_remote_caches_clear(session);
     cubicle_client_disconnect(session->manager);
     session->manager = NULL;
@@ -8621,11 +8921,9 @@ static int desk_run_workspace(const char *workspace_arg,
     if (result == 0) {
         snprintf(g_desk_crash_workspace, sizeof(g_desk_crash_workspace), "%s",
                  session.workspace.name);
-        desk_crash_set_phase("load-macros");
         snprintf(session.last_opened_workspace_id,
                  sizeof(session.last_opened_workspace_id), "%s",
                  session.workspace.id);
-        result = desk_load_workspace_macros(&session, error, sizeof(error));
     }
     if (result == 0 && !startup_has_layout) {
         desk_crash_set_phase("load-processes");
@@ -8634,6 +8932,13 @@ static int desk_run_workspace(const char *workspace_arg,
     if (result == 0 && !startup_has_layout) {
         desk_crash_set_phase("load-layout");
         result = load_or_create_layout(&session, error, sizeof(error));
+    }
+    if (result == 0 && !startup_has_layout) {
+        desk_crash_set_phase("load-macros");
+        result = desk_load_all_pane_macro_caches(&session, error,
+                                                 sizeof(error)) == 0
+                     ? 0
+                     : 2;
     }
     if (result != 0) {
         desk_debug_log("event=startup_failed result=%d message=\"%s\"",
