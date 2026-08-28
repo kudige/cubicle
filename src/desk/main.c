@@ -3848,6 +3848,36 @@ static bool parse_resize_arrow(const unsigned char *input,
     return true;
 }
 
+static bool parse_plain_arrow_key(const unsigned char *input,
+                                  size_t length,
+                                  size_t offset,
+                                  cubicle_terminal_key_t *key,
+                                  size_t *consumed)
+{
+    if (offset + 2 >= length || input[offset] != 0x1b ||
+        input[offset + 1] != '[') {
+        return false;
+    }
+    switch (input[offset + 2]) {
+    case 'A':
+        *key = CUBICLE_TERMINAL_KEY_UP;
+        break;
+    case 'B':
+        *key = CUBICLE_TERMINAL_KEY_DOWN;
+        break;
+    case 'C':
+        *key = CUBICLE_TERMINAL_KEY_RIGHT;
+        break;
+    case 'D':
+        *key = CUBICLE_TERMINAL_KEY_LEFT;
+        break;
+    default:
+        return false;
+    }
+    *consumed = 3;
+    return true;
+}
+
 static void desk_apply_pane_labels(desk_session_t *session)
 {
     for (size_t i = 0; i < session->pane_count; ++i) {
@@ -6619,6 +6649,28 @@ static int write_active_pane(desk_session_t *session,
                                                                          : 0;
 }
 
+static int write_active_pane_terminal_key(desk_session_t *session,
+                                          cubicle_terminal_key_t key)
+{
+    int active = session->layout.active_pane_id;
+    if (active <= 0 || (size_t)active > session->pane_count) {
+        return -1;
+    }
+    desk_pane_t *pane = &session->panes[(size_t)active - 1];
+    if (pane->terminal_model == NULL) {
+        return -1;
+    }
+    unsigned char encoded[32];
+    size_t encoded_length = 0;
+    if (cubicle_terminal_model_encode_key(pane->terminal_model, key,
+                                          encoded, sizeof(encoded),
+                                          &encoded_length) < 0 ||
+        encoded_length == 0) {
+        return -1;
+    }
+    return write_active_pane(session, encoded, encoded_length);
+}
+
 static int write_pane_by_id(desk_session_t *session,
                             int pane_id,
                             const unsigned char *buffer,
@@ -8410,6 +8462,20 @@ static int handle_input(desk_session_t *session,
                                         delta) == 0) {
                 pending_resize = true;
                 *layout_changed = true;
+            }
+            i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
+        cubicle_terminal_key_t terminal_key;
+        if (!session->layout.resize_mode &&
+            parse_plain_arrow_key(input, length, i, &terminal_key,
+                                  &consumed)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            if (write_active_pane_terminal_key(session, terminal_key) < 0) {
+                return -1;
             }
             i += consumed - 1;
             start = i + 1;

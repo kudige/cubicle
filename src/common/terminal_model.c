@@ -19,6 +19,9 @@ struct cubicle_terminal_model {
     unsigned int rows;
     unsigned int cols;
     bool cursor_visible;
+    bool application_cursor;
+    unsigned char input_tail[16];
+    size_t input_tail_length;
     bool dirty_rows[1000];
     char response[4096];
     size_t response_length;
@@ -293,6 +296,74 @@ static void log_vterm_no_progress(const unsigned char *cursor,
             remaining, sample == 0 ? "" : hex);
 }
 
+static void track_application_cursor_mode(cubicle_terminal_model_t *model,
+                                          const unsigned char *data,
+                                          size_t length)
+{
+    unsigned char buffer[sizeof(model->input_tail) + 4096];
+    size_t prefix_length = model->input_tail_length;
+    size_t data_length = length;
+    if (data_length > 4096) {
+        data += data_length - 4096;
+        data_length = 4096;
+    }
+    memcpy(buffer, model->input_tail, prefix_length);
+    if (data_length > 0) {
+        memcpy(buffer + prefix_length, data, data_length);
+    }
+    size_t total = prefix_length + data_length;
+
+    for (size_t i = 0; i + 4 < total; ++i) {
+        if (buffer[i] != 0x1b || buffer[i + 1] != '[' ||
+            buffer[i + 2] != '?') {
+            continue;
+        }
+        size_t cursor = i + 3;
+        bool has_mode_one = false;
+        unsigned int value = 0;
+        bool have_digits = false;
+        while (cursor < total) {
+            unsigned char ch = buffer[cursor];
+            if (ch >= '0' && ch <= '9') {
+                have_digits = true;
+                value = value * 10 + (unsigned int)(ch - '0');
+                cursor++;
+                continue;
+            }
+            if (ch == ';') {
+                if (have_digits && value == 1) {
+                    has_mode_one = true;
+                }
+                value = 0;
+                have_digits = false;
+                cursor++;
+                continue;
+            }
+            if (ch == 'h' || ch == 'l') {
+                if (have_digits && value == 1) {
+                    has_mode_one = true;
+                }
+                if (has_mode_one) {
+                    model->application_cursor = ch == 'h';
+                }
+                break;
+            }
+            if (ch >= 0x40 && ch <= 0x7e) {
+                break;
+            }
+            cursor++;
+        }
+    }
+
+    model->input_tail_length =
+        total < sizeof(model->input_tail) ? total : sizeof(model->input_tail);
+    if (model->input_tail_length > 0) {
+        memcpy(model->input_tail,
+               buffer + total - model->input_tail_length,
+               model->input_tail_length);
+    }
+}
+
 static size_t append_utf8(char *buffer, size_t used, size_t capacity,
                           uint32_t codepoint)
 {
@@ -517,6 +588,7 @@ int cubicle_terminal_model_feed(cubicle_terminal_model_t *model,
         errno = EINVAL;
         return -1;
     }
+    track_application_cursor_mode(model, data, length);
     const char *cursor = data;
     size_t remaining = length;
     while (remaining > 0) {
@@ -641,6 +713,52 @@ ssize_t cubicle_terminal_model_take_response(cubicle_terminal_model_t *model,
     return (ssize_t)copied;
 }
 
+static VTermKey terminal_key_to_vterm(cubicle_terminal_key_t key)
+{
+    switch (key) {
+    case CUBICLE_TERMINAL_KEY_UP:
+        return VTERM_KEY_UP;
+    case CUBICLE_TERMINAL_KEY_DOWN:
+        return VTERM_KEY_DOWN;
+    case CUBICLE_TERMINAL_KEY_LEFT:
+        return VTERM_KEY_LEFT;
+    case CUBICLE_TERMINAL_KEY_RIGHT:
+        return VTERM_KEY_RIGHT;
+    }
+    return VTERM_KEY_NONE;
+}
+
+int cubicle_terminal_model_encode_key(cubicle_terminal_model_t *model,
+                                      cubicle_terminal_key_t key,
+                                      void *buffer,
+                                      size_t length,
+                                      size_t *written_out)
+{
+    if (model == NULL || buffer == NULL || length == 0 ||
+        written_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    VTermKey vterm_key = terminal_key_to_vterm(key);
+    if (vterm_key == VTERM_KEY_NONE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t previous_response_length = model->response_length;
+    vterm_keyboard_key(model->term, vterm_key, VTERM_MOD_NONE);
+    size_t generated = model->response_length - previous_response_length;
+    if (generated > length) {
+        model->response_length = previous_response_length;
+        errno = ENOSPC;
+        return -1;
+    }
+    memcpy(buffer, model->response + previous_response_length, generated);
+    model->response_length = previous_response_length;
+    *written_out = generated;
+    return 0;
+}
+
 int cubicle_terminal_model_snapshot(cubicle_terminal_model_t *model,
                                     uint64_t offset,
                                     cubicle_terminal_snapshot_t *snapshot_out)
@@ -682,6 +800,7 @@ int cubicle_terminal_model_snapshot(cubicle_terminal_model_t *model,
     snapshot_out->cursor_row = cursor.row < 0 ? 0 : (unsigned int)cursor.row;
     snapshot_out->cursor_col = cursor.col < 0 ? 0 : (unsigned int)cursor.col;
     snapshot_out->cursor_visible = model->cursor_visible;
+    snapshot_out->application_cursor = model->application_cursor;
     snapshot_out->offset = offset;
     snapshot_out->cells = cells;
     return 0;
@@ -738,6 +857,10 @@ int cubicle_terminal_model_load_snapshot(
                           snapshot->cursor_col + 1);
     if (length < 0 || (size_t)length >= sizeof(cursor) ||
         cubicle_terminal_model_feed(model, cursor, (size_t)length) < 0) {
+        return -1;
+    }
+    if (snapshot->application_cursor &&
+        cubicle_terminal_model_feed(model, "\x1b[?1h", 5) < 0) {
         return -1;
     }
     model->cursor_visible = snapshot->cursor_visible;

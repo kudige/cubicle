@@ -8,6 +8,8 @@ from end_user_harness import CubicleEndUserHarness, strip_terminal_sequences
 
 APP_CURSOR_UP = b"\x1bOA"
 APP_CURSOR_DOWN = b"\x1bOB"
+NORMAL_CURSOR_UP = b"\x1b[A"
+NORMAL_CURSOR_DOWN = b"\x1b[B"
 
 
 def visible_text(pty_process):
@@ -72,11 +74,11 @@ def run_desk_less_arrows(harness):
         desk.wait_for_text("LESS_LINE_0001")
         desk.output.clear()
 
-        desk.write(APP_CURSOR_DOWN)
+        desk.write(NORMAL_CURSOR_DOWN)
         desk.wait_for_text("LESS_LINE_0002")
         desk.output.clear()
 
-        desk.write(APP_CURSOR_UP)
+        desk.write(NORMAL_CURSOR_UP)
         desk.wait_for_text("LESS_LINE_0001")
         desk.write(b"\x18q")
         desk.wait(timeout=5)

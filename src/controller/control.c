@@ -753,9 +753,10 @@ static int snapshot_json(cubicle_terminal_model_t *terminal_model,
 
     int length = snprintf(
         result, result_size,
-        "{\"rows\":%u,\"columns\":%u,\"cursor_row\":%u,\"cursor_column\":%u,\"cursor_visible\":%s,\"offset\":%llu,\"cells\":[",
+        "{\"rows\":%u,\"columns\":%u,\"cursor_row\":%u,\"cursor_column\":%u,\"cursor_visible\":%s,\"application_cursor\":%s,\"offset\":%llu,\"cells\":[",
         snapshot.rows, snapshot.cols, snapshot.cursor_row,
         snapshot.cursor_col, snapshot.cursor_visible ? "true" : "false",
+        snapshot.application_cursor ? "true" : "false",
         (unsigned long long)snapshot.offset);
     if (length < 0 || (size_t)length >= result_size) {
         cubicle_terminal_snapshot_cleanup(&snapshot);

@@ -1167,6 +1167,7 @@ cubicle_error_code_t cubicle_attachment_snapshot(
     uint64_t cursor_col = 0;
     uint64_t offset = 0;
     bool cursor_visible = true;
+    bool application_cursor = false;
     yyjson_val *cells = NULL;
     cubicle_validation_error_t error;
     if (cubicle_json_get_required_u64(document.root, "rows", &rows, &error) < 0 ||
@@ -1175,6 +1176,8 @@ cubicle_error_code_t cubicle_attachment_snapshot(
         cubicle_json_get_required_u64(document.root, "cursor_column", &cursor_col, &error) < 0 ||
         cubicle_json_get_optional_bool(document.root, "cursor_visible",
                                        &cursor_visible, NULL, &error) < 0 ||
+        cubicle_json_get_optional_bool(document.root, "application_cursor",
+                                       &application_cursor, NULL, &error) < 0 ||
         cubicle_json_get_required_u64(document.root, "offset", &offset, &error) < 0 ||
         cubicle_json_get_required_array(document.root, "cells", &cells,
                                         &error) < 0 ||
@@ -1225,6 +1228,7 @@ cubicle_error_code_t cubicle_attachment_snapshot(
     snapshot_out->cursor_row = (unsigned int)cursor_row;
     snapshot_out->cursor_col = (unsigned int)cursor_col;
     snapshot_out->cursor_visible = cursor_visible;
+    snapshot_out->application_cursor = application_cursor;
     snapshot_out->offset = offset;
     snapshot_out->cells = parsed_cells;
     attachment->tty_offset = offset;
