@@ -9,5 +9,8 @@ cmake-build-*/
 *.so
 *.dylib
 *.log
+*.sh
+__pycache__/
+*.py[cod]
 .vscode/
 .idea/
