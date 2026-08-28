@@ -6,12 +6,6 @@ import time
 from end_user_harness import CubicleEndUserHarness, strip_terminal_sequences
 
 
-APP_CURSOR_UP = b"\x1bOA"
-APP_CURSOR_DOWN = b"\x1bOB"
-NORMAL_CURSOR_UP = b"\x1b[A"
-NORMAL_CURSOR_DOWN = b"\x1b[B"
-
-
 def visible_text(pty_process):
     return strip_terminal_sequences(bytes(pty_process.output)).decode(
         "utf-8", errors="replace"
@@ -47,13 +41,11 @@ def run_cube_connect_less_arrows(harness):
         connected.wait_for_text("LESS_LINE_0001")
         connected.output.clear()
 
-        # less enables application cursor mode on a real terminal, so the PTY
-        # test sends the application-cursor Down/Up sequences a terminal would.
-        connected.write(APP_CURSOR_DOWN)
+        connected.send_user_arrow("down", "cube-connect")
         connected.wait_for_text("LESS_LINE_0024")
         connected.output.clear()
 
-        connected.write(APP_CURSOR_UP)
+        connected.send_user_arrow("up", "cube-connect")
         connected.wait_for_text("LESS_LINE_0001")
         connected.write(b"q")
         connected.wait(timeout=5)
@@ -74,11 +66,11 @@ def run_desk_less_arrows(harness):
         desk.wait_for_text("LESS_LINE_0001")
         desk.output.clear()
 
-        desk.write(NORMAL_CURSOR_DOWN)
+        desk.send_user_arrow("down", "desk")
         desk.wait_for_text("LESS_LINE_0002")
         desk.output.clear()
 
-        desk.write(NORMAL_CURSOR_UP)
+        desk.send_user_arrow("up", "desk")
         desk.wait_for_text("LESS_LINE_0001")
         desk.write(b"\x18q")
         desk.wait(timeout=5)

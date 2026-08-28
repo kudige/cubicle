@@ -16,6 +16,20 @@ CSI_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 OSC_RE = re.compile(rb"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 SIMPLE_ESC_RE = re.compile(rb"\x1b[][()#%*+\-. /0-9:;<=>?A-Za-z]")
 
+NORMAL_CURSOR_KEYS = {
+    "up": b"\x1b[A",
+    "down": b"\x1b[B",
+    "right": b"\x1b[C",
+    "left": b"\x1b[D",
+}
+
+APPLICATION_CURSOR_KEYS = {
+    "up": b"\x1bOA",
+    "down": b"\x1bOB",
+    "right": b"\x1bOC",
+    "left": b"\x1bOD",
+}
+
 
 def strip_terminal_sequences(data):
     data = OSC_RE.sub(b"", data)
@@ -58,6 +72,26 @@ class PtyProcess:
 
     def write(self, data):
         os.write(self.master_fd, data)
+
+    def send_user_arrow(self, direction, surface):
+        """Send the bytes a user's terminal would send to this client surface.
+
+        For direct `cube connect`, the attached program can put the user's real
+        terminal into application cursor mode, so arrow keys arrive as ESC O*.
+        For `desk`, the inner program's modes are rendered inside a pane and
+        must not mutate the outer terminal, so normal cursor keys arrive as
+        ESC [* and desk is responsible for translating them for the pane.
+        """
+        normalized = direction.lower()
+        if surface == "cube-connect":
+            keys = APPLICATION_CURSOR_KEYS
+        elif surface == "desk":
+            keys = NORMAL_CURSOR_KEYS
+        else:
+            raise AssertionError(f"unknown client surface: {surface!r}")
+        if normalized not in keys:
+            raise AssertionError(f"unknown arrow direction: {direction!r}")
+        self.write(keys[normalized])
 
     def read_available(self, quiet=0.05):
         while True:
