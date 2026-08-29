@@ -914,6 +914,152 @@ def run_desk_save_and_load_layout(desk, env):
         os.close(master_fd)
 
 
+def run_desk_load_layout_preserves_active_pane(desk, cube, env):
+    workspace_id = find_workspace_id(cube, env, "DeskActiveReload")
+    layout_path = find_saved_layout_file(env, "active-reload")
+    os.makedirs(os.path.dirname(layout_path), exist_ok=True)
+    with open(layout_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "desk-named-layout-v1\n"
+            f"workspace {workspace_id}\n"
+            f"pane 1 active-left {workspace_id} 0 - -\n"
+            f"pane 2 active-right {workspace_id} 0 - -\n"
+            "root 2\n"
+            "active 2\n"
+            "next 3\n"
+            "zoom 0\n"
+            "zoom_pane 0\n"
+            "node 0 1 0 0 0 0 active-left\n"
+            "node 1 2 0 0 0 0 active-right\n"
+            "node 2 0 1 0 1 0\n"
+        )
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 100, 0, 0))
+    proc = subprocess.Popen(
+        [desk, "--workspace", "DeskActiveReload"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_picker = False
+    sent_filter = False
+    sent_load = False
+    sent_probe = False
+    saw_right_probe = False
+    sent_quit = False
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_picker and b"active-left" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18;")
+                sent_picker = True
+
+            if sent_picker and not sent_filter and b"Load layout" in captured:
+                os.write(master_fd, b"active-reload")
+                sent_filter = True
+
+            if sent_filter and not sent_load and b"active-reload" in captured:
+                os.write(master_fd, b"\r")
+                sent_load = True
+
+            if sent_load and not sent_probe and b"active-right" in captured:
+                time.sleep(0.1)
+                os.write(master_fd, b"ACTIVE_RELOAD")
+                sent_probe = True
+
+            if sent_probe and not saw_right_probe:
+                right_logs = subprocess.run(
+                    [cube, "--workspace", "DeskActiveReload",
+                     "logs", "--stdout", "active-right"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_ACTIVE_RELOAD" in right_logs.stdout:
+                    saw_right_probe = True
+
+            if saw_right_probe and not sent_quit:
+                left_logs = subprocess.run(
+                    [cube, "--workspace", "DeskActiveReload",
+                     "logs", "--stdout", "active-left"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_ACTIVE_RELOAD" in left_logs.stdout:
+                    raise AssertionError(
+                        f"layout reload sent input to inactive pane:\n"
+                        f"{left_logs.stdout}"
+                    )
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_picker:
+            raise AssertionError(f"desk did not render active layout panes: {captured!r}")
+        if not sent_filter:
+            raise AssertionError(f"desk did not open layout picker: {captured!r}")
+        if not sent_load:
+            raise AssertionError(f"desk did not show active layout entry: {captured!r}")
+        if not sent_probe:
+            raise AssertionError(f"desk did not reload active layout: {captured!r}")
+        if not saw_right_probe:
+            right_logs = subprocess.run(
+                [cube, "--workspace", "DeskActiveReload",
+                 "logs", "--stdout", "active-right"],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            raise AssertionError(
+                f"active pane did not receive input after reload:\n"
+                f"{right_logs.stdout}\noutput={captured!r}"
+            )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit after active reload")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+        clear_desk_defaults(env)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_layout_mode_keys(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -3306,6 +3452,45 @@ def main():
         write_test_config(config_path, log_dir)
         run_desk_bindings_overlay(desk, env)
         run_desk_save_and_load_layout(desk, env)
+        run_checked([cube, "workspace", "create", "DeskActiveReload"], env)
+        for name in ("active-left", "active-right"):
+            run_checked(
+                [
+                    cube,
+                    "--workspace",
+                    "DeskActiveReload",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    name,
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,select,sys,time,tty\n"
+                        "tty.setraw(0)\n"
+                        f"sys.stdout.write('READY {name}\\n')\n"
+                        "sys.stdout.flush()\n"
+                        "deadline=time.time()+12\n"
+                        "data=b''\n"
+                        "while time.time()<deadline:\n"
+                        "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                        "    if r:\n"
+                        "        data+=os.read(0,64)\n"
+                        "    if b'ACTIVE_RELOAD' in data:\n"
+                        "        sys.stdout.write('GOT_ACTIVE_RELOAD\\n')\n"
+                        "        sys.stdout.flush()\n"
+                        "        data=data.replace(b'ACTIVE_RELOAD',b'',1)\n"
+                    ),
+                ],
+                env,
+            )
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_desk_load_layout_preserves_active_pane(desk, cube, env)
+        run_checked([cube, "--workspace", "DeskActiveReload",
+                     "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskActiveReload"], env)
 
         run_checked(
             [

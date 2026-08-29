@@ -6478,6 +6478,10 @@ static int desk_apply_named_layout(desk_session_t *session,
     if (desk_load_all_pane_macro_caches(session, error, error_size) < 0) {
         return -1;
     }
+    if (pane_find_leaf_node(&session->layout, session->layout.root,
+                            loaded_layout.active_pane_id) >= 0) {
+        session->layout.active_pane_id = loaded_layout.active_pane_id;
+    }
     desk_apply_pane_labels(session);
     (void)desk_save_layout(session);
     return 0;
