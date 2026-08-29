@@ -554,6 +554,7 @@ typedef struct desk_session {
     bool prefix_pending;
     bool scroll_mode;
     bool zoomed;
+    int previous_pane_id;
     desk_pending_split_t pending_split;
     bool terminal_size_dirty;
     bool cursor_drawn;
@@ -1604,7 +1605,8 @@ static bool pane_direction_candidate_score(desk_rect_t active,
 static bool pane_layout_select_direction(desk_pane_layout_t *panes,
                                          const desk_terminal_t *terminal,
                                          size_t pane_count,
-                                         desk_pane_direction_t direction)
+                                         desk_pane_direction_t direction,
+                                         int preferred_pane_id)
 {
     int active_id = panes->active_pane_id;
     if (active_id <= 0 || (size_t)active_id > pane_count) {
@@ -1614,6 +1616,20 @@ static bool pane_layout_select_direction(desk_pane_layout_t *panes,
     desk_rect_t active;
     if (!pane_layout_rect_for_pane(panes, terminal, active_id, &active)) {
         return false;
+    }
+
+    if (preferred_pane_id > 0 && preferred_pane_id != active_id &&
+        (size_t)preferred_pane_id <= pane_count) {
+        desk_rect_t preferred;
+        int gap = 0;
+        int perpendicular = 0;
+        if (pane_layout_rect_for_pane(panes, terminal, preferred_pane_id,
+                                      &preferred) &&
+            pane_direction_candidate_score(active, preferred, direction, true,
+                                           &gap, &perpendicular)) {
+            panes->active_pane_id = preferred_pane_id;
+            return true;
+        }
     }
 
     int best = 0;
@@ -1663,7 +1679,7 @@ static bool pane_layout_swap_direction(desk_pane_layout_t *panes,
 {
     int active_id = panes->active_pane_id;
     if (!pane_layout_select_direction(panes, terminal, pane_count,
-                                      direction)) {
+                                      direction, 0)) {
         return false;
     }
 
@@ -2479,6 +2495,26 @@ static void desk_set_named_layout(desk_session_t *session,
 static void desk_clear_named_layout(desk_session_t *session)
 {
     session->named_layout_name[0] = '\0';
+}
+
+static void desk_clear_previous_pane(desk_session_t *session)
+{
+    session->previous_pane_id = 0;
+}
+
+static void desk_record_previous_pane(desk_session_t *session,
+                                      int previous_pane_id)
+{
+    if (previous_pane_id > 0 &&
+        previous_pane_id != session->layout.active_pane_id &&
+        pane_find_leaf_node(&session->layout, session->layout.root,
+                            previous_pane_id) >= 0) {
+        session->previous_pane_id = previous_pane_id;
+    } else if (session->previous_pane_id > 0 &&
+               pane_find_leaf_node(&session->layout, session->layout.root,
+                                   session->previous_pane_id) < 0) {
+        session->previous_pane_id = 0;
+    }
 }
 
 static int desk_save_current_named_layout(desk_session_t *session)
@@ -4902,6 +4938,7 @@ static int desk_switch_workspace(desk_session_t *session,
 
     desk_disconnect_all_panes(session);
     desk_clear_named_layout(session);
+    desk_clear_previous_pane(session);
     session->workspace = *workspace;
     snprintf(session->last_opened_workspace_id,
              sizeof(session->last_opened_workspace_id), "%s", workspace->id);
@@ -6279,6 +6316,7 @@ static int desk_commit_pending_split_process(desk_session_t *session,
     }
 
     desk_pane_layout_t saved_layout = session->layout;
+    int previous_active_pane_id = session->layout.active_pane_id;
     size_t saved_pane_count = session->pane_count;
     desk_pending_split_t pending = session->pending_split;
     session->pending_split = DESK_PENDING_SPLIT_NONE;
@@ -6323,6 +6361,7 @@ static int desk_commit_pending_split_process(desk_session_t *session,
         return -1;
     }
     desk_apply_pane_labels(session);
+    desk_record_previous_pane(session, previous_active_pane_id);
     (void)desk_save_layout(session);
     return 0;
 }
@@ -6504,6 +6543,7 @@ static int desk_apply_named_layout(desk_session_t *session,
                             loaded_layout.active_pane_id) >= 0) {
         session->layout.active_pane_id = loaded_layout.active_pane_id;
     }
+    desk_clear_previous_pane(session);
     desk_apply_pane_labels(session);
     desk_set_named_layout(session, layout_name);
     (void)desk_save_layout(session);
@@ -8738,15 +8778,23 @@ static bool desk_execute_command(desk_session_t *session,
         return desk_run_macro(session, macro) == 0;
     }
     if (strcmp(command, "pane.next") == 0) {
+        int previous = session->layout.active_pane_id;
         pane_layout_next(&session->layout);
-        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
-        *layout_changed = true;
+        if (session->layout.active_pane_id != previous) {
+            desk_record_previous_pane(session, previous);
+            session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
+            *layout_changed = true;
+        }
         return true;
     }
     if (strcmp(command, "pane.previous") == 0) {
+        int previous = session->layout.active_pane_id;
         pane_layout_previous(&session->layout);
-        session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
-        *layout_changed = true;
+        if (session->layout.active_pane_id != previous) {
+            desk_record_previous_pane(session, previous);
+            session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
+            *layout_changed = true;
+        }
         return true;
     }
     desk_pane_direction_t direction = DESK_PANE_LEFT;
@@ -8765,8 +8813,10 @@ static bool desk_execute_command(desk_session_t *session,
     if (directional) {
         int previous = session->layout.active_pane_id;
         if (pane_layout_select_direction(&session->layout, terminal,
-                                         session->pane_count, direction) &&
+                                         session->pane_count, direction,
+                                         session->previous_pane_id) &&
             session->layout.active_pane_id != previous) {
+            desk_record_previous_pane(session, previous);
             session->layout.zoom = keep_zoom ? DESK_ZOOM_FULL : previous_zoom;
             *layout_changed = true;
         }
@@ -8843,9 +8893,12 @@ static bool desk_execute_command(desk_session_t *session,
     }
     if (strcmp(command, "layout.delete") == 0) {
         char error[256];
+        int previous = session->layout.active_pane_id;
         if (desk_delete_active_pane(session, terminal, error,
                                     sizeof(error)) < 0) {
             pane_layout_status(&session->layout, error);
+        } else {
+            desk_record_previous_pane(session, previous);
         }
         *layout_changed = true;
         return true;
@@ -9070,7 +9123,9 @@ static int handle_input(desk_session_t *session,
                                         mouse_col, &pane_id)) {
                     desk_debug_log("event=mouse_title_select pane=%d", pane_id);
                     desk_zoom_t previous_zoom = session->layout.zoom;
+                    int previous = session->layout.active_pane_id;
                     session->layout.active_pane_id = pane_id;
+                    desk_record_previous_pane(session, previous);
                     session->layout.zoom =
                         session->zoomed ? DESK_ZOOM_FULL : previous_zoom;
                     *layout_changed = true;

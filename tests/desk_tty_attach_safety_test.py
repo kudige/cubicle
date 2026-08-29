@@ -627,6 +627,7 @@ def run_desk_addright_spanning_layout(desk, cube, env):
     )
     os.close(slave_fd)
     captured = bytearray()
+    stderr_captured = bytearray()
     started_extra = False
     opened_add_menu = False
     selected_extra = False
@@ -646,7 +647,7 @@ def run_desk_addright_spanning_layout(desk, cube, env):
                     except OSError:
                         pass
                 elif proc.stderr is not None:
-                    os.read(proc.stderr.fileno(), 4096)
+                    stderr_captured.extend(os.read(proc.stderr.fileno(), 4096))
 
             if (
                 not started_extra
@@ -695,7 +696,10 @@ def run_desk_addright_spanning_layout(desk, cube, env):
                 break
 
         if not started_extra:
-            raise AssertionError(f"desk did not render add panes: {captured!r}")
+            raise AssertionError(
+                f"desk did not render add panes: {captured!r}; "
+                f"stderr={stderr_captured!r}"
+            )
         if not opened_add_menu:
             raise AssertionError("desk was not asked to open add-pane menu")
         if not selected_extra:
@@ -762,6 +766,142 @@ def run_desk_addright_spanning_layout(desk, cube, env):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        os.close(master_fd)
+
+
+def run_desk_direction_returns_to_previous_overlapping_pane(desk, cube, env):
+    workspace_id = find_workspace_id(cube, env, "DeskThree")
+    layout_path = workspace_layout_file(env, workspace_id)
+    with open(layout_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "desk-layout-v1\n"
+            "root 4\n"
+            "active 2\n"
+            "next 4\n"
+            "zoom 0\n"
+            "zoom_pane 0\n"
+            "node 0 1 0 0 0 0 three-top\n"
+            "node 1 2 0 0 0 0 three-bottom\n"
+            "node 2 3 0 0 0 0 three-right\n"
+            "node 3 0 2 0 1 0 \n"
+            "node 4 0 1 3 2 0 \n"
+        )
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 100, 0, 0))
+    proc = subprocess.Popen(
+        [desk, "--workspace", "DeskThree"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_right = False
+    sent_left_probe = False
+    saw_bottom_probe = False
+    sent_quit = False
+    right_sent_at = 0.0
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if (
+                not sent_right
+                and b"three-top" in captured
+                and b"three-bottom" in captured
+                and b"three-right" in captured
+            ):
+                os.write(master_fd, b"\x18\x1b[C")
+                sent_right = True
+                right_sent_at = time.time()
+
+            if sent_right and not sent_left_probe and time.time() - right_sent_at > 0.15:
+                os.write(master_fd, b"\x18\x1b[DSTICKY_BOTTOM")
+                sent_left_probe = True
+
+            if sent_left_probe and not saw_bottom_probe:
+                bottom_logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree",
+                     "logs", "--stdout", "three-bottom"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT three-bottom STICKY_BOTTOM" in bottom_logs.stdout:
+                    saw_bottom_probe = True
+
+            if saw_bottom_probe and not sent_quit:
+                top_logs = subprocess.run(
+                    [cube, "--workspace", "DeskThree",
+                     "logs", "--stdout", "three-top"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT three-top STICKY_BOTTOM" in top_logs.stdout:
+                    raise AssertionError(
+                        "directional navigation chose scored pane instead "
+                        f"of previous pane:\n{top_logs.stdout}"
+                    )
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_right:
+            raise AssertionError(f"desk did not render sticky panes: {captured!r}")
+        if not sent_left_probe:
+            raise AssertionError("desk did not send sticky navigation probe")
+        if not saw_bottom_probe:
+            bottom_logs = subprocess.run(
+                [cube, "--workspace", "DeskThree",
+                 "logs", "--stdout", "three-bottom"],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            raise AssertionError(
+                f"previous overlapping pane did not receive probe:\n"
+                f"{bottom_logs.stdout}\noutput={captured!r}"
+            )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+        clear_desk_defaults(env)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        clear_desk_defaults(env)
         os.close(master_fd)
 
 
@@ -3402,7 +3542,7 @@ def main():
                         "sys.stdout.flush()\n"
                         "deadline=time.time()+10\n"
                         "data=b''\n"
-                        "markers=(b'HIT_BOTTOM',b'HIT_TOP',b'HIT_RIGHT',b'HIT_LEFT')\n"
+                        "markers=(b'HIT_BOTTOM',b'HIT_TOP',b'HIT_RIGHT',b'HIT_LEFT',b'STICKY_BOTTOM')\n"
                         "while time.time()<deadline:\n"
                         "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
                         "    if r:\n"
@@ -3418,6 +3558,7 @@ def main():
             )
         run_checked([cube, "workspace", "DeskThree"], env)
         run_desk_three_pane_default_layout(desk, cube, env)
+        run_desk_direction_returns_to_previous_overlapping_pane(desk, cube, env)
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskThree"], env)
