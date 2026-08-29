@@ -486,6 +486,10 @@ layout.zoom
 layout.resize.toggle
 layout.movepane
 layout.transpose
+layout.addleft
+layout.addright
+layout.addtop
+layout.addbottom
 layout.split.horizontal
 layout.split.vertical
 layout.delete

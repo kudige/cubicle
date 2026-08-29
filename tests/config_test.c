@@ -183,6 +183,10 @@ static void test_override_file(void)
                "bind.3=Prefix-m none\n"
                "bind.4=Prefix-Left pane.left\n"
                "bind.5=Prefix-g layout.movepane\n"
+               "bind.6=Prefix-H layout.addleft\n"
+               "bind.7=Prefix-L layout.addright\n"
+               "bind.8=Prefix-K layout.addtop\n"
+               "bind.9=Prefix-J layout.addbottom\n"
                "\n"
                "[client]\n"
                "manager=unix:///tmp/cubicle-run/manager.sock\n"
@@ -224,12 +228,16 @@ static void test_override_file(void)
     assert(config.desk_automanager == 0);
     assert(config.desk_scrollback_lines == 1234);
     assert(config.desk_prefix_key == 0);
-    assert(config.desk_key_binding_count == 17);
+    assert(config.desk_key_binding_count == 21);
     int saw_rebound_prefix_n = 0;
     int saw_direct_quit = 0;
     int saw_prefix_m = 0;
     int saw_pane_left = 0;
     int saw_move_pane = 0;
+    int saw_add_left = 0;
+    int saw_add_right = 0;
+    int saw_add_top = 0;
+    int saw_add_bottom = 0;
     for (size_t i = 0; i < config.desk_key_binding_count; ++i) {
         if (config.desk_key_bindings[i].uses_prefix &&
             config.desk_key_bindings[i].key == 'n' &&
@@ -257,12 +265,40 @@ static void test_override_file(void)
                    "layout.movepane") == 0) {
             saw_move_pane = 1;
         }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'H' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "layout.addleft") == 0) {
+            saw_add_left = 1;
+        }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'L' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "layout.addright") == 0) {
+            saw_add_right = 1;
+        }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'K' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "layout.addtop") == 0) {
+            saw_add_top = 1;
+        }
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'J' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "layout.addbottom") == 0) {
+            saw_add_bottom = 1;
+        }
     }
     assert(saw_rebound_prefix_n);
     assert(saw_direct_quit);
     assert(!saw_prefix_m);
     assert(saw_pane_left);
     assert(saw_move_pane);
+    assert(saw_add_left);
+    assert(saw_add_right);
+    assert(saw_add_top);
+    assert(saw_add_bottom);
     assert(config.default_launch == CUBICLE_LAUNCH_BACKGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR);
     assert(config.default_kill_cleanup == 1);

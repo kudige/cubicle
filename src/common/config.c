@@ -641,6 +641,10 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "layout.resize.toggle") == 0 ||
            strcmp(command, "layout.movepane") == 0 ||
            strcmp(command, "layout.transpose") == 0 ||
+           strcmp(command, "layout.addleft") == 0 ||
+           strcmp(command, "layout.addright") == 0 ||
+           strcmp(command, "layout.addtop") == 0 ||
+           strcmp(command, "layout.addbottom") == 0 ||
            strcmp(command, "layout.split.horizontal") == 0 ||
            strcmp(command, "layout.split.vertical") == 0 ||
            strcmp(command, "layout.delete") == 0 ||

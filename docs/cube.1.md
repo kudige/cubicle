@@ -628,7 +628,8 @@ pane keeps while the current `desk` process is running.
 Supported command names are
 `pane.next`, `pane.previous`, `pane.left`, `pane.right`, `pane.above`,
 `pane.below`, `layout.zoom`, `layout.resize.toggle`, `layout.movepane`,
-`layout.transpose`, `layout.split.horizontal`, `layout.split.vertical`,
+`layout.transpose`, `layout.addleft`, `layout.addright`, `layout.addtop`,
+`layout.addbottom`, `layout.split.horizontal`, `layout.split.vertical`,
 `layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
 `layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,
 `scroll.page_up`, `scroll.page_down`, `scroll.line_up`, `scroll.line_down`,

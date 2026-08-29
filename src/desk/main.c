@@ -347,7 +347,11 @@ typedef enum desk_pane_direction {
 typedef enum desk_pending_split {
     DESK_PENDING_SPLIT_NONE = 0,
     DESK_PENDING_SPLIT_HORIZONTAL,
-    DESK_PENDING_SPLIT_VERTICAL
+    DESK_PENDING_SPLIT_VERTICAL,
+    DESK_PENDING_SPLIT_ADD_LEFT,
+    DESK_PENDING_SPLIT_ADD_RIGHT,
+    DESK_PENDING_SPLIT_ADD_TOP,
+    DESK_PENDING_SPLIT_ADD_BOTTOM
 } desk_pending_split_t;
 
 typedef struct desk_rect {
@@ -1278,6 +1282,70 @@ static int pane_layout_split(desk_pane_layout_t *panes, desk_split_t split)
     panes->nodes[leaf].split_size = 0;
     panes->nodes[leaf].pane_id = 0;
     panes->active_pane_id = panes->nodes[new_leaf].pane_id;
+    return 0;
+}
+
+static int pane_layout_add_direction(desk_pane_layout_t *panes,
+                                     desk_pane_direction_t direction)
+{
+    int target = pane_find_leaf_node(panes, panes->root,
+                                     panes->active_pane_id);
+    if (target < 0) {
+        return -1;
+    }
+
+    desk_split_t split =
+        (direction == DESK_PANE_LEFT || direction == DESK_PANE_RIGHT)
+            ? DESK_SPLIT_HORIZONTAL
+            : DESK_SPLIT_VERTICAL;
+    desk_split_t expand_through =
+        split == DESK_SPLIT_HORIZONTAL ? DESK_SPLIT_VERTICAL
+                                       : DESK_SPLIT_HORIZONTAL;
+    int child = target;
+    for (;;) {
+        int parent = pane_find_parent(panes, panes->root, child);
+        if (parent < 0 || panes->nodes[parent].split != expand_through) {
+            break;
+        }
+        child = parent;
+    }
+    target = child;
+
+    char label[64];
+    int label_length =
+        snprintf(label, sizeof(label), "%d", panes->next_pane_id);
+    if (label_length < 0 || label_length >= (int)sizeof(label)) {
+        return -1;
+    }
+
+    int old_subtree = pane_alloc_node(panes);
+    if (old_subtree < 0) {
+        return -1;
+    }
+    panes->nodes[old_subtree] = panes->nodes[target];
+
+    int new_pane_id = panes->next_pane_id;
+    int new_leaf = pane_create_leaf(panes, new_pane_id, label);
+    if (new_leaf < 0) {
+        panes->nodes[old_subtree].used = false;
+        return -1;
+    }
+
+    panes->nodes[target].split = split;
+    panes->nodes[target].pane_id = 0;
+    panes->nodes[target].label[0] = '\0';
+    panes->nodes[target].split_size = 0;
+    if (direction == DESK_PANE_LEFT || direction == DESK_PANE_ABOVE) {
+        panes->nodes[target].first = new_leaf;
+        panes->nodes[target].second = old_subtree;
+    } else {
+        panes->nodes[target].first = old_subtree;
+        panes->nodes[target].second = new_leaf;
+    }
+    panes->active_pane_id = new_pane_id;
+    panes->next_pane_id++;
+    panes->zoom = DESK_ZOOM_NONE;
+    panes->zoom_pane_id = 0;
     return 0;
 }
 
@@ -5548,6 +5616,18 @@ static const char *desk_command_description(const char *command)
     if (strcmp(command, "layout.transpose") == 0) {
         return "Transpose panes on axis";
     }
+    if (strcmp(command, "layout.addleft") == 0) {
+        return "Add pane to the left";
+    }
+    if (strcmp(command, "layout.addright") == 0) {
+        return "Add pane to the right";
+    }
+    if (strcmp(command, "layout.addtop") == 0) {
+        return "Add pane above";
+    }
+    if (strcmp(command, "layout.addbottom") == 0) {
+        return "Add pane below";
+    }
     if (strcmp(command, "layout.split.horizontal") == 0) {
         return "Split pane horizontally";
     }
@@ -5698,6 +5778,10 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "layout.resize.toggle");
     desk_add_bindings_item(session, "layout.movepane");
     desk_add_bindings_item(session, "layout.transpose");
+    desk_add_bindings_item(session, "layout.addleft");
+    desk_add_bindings_item(session, "layout.addright");
+    desk_add_bindings_item(session, "layout.addtop");
+    desk_add_bindings_item(session, "layout.addbottom");
     desk_add_bindings_item(session, "layout.split.horizontal");
     desk_add_bindings_item(session, "layout.split.vertical");
     desk_add_bindings_item(session, "layout.delete");
@@ -6173,14 +6257,30 @@ static int desk_commit_pending_split_process(desk_session_t *session,
 
     desk_pane_layout_t saved_layout = session->layout;
     size_t saved_pane_count = session->pane_count;
-    desk_split_t split = session->pending_split ==
-                                 DESK_PENDING_SPLIT_HORIZONTAL
-                             ? DESK_SPLIT_HORIZONTAL
-                             : DESK_SPLIT_VERTICAL;
+    desk_pending_split_t pending = session->pending_split;
     session->pending_split = DESK_PENDING_SPLIT_NONE;
-    if (pane_layout_split(&session->layout, split) < 0) {
-        snprintf(error, error_size, "failed to split pane");
-        return -1;
+    if (pending == DESK_PENDING_SPLIT_HORIZONTAL ||
+        pending == DESK_PENDING_SPLIT_VERTICAL) {
+        desk_split_t split = pending == DESK_PENDING_SPLIT_HORIZONTAL
+                                 ? DESK_SPLIT_HORIZONTAL
+                                 : DESK_SPLIT_VERTICAL;
+        if (pane_layout_split(&session->layout, split) < 0) {
+            snprintf(error, error_size, "failed to split pane");
+            return -1;
+        }
+    } else {
+        desk_pane_direction_t direction = DESK_PANE_LEFT;
+        if (pending == DESK_PENDING_SPLIT_ADD_RIGHT) {
+            direction = DESK_PANE_RIGHT;
+        } else if (pending == DESK_PENDING_SPLIT_ADD_TOP) {
+            direction = DESK_PANE_ABOVE;
+        } else if (pending == DESK_PENDING_SPLIT_ADD_BOTTOM) {
+            direction = DESK_PANE_BELOW;
+        }
+        if (pane_layout_add_direction(&session->layout, direction) < 0) {
+            snprintf(error, error_size, "failed to add pane");
+            return -1;
+        }
     }
     session->zoomed = false;
     bool resized = false;
@@ -8675,12 +8775,24 @@ static bool desk_execute_command(desk_session_t *session,
         return true;
     }
     if (strcmp(command, "layout.split.horizontal") == 0 ||
-        strcmp(command, "layout.split.vertical") == 0) {
+        strcmp(command, "layout.split.vertical") == 0 ||
+        strcmp(command, "layout.addleft") == 0 ||
+        strcmp(command, "layout.addright") == 0 ||
+        strcmp(command, "layout.addtop") == 0 ||
+        strcmp(command, "layout.addbottom") == 0) {
         char error[256];
-        desk_pending_split_t split =
-            strcmp(command, "layout.split.horizontal") == 0
-                ? DESK_PENDING_SPLIT_HORIZONTAL
-                : DESK_PENDING_SPLIT_VERTICAL;
+        desk_pending_split_t split = DESK_PENDING_SPLIT_VERTICAL;
+        if (strcmp(command, "layout.split.horizontal") == 0) {
+            split = DESK_PENDING_SPLIT_HORIZONTAL;
+        } else if (strcmp(command, "layout.addleft") == 0) {
+            split = DESK_PENDING_SPLIT_ADD_LEFT;
+        } else if (strcmp(command, "layout.addright") == 0) {
+            split = DESK_PENDING_SPLIT_ADD_RIGHT;
+        } else if (strcmp(command, "layout.addtop") == 0) {
+            split = DESK_PENDING_SPLIT_ADD_TOP;
+        } else if (strcmp(command, "layout.addbottom") == 0) {
+            split = DESK_PENDING_SPLIT_ADD_BOTTOM;
+        }
         if (desk_begin_split_process_menu(session, split, error,
                                           sizeof(error)) < 0) {
             pane_layout_status(&session->layout, error);

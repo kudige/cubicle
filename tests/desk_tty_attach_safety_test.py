@@ -615,6 +615,156 @@ def run_desk_three_pane_default_layout(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_addright_spanning_layout(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    started_extra = False
+    opened_add_menu = False
+    selected_extra = False
+    saw_extra_pane = False
+    sent_quit = False
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if (
+                not started_extra
+                and b"add-top" in captured
+                and b"add-bottom" in captured
+                and b"add-right" in captured
+            ):
+                run_checked(
+                    [
+                        cube,
+                        "--workspace",
+                        "DeskAdd",
+                        "run",
+                        "--bg",
+                        "--tty",
+                        "--name",
+                        "add-extra",
+                        sys.executable,
+                        "-c",
+                        (
+                            "import sys,time,tty\n"
+                            "tty.setraw(0)\n"
+                            "sys.stdout.write('READY add-extra\\n')\n"
+                            "sys.stdout.flush()\n"
+                            "time.sleep(10)\n"
+                        ),
+                    ],
+                    env,
+                )
+                os.write(master_fd, b"\x18a")
+                opened_add_menu = True
+                started_extra = True
+
+            if opened_add_menu and not selected_extra:
+                if b"add-extra" in captured:
+                    os.write(master_fd, b"\r")
+                    captured.clear()
+                    selected_extra = True
+
+            if selected_extra and not saw_extra_pane and b"add-extra" in captured:
+                saw_extra_pane = True
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not started_extra:
+            raise AssertionError(f"desk did not render add panes: {captured!r}")
+        if not opened_add_menu:
+            raise AssertionError("desk was not asked to open add-pane menu")
+        if not selected_extra:
+            raise AssertionError(f"desk add menu did not expose add-extra: {captured!r}")
+        if not saw_extra_pane:
+            raise AssertionError(f"desk did not attach added pane: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk addright layout exited with {proc.returncode}; output={captured!r}"
+            )
+
+        workspace_id = find_workspace_id(cube, env, "DeskAdd")
+        path = workspace_layout_file(env, workspace_id)
+        with open(path, "r", encoding="utf-8") as handle:
+            layout = handle.read()
+        node_lines = [line for line in layout.splitlines() if line.startswith("node ")]
+        if len(node_lines) != 7:
+            raise AssertionError(f"addright layout should have 7 nodes:\n{layout}")
+
+        nodes = {}
+        for line in node_lines:
+            parts = line.split()
+            index = int(parts[1])
+            nodes[index] = {
+                "pane_id": int(parts[2]),
+                "split": int(parts[3]),
+                "first": int(parts[4]),
+                "second": int(parts[5]),
+                "label": parts[7] if len(parts) > 7 else "",
+            }
+        root = int(next(line.split()[1] for line in layout.splitlines()
+                       if line.startswith("root ")))
+        root_node = nodes[root]
+        if root_node["split"] != 1:
+            raise AssertionError(f"root should split left/right:\n{layout}")
+        left = nodes[root_node["first"]]
+        right = nodes[root_node["second"]]
+        if left["split"] != 1:
+            raise AssertionError(f"left stack should be wrapped left/right:\n{layout}")
+        original_stack = nodes[left["first"]]
+        added = nodes[left["second"]]
+        if original_stack["split"] != 2:
+            raise AssertionError(f"original stack should remain top/bottom:\n{layout}")
+        if added["pane_id"] != 4 or added["label"] != "add-extra":
+            raise AssertionError(f"added pane should be full-height right band:\n{layout}")
+        top = nodes[original_stack["first"]]
+        bottom = nodes[original_stack["second"]]
+        if (
+            top["pane_id"] != 1
+            or top["label"] != "add-top"
+            or bottom["pane_id"] != 2
+            or bottom["label"] != "add-bottom"
+            or right["pane_id"] != 3
+            or right["label"] != "add-right"
+        ):
+            raise AssertionError(f"unexpected addright leaf assignment:\n{layout}")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_save_and_load_layout(desk, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -1236,13 +1386,14 @@ def run_desk_bindings_overlay(desk, env):
                     and b"[pane.next]" in captured
                     and b"Prefix-n" in captured
                     and b"[layout.movepane]" in captured
-                    and b"[layout.save]" in captured
-                    and b"Prefix-:" in captured
+                    and b"Prefix-M" in captured
+                    and b"[layout.addright]" in captured
+                    and b"[layout.addbottom]" in captured
                 ):
                     saw_overlay = True
 
             if saw_overlay and not sent_edit:
-                os.write(master_fd, b"j" * 18 + b"e")
+                os.write(master_fd, b"j" * 22 + b"e")
                 sent_edit = True
 
             if sent_edit and not saw_edit_prompt:
@@ -2893,6 +3044,7 @@ def main():
                 "bind.12=Prefix-Right pane.right\n"
                 "bind.13=Prefix-Up pane.above\n"
                 "bind.14=Prefix-Down pane.below\n"
+                "bind.15=Prefix-a layout.addright\n"
             ),
         )
         run_checked([cube, "workspace", "create", "DeskThree"], env)
@@ -2935,6 +3087,35 @@ def main():
         run_checked([cube, "kill", "--all", "--cleanup"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskThree"], env)
+        run_checked([cube, "workspace", "create", "DeskAdd"], env)
+        for name in ("add-top", "add-bottom", "add-right"):
+            run_checked(
+                [
+                    cube,
+                    "--workspace",
+                    "DeskAdd",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    name,
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time,tty\n"
+                        "tty.setraw(0)\n"
+                        f"sys.stdout.write('READY {name}\\n')\n"
+                        "sys.stdout.flush()\n"
+                        "time.sleep(10)\n"
+                    ),
+                ],
+                env,
+            )
+        run_checked([cube, "workspace", "DeskAdd"], env)
+        run_desk_addright_spanning_layout(desk, cube, env)
+        run_checked([cube, "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskAdd"], env)
         write_test_config(config_path, log_dir)
         write_test_config(
             config_path,
