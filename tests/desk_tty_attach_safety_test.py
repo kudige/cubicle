@@ -517,7 +517,7 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                         and b"three-bottom" not in latest_frame
                     ):
                         saw_vertical_zoom_preserved = True
-                        os.write(master_fd, b"\x18srq\x18g\x1b[Cq\x18q")
+                        os.write(master_fd, b"\x18srq\x18M\x1b[Cq\x18q")
                         sent_quit = True
                     elif (
                         time.time() - sent_vertical_switch_at > 0.3
@@ -2893,7 +2893,6 @@ def main():
                 "bind.12=Prefix-Right pane.right\n"
                 "bind.13=Prefix-Up pane.above\n"
                 "bind.14=Prefix-Down pane.below\n"
-                "bind.15=Prefix-g layout.movepane\n"
             ),
         )
         run_checked([cube, "workspace", "create", "DeskThree"], env)

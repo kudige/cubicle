@@ -401,6 +401,14 @@ v                 Toggle vertical axis zoom
 s, q, Escape      Exit layout mode
 ```
 
+Move panes without resizing them:
+
+```text
+Prefix-M          Enter move-pane mode
+Arrow keys        Swap the active pane with the pane in that direction
+q, Escape         Exit move-pane mode
+```
+
 Resizes are sent to the controller and followed by an authoritative terminal
 snapshot reload, so full-screen applications such as shells, editors, `less`,
 and Codex see the new PTY size. Desk batches repeated resize-arrow input to

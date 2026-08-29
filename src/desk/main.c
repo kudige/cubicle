@@ -9578,6 +9578,8 @@ static void print_usage(FILE *stream, const char *program)
             "  Prefix-m      Toggle mouse pane title selection while running.\n");
     fprintf(stream,
             "  Prefix-s      Enter layout mode; arrows resize, H/V split, D deletes.\n");
+    fprintf(stream,
+            "  Prefix-M      Move panes; arrows swap the active pane, q exits.\n");
     fprintf(stream, "  Prefix-:      Save the current layout by name.\n");
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
     fprintf(stream, "  Prefix-?      Show or edit configured key bindings.\n");

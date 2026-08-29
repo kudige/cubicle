@@ -604,6 +604,8 @@ Shift-arrows resize the opposite side, `H`/`V` split the active pane and open
 the cube picker for the new pane, `D` deletes the active pane, `t` transposes
 eligible panes on their axis, `r` resets the automatic layout, `h`/`v` apply
 horizontal or vertical zoom, and `s`, `q`, or Escape exits layout mode. Press
+`Prefix-M` to enter move-pane mode; arrows swap the active pane with the pane
+in that direction, and `q` or Escape exits move-pane mode. Press
 `Prefix-PageUp`, `Prefix-PageDown`, `Prefix-Home`, or `Prefix-End` to enter
 scroll mode. In scroll mode, plain arrows, PageUp/PageDown, Home, and End keep
 scrolling the active pane; press `q` or `s` to leave scroll mode and resume

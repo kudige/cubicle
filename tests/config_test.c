@@ -88,10 +88,20 @@ static void test_defaults(void)
     assert(config.desk_automanager == 1);
     assert(config.desk_scrollback_lines == 10000);
     assert(config.desk_prefix_key == 0x18);
-    assert(config.desk_key_binding_count == 14);
+    assert(config.desk_key_binding_count == 15);
     assert(config.desk_key_bindings[0].uses_prefix == 1);
     assert(config.desk_key_bindings[0].key == 'n');
     assert(strcmp(config.desk_key_bindings[0].command, "pane.next") == 0);
+    int saw_default_move_pane = 0;
+    for (size_t i = 0; i < config.desk_key_binding_count; ++i) {
+        if (config.desk_key_bindings[i].uses_prefix &&
+            config.desk_key_bindings[i].key == 'M' &&
+            strcmp(config.desk_key_bindings[i].command,
+                   "layout.movepane") == 0) {
+            saw_default_move_pane = 1;
+        }
+    }
+    assert(saw_default_move_pane);
     assert(config.default_launch == CUBICLE_LAUNCH_FOREGROUND);
     assert(config.default_mode == CUBICLE_PROCESS_TTY);
     assert(config.default_kill_cleanup == 0);
@@ -214,7 +224,7 @@ static void test_override_file(void)
     assert(config.desk_automanager == 0);
     assert(config.desk_scrollback_lines == 1234);
     assert(config.desk_prefix_key == 0);
-    assert(config.desk_key_binding_count == 16);
+    assert(config.desk_key_binding_count == 17);
     int saw_rebound_prefix_n = 0;
     int saw_direct_quit = 0;
     int saw_prefix_m = 0;

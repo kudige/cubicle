@@ -1119,6 +1119,8 @@ void cubicle_config_defaults(cubicle_config_t *config)
     (void)add_desk_key_binding(config, "Prefix-Space", "layout.zoom", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-s", "layout.resize.toggle",
                                1, NULL, 0);
+    (void)add_desk_key_binding(config, "Prefix-M", "layout.movepane", 1,
+                               NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-m", "mouse.toggle", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-o", "menu.open", 1, NULL, 0);
     (void)add_desk_key_binding(config, "Prefix-:", "layout.save", 1, NULL, 0);
