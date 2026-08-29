@@ -2448,6 +2448,7 @@ static int command_access(const char *manager_socket,
             yyjson_val *item;
             yyjson_arr_foreach(keys, index, max, item) {
                 char key_id[CUBICLE_ID_STRING_LENGTH];
+                char level[CUBICLE_NAME_MAX];
                 char label[CUBICLE_KEY_LABEL_MAX];
                 uint64_t capabilities = 0;
                 uint64_t revoked_at_ms = 0;
@@ -2459,8 +2460,13 @@ static int command_access(const char *manager_socket,
                                    &capabilities) == 0) {
                     (void)json_u64_field(item, "revoked_at_ms",
                                          &revoked_at_ms);
+                    if (json_string_field(item, "level", level,
+                                          sizeof(level)) < 0) {
+                        snprintf(level, sizeof(level), "%s",
+                                 workspace_scope ? workspace : "global");
+                    }
                     printf("%s\t%s\t%s\t%llu\t%s\n", key_id,
-                           workspace_scope ? workspace : "global", label,
+                           level, label,
                            (unsigned long long)capabilities,
                            revoked_at_ms == 0 ? "no" : "yes");
                 }

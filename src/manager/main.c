@@ -1599,6 +1599,9 @@ static int workspace_key_info_json(const workspace_key_record_t *record,
 
 static int key_record_info_json(const workspace_key_record_t *record,
                                 const char *scope,
+                                const char *level,
+                                const char *workspace_id,
+                                const char *workspace_name,
                                 char *buffer,
                                 size_t buffer_size)
 {
@@ -1607,8 +1610,19 @@ static int key_record_info_json(const workspace_key_record_t *record,
         return -1;
     }
     char escaped_scope[64];
+    char escaped_level[CUBICLE_NAME_MAX * 2];
+    char escaped_workspace_id[CUBICLE_ID_STRING_LENGTH * 2];
+    char escaped_workspace_name[CUBICLE_NAME_MAX * 2];
     if (cubicle_json_escape(escaped_scope, sizeof(escaped_scope),
-                            scope == NULL ? "" : scope) < 0) {
+                            scope == NULL ? "" : scope) < 0 ||
+        cubicle_json_escape(escaped_level, sizeof(escaped_level),
+                            level == NULL ? "" : level) < 0 ||
+        cubicle_json_escape(escaped_workspace_id,
+                            sizeof(escaped_workspace_id),
+                            workspace_id == NULL ? "" : workspace_id) < 0 ||
+        cubicle_json_escape(escaped_workspace_name,
+                            sizeof(escaped_workspace_name),
+                            workspace_name == NULL ? "" : workspace_name) < 0) {
         return -1;
     }
     size_t length = strlen(base);
@@ -1617,8 +1631,15 @@ static int key_record_info_json(const workspace_key_record_t *record,
         return -1;
     }
     base[length - 1] = '\0';
-    int written = snprintf(buffer, buffer_size, "%s,\"scope\":\"%s\"}",
-                           base, escaped_scope);
+    int written = workspace_id != NULL && workspace_name != NULL
+                      ? snprintf(buffer, buffer_size,
+                                 "%s,\"scope\":\"%s\",\"level\":\"%s\",\"workspace_id\":\"%s\",\"workspace_name\":\"%s\"}",
+                                 base, escaped_scope, escaped_level,
+                                 escaped_workspace_id,
+                                 escaped_workspace_name)
+                      : snprintf(buffer, buffer_size,
+                                 "%s,\"scope\":\"%s\",\"level\":\"%s\"}",
+                                 base, escaped_scope, escaped_level);
     if (written < 0 || (size_t)written >= buffer_size) {
         errno = ENOSPC;
         return -1;
@@ -6955,7 +6976,8 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         unlock_state(lock_fd);
 
         char result[1024];
-        if (key_record_info_json(&record, "manager", result,
+        if (key_record_info_json(&record, "manager", "global", NULL, NULL,
+                                 result,
                                  sizeof(result)) < 0) {
             MANAGER_RETURN(manager_api_error(client_fd, request_id,
                                              CUBICLE_ERR_INTERNAL,
@@ -6988,7 +7010,47 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
                 workspace_key_record_t record;
                 char item[1024];
                 if (parse_workspace_key_record(line, &record) != 0 ||
-                    key_record_info_json(&record, "manager", item,
+                    key_record_info_json(&record, "manager", "global",
+                                         NULL, NULL, item,
+                                         sizeof(item)) < 0) {
+                    continue;
+                }
+                written = snprintf(result + used, sizeof(result) - used,
+                                   "%s%s", count == 0 ? "" : ",", item);
+                if (written < 0 ||
+                    (size_t)written >= sizeof(result) - used) {
+                    fclose(file);
+                    MANAGER_RETURN(manager_api_error(
+                        client_fd, request_id, CUBICLE_ERR_RESOURCE_LIMIT,
+                        "key list response too large", false, 0));
+                }
+                used += (size_t)written;
+                ++count;
+            }
+            fclose(file);
+        }
+        file = open_state_file_for_read(state, "workspace-keys.tsv");
+        if (file != NULL) {
+            char line[1024];
+            while (fgets(line, sizeof(line), file) != NULL) {
+                workspace_key_record_t record;
+                cubicle_workspace_record_t workspace;
+                char workspace_name[CUBICLE_NAME_MAX];
+                char item[1200];
+                if (parse_workspace_key_record(line, &record) != 0) {
+                    continue;
+                }
+                if (find_workspace(state, record.workspace_id,
+                                   &workspace) == 0) {
+                    snprintf(workspace_name, sizeof(workspace_name), "%s",
+                             workspace.name);
+                } else {
+                    snprintf(workspace_name, sizeof(workspace_name), "%s",
+                             record.workspace_id);
+                }
+                if (key_record_info_json(&record, "workspace",
+                                         workspace_name, record.workspace_id,
+                                         workspace_name, item,
                                          sizeof(item)) < 0) {
                     continue;
                 }
