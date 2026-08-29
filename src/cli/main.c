@@ -2441,7 +2441,7 @@ static int command_access(const char *manager_socket,
             return 2;
         }
         yyjson_val *keys = yyjson_obj_get(document.root, "keys");
-        printf("KEY ID\tLABEL\tCAPABILITIES\tREVOKED\n");
+        printf("KEY ID\tLEVEL\tLABEL\tCAPABILITIES\tREVOKED\n");
         if (yyjson_is_arr(keys)) {
             size_t index;
             size_t max;
@@ -2459,7 +2459,8 @@ static int command_access(const char *manager_socket,
                                    &capabilities) == 0) {
                     (void)json_u64_field(item, "revoked_at_ms",
                                          &revoked_at_ms);
-                    printf("%s\t%s\t%llu\t%s\n", key_id, label,
+                    printf("%s\t%s\t%s\t%llu\t%s\n", key_id,
+                           workspace_scope ? workspace : "global", label,
                            (unsigned long long)capabilities,
                            revoked_at_ms == 0 ? "no" : "yes");
                 }

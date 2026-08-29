@@ -76,14 +76,14 @@ cube workspace select "Project A" >/dev/null
 
 owner_key=$(tr -d '\n' <"$xdg_config_home/cubicle/keys/client.pub")
 manager_access_list=$(cube access list)
-printf "%s\n" "$manager_access_list" | grep -q '^KEY ID	LABEL	CAPABILITIES	REVOKED$'
+printf "%s\n" "$manager_access_list" | grep -q '^KEY ID	LEVEL	LABEL	CAPABILITIES	REVOKED$'
 if printf "%s\n" "$manager_access_list" | grep -q '	owner	'; then
     echo "manager access list should not include workspace owner key" >&2
     exit 1
 fi
 access_list=$(cube --workspace "Project A" access list)
-printf "%s\n" "$access_list" | grep -q '^KEY ID	LABEL	CAPABILITIES	REVOKED$'
-printf "%s\n" "$access_list" | grep -q '	owner	.*	no$'
+printf "%s\n" "$access_list" | grep -q '^KEY ID	LEVEL	LABEL	CAPABILITIES	REVOKED$'
+printf "%s\n" "$access_list" | grep -q '	Project A	owner	.*	no$'
 access_json=$(cube --json --workspace "Project A" access list)
 printf "%s" "$access_json" | grep -q '"keys"'
 printf "%s" "$access_json" | grep -q '"label":"owner"'
@@ -122,6 +122,8 @@ PY
 manager_access_json=$(cube --json access list)
 printf "%s" "$manager_access_json" | grep -q "\"key_id\":\"$manager_key_id\""
 printf "%s" "$manager_access_json" | grep -q '"scope":"manager"'
+manager_access_list=$(cube access list)
+printf "%s\n" "$manager_access_list" | grep -q "	global	Global Alice	"
 manager_update_output=$(cube access set-role "$manager_key_id" operator)
 if [ "$manager_update_output" != "Access updated" ]; then
     echo "unexpected manager access set-role output: $manager_update_output" >&2
