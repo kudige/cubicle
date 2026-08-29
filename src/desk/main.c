@@ -545,6 +545,7 @@ typedef struct desk_session {
     size_t pane_count;
     desk_pane_layout_t layout;
     char layout_path[PATH_MAX];
+    char named_layout_name[CUBICLE_NAME_MAX];
     unsigned char prefix_key;
     unsigned char prefix_sequence[CUBICLE_DESK_KEY_SEQUENCE_MAX];
     size_t prefix_sequence_length;
@@ -2466,6 +2467,26 @@ static void desk_store_default_workspace(desk_session_t *session)
     if (cubeui_store_desk_workspace(workspace_ref) == 0) {
         cubeui_clear_desk_layout();
     }
+}
+
+static void desk_set_named_layout(desk_session_t *session,
+                                  const char *layout_name)
+{
+    snprintf(session->named_layout_name, sizeof(session->named_layout_name),
+             "%s", layout_name != NULL ? layout_name : "");
+}
+
+static void desk_clear_named_layout(desk_session_t *session)
+{
+    session->named_layout_name[0] = '\0';
+}
+
+static int desk_save_current_named_layout(desk_session_t *session)
+{
+    if (session->named_layout_name[0] == '\0') {
+        return 0;
+    }
+    return desk_save_named_layout(session, session->named_layout_name);
 }
 
 static int desk_load_named_layout_file(const char *path,
@@ -4880,6 +4901,7 @@ static int desk_switch_workspace(desk_session_t *session,
     }
 
     desk_disconnect_all_panes(session);
+    desk_clear_named_layout(session);
     session->workspace = *workspace;
     snprintf(session->last_opened_workspace_id,
              sizeof(session->last_opened_workspace_id), "%s", workspace->id);
@@ -6483,6 +6505,7 @@ static int desk_apply_named_layout(desk_session_t *session,
         session->layout.active_pane_id = loaded_layout.active_pane_id;
     }
     desk_apply_pane_labels(session);
+    desk_set_named_layout(session, layout_name);
     (void)desk_save_layout(session);
     return 0;
 }
@@ -7700,6 +7723,7 @@ static int desk_open_menu_select(desk_session_t *session,
                      "failed to save layout");
             return 0;
         }
+        desk_set_named_layout(session, name);
         (void)cubeui_store_desk_layout(name);
         desk_close_open_menu(session);
         if (!session->mouse_titles) {
@@ -7737,6 +7761,7 @@ static int desk_open_menu_select(desk_session_t *session,
             snprintf(menu->status, sizeof(menu->status), "%s", error);
             return 0;
         }
+        desk_set_named_layout(session, selected.layout_name);
         (void)cubeui_store_desk_layout(selected.layout_name);
         desk_close_open_menu(session);
         if (!session->mouse_titles) {
@@ -9680,8 +9705,19 @@ static int desk_run_workspace(const char *workspace_arg,
         }
     }
 
+    bool named_layout_save_failed = false;
+    if (result == 0 && desk_save_current_named_layout(&session) < 0) {
+        named_layout_save_failed = true;
+        result = 2;
+        desk_debug_log("event=named_layout_save_failed layout=%s errno=%d",
+                       session.named_layout_name, errno);
+    }
     desk_menu_disable_mouse();
     cubeui_terminal_leave_alt_raw(&terminal);
+    if (named_layout_save_failed) {
+        fprintf(stderr, "desk: failed to save layout '%s'\n",
+                session.named_layout_name);
+    }
     desk_debug_log("event=run_end result=%d stop_requested=%d",
                    result, (int)g_stop_requested);
     desk_session_cleanup(&session);

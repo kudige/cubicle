@@ -952,6 +952,7 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
     sent_load = False
     sent_probe = False
     saw_right_probe = False
+    sent_previous = False
     sent_quit = False
     deadline = time.time() + 8
     try:
@@ -999,7 +1000,7 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
                 if "GOT_ACTIVE_RELOAD" in right_logs.stdout:
                     saw_right_probe = True
 
-            if saw_right_probe and not sent_quit:
+            if saw_right_probe and not sent_previous:
                 left_logs = subprocess.run(
                     [cube, "--workspace", "DeskActiveReload",
                      "logs", "--stdout", "active-left"],
@@ -1013,6 +1014,11 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
                         f"layout reload sent input to inactive pane:\n"
                         f"{left_logs.stdout}"
                     )
+                os.write(master_fd, b"\x18p")
+                sent_previous = True
+
+            if sent_previous and not sent_quit:
+                time.sleep(0.1)
                 os.write(master_fd, b"\x18q")
                 sent_quit = True
 
@@ -1040,6 +1046,8 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
                 f"active pane did not receive input after reload:\n"
                 f"{right_logs.stdout}\noutput={captured!r}"
             )
+        if not sent_previous:
+            raise AssertionError("desk was not asked to move active pane")
         if not sent_quit:
             raise AssertionError("desk was not asked to quit after active reload")
         if proc.poll() is None:
@@ -1047,6 +1055,12 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
         if proc.returncode != 0:
             raise AssertionError(
                 f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+        with open(layout_path, "r", encoding="utf-8") as handle:
+            layout = handle.read()
+        if "\nactive 1\n" not in layout:
+            raise AssertionError(
+                f"desk did not save named layout active pane on quit:\n{layout}"
             )
         clear_desk_defaults(env)
     finally:
