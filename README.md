@@ -350,12 +350,16 @@ Prefix-Right  Select pane to the right
 Prefix-Up     Select pane above
 Prefix-Down   Select pane below
 Prefix-Space  Toggle full-pane zoom
-Prefix-PageUp Scroll active pane up one page
-Prefix-PageDown Scroll active pane down one page
+Prefix-PageUp Enter scroll mode and scroll active pane up one page
+Prefix-PageDown Enter scroll mode and scroll active pane down one page
 Prefix-Home   Scroll active pane to top
 Prefix-End    Return active pane to live output
 Prefix-q      Quit desk, leaving cubes running
 ```
+
+In scroll mode, plain arrows, PageUp/PageDown, Home, and End keep scrolling the
+active pane. Press `q` or `s` to leave scroll mode; normal input resumes after
+leaving the mode.
 
 Pane direction selection is geometry-aware: it chooses the best pane in the
 requested direction based on current desk layout.

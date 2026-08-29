@@ -546,6 +546,7 @@ typedef struct desk_session {
     bool mouse_titles;
     long long mouse_suspended_until_ms;
     bool prefix_pending;
+    bool scroll_mode;
     bool zoomed;
     desk_pending_split_t pending_split;
     bool terminal_size_dirty;
@@ -829,6 +830,8 @@ static void desk_render_cube_grid(const desk_terminal_t *terminal,
                                   int pane_id,
                                   desk_pane_t *pane,
                                   bool mouse_titles);
+static void render_all_panes(const desk_terminal_t *terminal,
+                             desk_session_t *session);
 static long long desk_monotonic_ms(void);
 static bool desk_string_equals_case(const char *left, const char *right);
 static desk_macro_cache_t *desk_active_macro_cache(desk_session_t *session,
@@ -3292,6 +3295,140 @@ static bool desk_scroll_active_pane(desk_session_t *session,
     }
     (void)terminal;
     return pane->scrollback_offset != before;
+}
+
+static bool parse_scroll_mode_key(const unsigned char *input,
+                                  size_t length,
+                                  size_t offset,
+                                  const char **command,
+                                  size_t *consumed,
+                                  bool *need_more)
+{
+    *command = NULL;
+    *consumed = 0;
+    *need_more = false;
+    if (offset >= length) {
+        return false;
+    }
+    if (input[offset] == 'q' || input[offset] == 's') {
+        *command = "scroll.exit";
+        *consumed = 1;
+        return true;
+    }
+    if (input[offset] != 0x1b) {
+        *consumed = 1;
+        return true;
+    }
+    if (offset + 1 >= length) {
+        *need_more = true;
+        return true;
+    }
+    if (input[offset + 1] == 'O') {
+        if (offset + 2 >= length) {
+            *need_more = true;
+            return true;
+        }
+        switch (input[offset + 2]) {
+        case 'A':
+        case 'D':
+            *command = "scroll.line_up";
+            break;
+        case 'B':
+        case 'C':
+            *command = "scroll.line_down";
+            break;
+        case 'H':
+            *command = "scroll.top";
+            break;
+        case 'F':
+            *command = "scroll.bottom";
+            break;
+        default:
+            break;
+        }
+        *consumed = 3;
+        return true;
+    }
+    if (input[offset + 1] != '[') {
+        *command = "scroll.exit";
+        *consumed = 1;
+        return true;
+    }
+    size_t final = offset + 2;
+    while (final < length && !(input[final] >= 0x40 && input[final] <= 0x7e)) {
+        final++;
+    }
+    if (final >= length) {
+        *need_more = true;
+        return true;
+    }
+    if (input[final] == 'A' || input[final] == 'D') {
+        *command = "scroll.line_up";
+    } else if (input[final] == 'B' || input[final] == 'C') {
+        *command = "scroll.line_down";
+    } else if (input[final] == 'H') {
+        *command = "scroll.top";
+    } else if (input[final] == 'F') {
+        *command = "scroll.bottom";
+    } else if (input[final] == '~') {
+        size_t param_start = offset + 2;
+        while (param_start < final && input[param_start] == '?') {
+            param_start++;
+        }
+        size_t param_end = param_start;
+        while (param_end < final && input[param_end] >= '0' &&
+               input[param_end] <= '9') {
+            param_end++;
+        }
+        if (param_end == final && param_end > param_start) {
+            unsigned int value = 0;
+            for (size_t i = param_start; i < param_end; ++i) {
+                value = value * 10u + (unsigned int)(input[i] - '0');
+            }
+            if (value == 1 || value == 7) {
+                *command = "scroll.top";
+            } else if (value == 4 || value == 8) {
+                *command = "scroll.bottom";
+            } else if (value == 5) {
+                *command = "scroll.page_up";
+            } else if (value == 6) {
+                *command = "scroll.page_down";
+            }
+        }
+    }
+    *consumed = final - offset + 1;
+    return true;
+}
+
+static int desk_handle_scroll_mode_key(desk_session_t *session,
+                                       desk_terminal_t *terminal,
+                                       const unsigned char *input,
+                                       size_t length,
+                                       size_t offset,
+                                       size_t *consumed,
+                                       bool *need_more)
+{
+    const char *command = NULL;
+    if (!parse_scroll_mode_key(input, length, offset, &command, consumed,
+                               need_more)) {
+        return 0;
+    }
+    if (*need_more) {
+        return 0;
+    }
+    if (command == NULL) {
+        return 0;
+    }
+    if (strcmp(command, "scroll.exit") == 0) {
+        session->scroll_mode = false;
+        pane_layout_clear_status(&session->layout);
+        render_all_panes(terminal, session);
+        return 0;
+    }
+    if (desk_scroll_active_pane(session, terminal, command)) {
+        render_all_panes(terminal, session);
+    }
+    return 0;
 }
 
 static void grid_apply_snapshot(desk_grid_t *grid,
@@ -8345,9 +8482,11 @@ static bool desk_execute_command(desk_session_t *session,
                                  bool *quit_requested)
 {
     if (strncmp(command, "scroll.", 7) == 0) {
-        if (desk_scroll_active_pane(session, terminal, command)) {
-            render_all_panes(terminal, session);
-        }
+        session->scroll_mode = true;
+        pane_layout_status(&session->layout,
+                           "scroll mode: arrows/PageUp/PageDown scroll, q exits");
+        (void)desk_scroll_active_pane(session, terminal, command);
+        render_all_panes(terminal, session);
         return true;
     }
     bool keep_zoom = session->zoomed;
@@ -8665,6 +8804,26 @@ static int handle_input(desk_session_t *session,
         if (is_terminal_response_sequence(input, length, i, &consumed)) {
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
+            }
+            i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
+        if (session->scroll_mode) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            bool need_more = false;
+            if (desk_handle_scroll_mode_key(session, terminal, input, length,
+                                            i, &consumed, &need_more) < 0) {
+                return -1;
+            }
+            if (need_more) {
+                desk_save_pending_from(session, input, length, i);
+                return 0;
+            }
+            if (consumed == 0) {
+                consumed = 1;
             }
             i += consumed - 1;
             start = i + 1;
@@ -9241,7 +9400,8 @@ static void print_usage(FILE *stream, const char *program)
     fprintf(stream, "  Prefix-:      Save the current layout by name.\n");
     fprintf(stream, "  Prefix-;      Load a saved layout by name.\n");
     fprintf(stream, "  Prefix-?      Show or edit configured key bindings.\n");
-    fprintf(stream, "  Prefix-PageUp/PageDown scroll the active pane.\n");
+    fprintf(stream,
+            "  Prefix-PageUp/PageDown enter scroll mode; q exits.\n");
 }
 
 static bool desk_string_equals_case(const char *left, const char *right)

@@ -879,6 +879,126 @@ def run_desk_layout_mode_keys(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_scroll_mode_keys(desk, cube, env):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_probe_start = False
+    saw_probe_start = False
+    sent_scroll_keys = False
+    sent_payload = False
+    saw_payload = False
+    sent_quit = False
+    deadline = time.time() + 7
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_probe_start and b"desk-safe" in captured:
+                os.write(master_fd, b"SCROLL_START")
+                sent_probe_start = True
+
+            if sent_probe_start and not saw_probe_start:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_SCROLL_START" in logs.stdout:
+                    saw_probe_start = True
+
+            if saw_probe_start and not sent_scroll_keys:
+                os.write(
+                    master_fd,
+                    b"\x18\x1b[5~"
+                    b"\x1b[A\x1b[B\x1b[C\x1b[D"
+                    b"\x1b[5~\x1b[6~\x1b[H\x1b[F"
+                    b"q",
+                )
+                sent_scroll_keys = True
+
+            if sent_scroll_keys and not sent_payload:
+                time.sleep(0.2)
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_SCROLL_LEAK" in logs.stdout:
+                    raise AssertionError(
+                        f"scroll-mode keys leaked into cube stdin:\n{logs.stdout}"
+                    )
+                os.write(master_fd, b"SCROLL_DONE")
+                sent_payload = True
+
+            if sent_payload and not saw_payload:
+                logs = subprocess.run(
+                    [cube, "logs", "--stdout", "desk-safe"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_SCROLL_DONE" in logs.stdout:
+                    saw_payload = True
+
+            if saw_payload and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_probe_start:
+            raise AssertionError(f"desk did not render scroll-mode pane: {captured!r}")
+        if not saw_probe_start:
+            raise AssertionError(f"desk did not send scroll probe marker: {captured!r}")
+        if not sent_scroll_keys:
+            raise AssertionError("desk was not sent scroll-mode keys")
+        if not sent_payload:
+            raise AssertionError("desk did not send post-scroll-mode payload")
+        if not saw_payload:
+            raise AssertionError(f"desk did not exit scroll mode: {captured!r}")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk scroll mode exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_layout_split_and_delete(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -2428,6 +2548,7 @@ def run_desk_scrollback_returns_to_live(desk, env):
     sent_generate = False
     sent_scroll = False
     saw_history = False
+    sent_scroll_exit = False
     sent_input = False
     saw_live_restore = False
     sent_quit = False
@@ -2459,6 +2580,10 @@ def run_desk_scrollback_returns_to_live(desk, env):
             if sent_scroll and not saw_history and b"HISTORY_00" in captured:
                 saw_history = True
                 captured.clear()
+                os.write(master_fd, b"q")
+                sent_scroll_exit = True
+
+            if sent_scroll_exit and not sent_input and b"scroll mode" not in captured:
                 os.write(master_fd, b"x")
                 sent_input = True
 
@@ -2482,6 +2607,8 @@ def run_desk_scrollback_returns_to_live(desk, env):
             raise AssertionError(
                 f"desk did not scroll active pane into history: {captured!r}"
             )
+        if not sent_scroll_exit:
+            raise AssertionError("desk was not asked to exit scroll mode")
         if not sent_input:
             raise AssertionError("desk was not sent input to return to live")
         if not saw_live_restore:
@@ -2665,7 +2792,7 @@ def main():
                     "tty.setraw(0)\n"
                     "sys.stdout.write('READY\\n')\n"
                     "sys.stdout.flush()\n"
-                    "deadline=time.time()+10\n"
+                    "deadline=time.time()+16\n"
                     "data=b''\n"
                     "saw_ctrl_c=False\n"
                     "saw_ping=False\n"
@@ -2673,6 +2800,9 @@ def main():
                     "saw_layout=False\n"
                     "saw_leak_start=False\n"
                     "saw_layout_leak=False\n"
+                    "saw_scroll_start=False\n"
+                    "saw_scroll_done=False\n"
+                    "saw_scroll_leak=False\n"
                     "while time.time()<deadline:\n"
                     "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
                     "    if r:\n"
@@ -2703,7 +2833,23 @@ def main():
                     "            sys.stdout.write('GOT_LAYOUT_LEAK '+tail.hex()+'\\n')\n"
                     "            sys.stdout.flush()\n"
                     "            saw_layout_leak=True\n"
-                    "    if saw_ctrl_c and saw_ping and saw_prefix_m and saw_layout:\n"
+                    "    if not saw_scroll_start and b'SCROLL_START' in data:\n"
+                    "        sys.stdout.write('GOT_SCROLL_START\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_scroll_start=True\n"
+                    "    if saw_scroll_start and not saw_scroll_done and not saw_scroll_leak:\n"
+                    "        tail=data.split(b'SCROLL_START', 1)[1]\n"
+                    "        for seq in (b'\\x1b[A', b'\\x1b[B', b'\\x1b[C', b'\\x1b[D', b'\\x1b[5~', b'\\x1b[6~', b'\\x1b[H', b'\\x1b[F'):\n"
+                    "            if seq in tail:\n"
+                    "                sys.stdout.write('GOT_SCROLL_LEAK '+tail.hex()+'\\n')\n"
+                    "                sys.stdout.flush()\n"
+                    "                saw_scroll_leak=True\n"
+                    "                break\n"
+                    "    if not saw_scroll_done and b'SCROLL_DONE' in data:\n"
+                    "        sys.stdout.write('GOT_SCROLL_DONE\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        saw_scroll_done=True\n"
+                    "    if saw_ctrl_c and saw_ping and saw_prefix_m and saw_layout and saw_scroll_done:\n"
                     "        break\n"
                     "time.sleep(10)\n"
                 ),
@@ -2712,6 +2858,7 @@ def main():
         )
 
         run_desk_and_ctrl_c(desk, cube, env, log_dir)
+        run_desk_scroll_mode_keys(desk, cube, env)
         run_desk_layout_mode_keys(desk, cube, env)
         run_checked([cube, "workspace", "create", "DeskLayout"], env)
         run_checked(

@@ -287,6 +287,9 @@ Keys:
 - `scrollback_lines`: number of session-local scrolled-off terminal lines kept
   per `desk` pane. Defaults to `10000`. Valid range is `1` through `200000`.
   This is not persisted and does not read historical controller logs.
+  Scroll commands enter scroll mode. While scroll mode is active, plain arrows,
+  PageUp/PageDown, Home, and End keep scrolling the active pane; `q` or `s`
+  exits back to normal input.
 - `prefix`: Desk escape prefix key. It accepts tmux-style key names such as
   `Control-X`, `Ctrl-X`, `C-X`, `^X`, `Control-Space`, `Space`, `Enter`,
   `Escape`, `Backspace`, `Tab`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
