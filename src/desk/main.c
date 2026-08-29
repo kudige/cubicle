@@ -3941,6 +3941,7 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
                                    const desk_pane_layout_t *panes,
                                    int pane_id,
                                    const char *title,
+                                   bool remote,
                                    bool mouse_titles)
 {
     desk_rect_t rect;
@@ -3962,14 +3963,16 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, cursor);
     append_text(frame, sizeof(frame), &used,
-                active ? "\x1b[1;7m" : "\x1b[0m");
+                remote ? (active ? "\x1b[1;30;103m" : "\x1b[30;103m")
+                       : (active ? "\x1b[1;7m" : "\x1b[0m"));
     for (int col = 0; col < rect.cols; ++col) {
         append_text(frame, sizeof(frame), &used, " ");
     }
 
     append_text(frame, sizeof(frame), &used, cursor);
     append_text(frame, sizeof(frame), &used,
-                active ? "\x1b[1;7m" : "\x1b[2m");
+                remote ? (active ? "\x1b[1;30;103m" : "\x1b[30;103m")
+                       : (active ? "\x1b[1;7m" : "\x1b[2m"));
     if (rect.cols > 2) {
         append_text(frame, sizeof(frame), &used, " ");
     }
@@ -4103,6 +4106,7 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
              scrollback_view ? pane->scrollback_count : 0);
     desk_render_pane_title(terminal, panes, pane_id,
                            scrollback_view ? title : pane_title,
+                           pane->remote_name[0] != '\0',
                            mouse_titles);
 }
 
