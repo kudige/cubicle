@@ -1486,6 +1486,7 @@ def run_desk_click_inactive_title(desk, cube, env):
     captured = bytearray()
     clicked_title = False
     saw_active_title = False
+    saw_full_active_bar = False
     title_row = 0
     title_col = 0
     sent_payload = False
@@ -1537,6 +1538,13 @@ def run_desk_click_inactive_title(desk, cube, env):
                 if active_marker in captured:
                     saw_active_title = True
 
+            if clicked_title and not saw_full_active_bar:
+                full_bar_marker = (
+                    f"\x1b[{title_row};{title_col}H\x1b[1;7m"
+                ).encode("ascii") + (b" " * 12)
+                if full_bar_marker in captured:
+                    saw_full_active_bar = True
+
             if saw_active_title and not sent_payload:
                 os.write(master_fd, b"TITLE")
                 sent_payload = True
@@ -1586,6 +1594,8 @@ def run_desk_click_inactive_title(desk, cube, env):
             raise AssertionError(f"desk did not render inactive title: {captured!r}")
         if not saw_active_title:
             raise AssertionError(f"desk did not select clicked title: {captured!r}")
+        if not saw_full_active_bar:
+            raise AssertionError(f"desk did not stretch active title bar: {captured!r}")
         if not saw_payload:
             raise AssertionError(f"clicked title pane did not receive input: {captured!r}")
         if not saw_mouse_release:

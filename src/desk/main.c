@@ -3904,7 +3904,8 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
     }
 
     append_text(frame, sizeof(frame), &used, cursor);
-    append_text(frame, sizeof(frame), &used, "\x1b[0m");
+    append_text(frame, sizeof(frame), &used,
+                active ? "\x1b[1;7m" : "\x1b[0m");
     for (int col = 0; col < rect.cols; ++col) {
         append_text(frame, sizeof(frame), &used, " ");
     }
