@@ -4255,7 +4255,7 @@ static int resize_pane_attachment(desk_session_t *session,
                                    (int)pane_index + 1, &rect)) {
         return 0;
     }
-    if (rect.rows <= DESK_PANE_TITLE_ROWS || rect.cols <= 0) {
+    if (rect.rows < DESK_MIN_PANE_ROWS || rect.cols < DESK_MIN_PANE_COLS) {
         return -1;
     }
     rows = (unsigned int)(rect.rows - DESK_PANE_TITLE_ROWS);
@@ -4296,6 +4296,26 @@ static int resize_all_panes(desk_session_t *session,
             return -1;
         }
     }
+    return 0;
+}
+
+static int resize_all_panes_or_reflow(desk_session_t *session,
+                                      const desk_terminal_t *terminal,
+                                      bool *changed)
+{
+    if (resize_all_panes(session, terminal, changed) == 0) {
+        return 0;
+    }
+    if (pane_layout_auto(&session->layout, session->pane_count) < 0) {
+        return -1;
+    }
+    desk_apply_pane_labels(session);
+    if (resize_all_panes(session, terminal, changed) < 0) {
+        return -1;
+    }
+    pane_layout_status(&session->layout,
+                       "layout reflowed for current terminal size");
+    (void)desk_save_layout(session);
     return 0;
 }
 
@@ -4730,7 +4750,7 @@ static int desk_switch_workspace(desk_session_t *session,
     }
     bool changed = false;
     if (result == 0 &&
-        resize_all_panes(session, terminal, &changed) < 0) {
+        resize_all_panes_or_reflow(session, terminal, &changed) < 0) {
         snprintf(error, error_size, "terminal too small for desk");
         result = 2;
     }
@@ -8809,6 +8829,23 @@ static int handle_input(desk_session_t *session,
             start = i + 1;
             continue;
         }
+        if (session->prefix_pending) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            bool need_more = false;
+            if (desk_handle_prefixed_sequence(session, terminal, input, length,
+                                             i, &consumed, layout_changed,
+                                             quit_requested, &need_more) < 0) {
+                return -1;
+            }
+            if (need_more) {
+                return 0;
+            }
+            i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
         if (session->scroll_mode) {
             if (flush_active_input(session, input, start, i) < 0) {
                 return -1;
@@ -8824,23 +8861,6 @@ static int handle_input(desk_session_t *session,
             }
             if (consumed == 0) {
                 consumed = 1;
-            }
-            i += consumed - 1;
-            start = i + 1;
-            continue;
-        }
-        if (session->prefix_pending) {
-            if (flush_active_input(session, input, start, i) < 0) {
-                return -1;
-            }
-            bool need_more = false;
-            if (desk_handle_prefixed_sequence(session, terminal, input, length,
-                                             i, &consumed, layout_changed,
-                                             quit_requested, &need_more) < 0) {
-                return -1;
-            }
-            if (need_more) {
-                return 0;
             }
             i += consumed - 1;
             start = i + 1;
@@ -9137,7 +9157,8 @@ static int desk_run_workspace(const char *workspace_arg,
     } else {
         bool initial_size_changed = false;
         desk_crash_set_phase("initial-resize");
-        if (resize_all_panes(&session, &terminal, &initial_size_changed) < 0) {
+        if (resize_all_panes_or_reflow(&session, &terminal,
+                                       &initial_size_changed) < 0) {
             cubeui_terminal_leave_alt_raw(&terminal);
             desk_debug_log("event=initial_resize_failed errno=%d", errno);
             fprintf(stderr, "desk: terminal too small for desk\n");
