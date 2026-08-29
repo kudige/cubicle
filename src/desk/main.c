@@ -3527,12 +3527,15 @@ static int reload_pane_snapshot(desk_pane_t *pane)
             return -1;
         }
     }
+    unsigned int target_rows = pane->rows > 0 ? pane->rows : snapshot.rows;
+    unsigned int target_cols = pane->cols > 0 ? pane->cols : snapshot.cols;
     if (cubicle_terminal_model_load_snapshot(pane->terminal_model,
                                              &snapshot) < 0 ||
         cubicle_terminal_model_set_scrollback_capture_limit(
             pane->terminal_model, pane->scrollback_limit) < 0 ||
-        grid_resize(&pane->grid, (int)snapshot.rows,
-                    (int)snapshot.cols) < 0) {
+        cubicle_terminal_model_resize(pane->terminal_model, target_rows,
+                                      target_cols) < 0 ||
+        grid_resize(&pane->grid, (int)target_rows, (int)target_cols) < 0) {
         desk_debug_log("event=snapshot_apply_failed process=%s rows=%u cols=%u offset=%llu errno=%d",
                        pane->process.friendly_name, snapshot.rows,
                        snapshot.cols,
@@ -3540,7 +3543,17 @@ static int reload_pane_snapshot(desk_pane_t *pane)
         cubicle_terminal_snapshot_cleanup(&snapshot);
         return -1;
     }
-    grid_apply_snapshot(&pane->grid, &snapshot);
+    cubicle_terminal_snapshot_t resized_snapshot;
+    if (cubicle_terminal_model_snapshot(pane->terminal_model, snapshot.offset,
+                                        &resized_snapshot) < 0) {
+        desk_debug_log("event=snapshot_resize_failed process=%s rows=%u cols=%u target_rows=%u target_cols=%u errno=%d",
+                       pane->process.friendly_name, snapshot.rows,
+                       snapshot.cols, target_rows, target_cols, errno);
+        cubicle_terminal_snapshot_cleanup(&snapshot);
+        return -1;
+    }
+    grid_apply_snapshot(&pane->grid, &resized_snapshot);
+    cubicle_terminal_snapshot_cleanup(&resized_snapshot);
     cubicle_terminal_scrollback_line_t *discarded = NULL;
     size_t discarded_count = 0;
     if (cubicle_terminal_model_take_scrollback(pane->terminal_model,
@@ -3551,8 +3564,9 @@ static int reload_pane_snapshot(desk_pane_t *pane)
     cubicle_terminal_model_clear_dirty_rows(pane->terminal_model);
     uint64_t after_offset =
         cubicle_attachment_read_offset(pane->attachment, CUBICLE_STREAM_TTY);
-    desk_debug_log("event=snapshot_reload_ok process=%s rows=%u cols=%u offset=%llu read_offset_before=%llu read_offset_after=%llu cursor=%u,%u visible=%s",
+    desk_debug_log("event=snapshot_reload_ok process=%s rows=%u cols=%u target_rows=%u target_cols=%u offset=%llu read_offset_before=%llu read_offset_after=%llu cursor=%u,%u visible=%s",
                    pane->process.friendly_name, snapshot.rows, snapshot.cols,
+                   target_rows, target_cols,
                    (unsigned long long)snapshot.offset,
                    (unsigned long long)before_offset,
                    (unsigned long long)after_offset, snapshot.cursor_row,
@@ -4268,6 +4282,8 @@ static int resize_pane_attachment(desk_session_t *session,
         if (code != CUBICLE_OK) {
             return -1;
         }
+        pane->rows = rows;
+        pane->cols = cols;
         if ((sent || size_changed) && reload_pane_snapshot(pane) < 0) {
             return -1;
         }
@@ -4278,9 +4294,9 @@ static int resize_pane_attachment(desk_session_t *session,
              cubicle_terminal_model_resize(pane->terminal_model, rows, cols) < 0)) {
             return -1;
         }
+        pane->rows = rows;
+        pane->cols = cols;
     }
-    pane->rows = rows;
-    pane->cols = cols;
     if (changed != NULL && size_changed) {
         *changed = true;
     }
