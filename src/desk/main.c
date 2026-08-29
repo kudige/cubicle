@@ -3963,15 +3963,15 @@ static void desk_render_pane_title(const desk_terminal_t *terminal,
 
     append_text(frame, sizeof(frame), &used, cursor);
     append_text(frame, sizeof(frame), &used,
-                remote ? (active ? "\x1b[1;30;103m" : "\x1b[30;103m")
-                       : (active ? "\x1b[1;7m" : "\x1b[0m"));
+                remote && active ? "\x1b[1;30;103m"
+                                 : (active ? "\x1b[1;7m" : "\x1b[0m"));
     for (int col = 0; col < rect.cols; ++col) {
         append_text(frame, sizeof(frame), &used, " ");
     }
 
     append_text(frame, sizeof(frame), &used, cursor);
     append_text(frame, sizeof(frame), &used,
-                remote ? (active ? "\x1b[1;30;103m" : "\x1b[30;103m")
+                remote ? (active ? "\x1b[1;30;103m" : "\x1b[33m")
                        : (active ? "\x1b[1;7m" : "\x1b[2m"));
     if (rect.cols > 2) {
         append_text(frame, sizeof(frame), &used, " ");
