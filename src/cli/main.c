@@ -94,6 +94,7 @@ typedef struct cube_process_target {
 
 static struct termios cube_saved_terminal;
 static int cube_terminal_restore_active = 0;
+static volatile sig_atomic_t cube_attach_resize_requested = 0;
 
 static void cube_restore_terminal(void)
 {
@@ -109,6 +110,12 @@ static void cube_attach_signal_handler(int signal_number)
     cube_restore_terminal();
     signal(signal_number, SIG_DFL);
     raise(signal_number);
+}
+
+static void cube_attach_resize_signal_handler(int signal_number)
+{
+    (void)signal_number;
+    cube_attach_resize_requested = 1;
 }
 // LCOV_EXCL_STOP
 
@@ -5492,7 +5499,9 @@ static int attachment_loop(cubicle_attachment_t *attachment,
     struct sigaction old_term;
     struct sigaction old_hup;
     struct sigaction old_quit;
+    struct sigaction old_winch;
     int handlers_installed = 0;
+    int resize_handler_installed = 0;
 
     if ((terminal_mode || interactive_tty) &&
         isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
@@ -5527,6 +5536,15 @@ static int attachment_loop(cubicle_attachment_t *attachment,
             sigaction(SIGQUIT, &action, &old_quit) == 0) {
             handlers_installed = 1;
         }
+        if (terminal_mode) {
+            struct sigaction resize_action;
+            memset(&resize_action, 0, sizeof(resize_action));
+            resize_action.sa_handler = cube_attach_resize_signal_handler;
+            sigemptyset(&resize_action.sa_mask);
+            if (sigaction(SIGWINCH, &resize_action, &old_winch) == 0) {
+                resize_handler_installed = 1;
+            }
+        }
         raw_enabled = 1;
     }
 
@@ -5548,8 +5566,17 @@ static int attachment_loop(cubicle_attachment_t *attachment,
     if (result == 0) {
         result = attachment_resize_tty(attachment);
     }
+    cube_attach_resize_requested = 0;
 
     while (result == 0 && !detach_requested) {
+        if (terminal_mode && cube_attach_resize_requested) {
+            cube_attach_resize_requested = 0;
+            result = attachment_resize_tty(attachment);
+            if (result != 0) {
+                break;
+            }
+        }
+
         int completed = 0;
         int stdout_end = 1;
         int stderr_end = 1;
@@ -5661,6 +5688,9 @@ static int attachment_loop(cubicle_attachment_t *attachment,
         sigaction(SIGTERM, &old_term, NULL);
         sigaction(SIGHUP, &old_hup, NULL);
         sigaction(SIGQUIT, &old_quit, NULL);
+    }
+    if (resize_handler_installed) {
+        sigaction(SIGWINCH, &old_winch, NULL);
     }
     return result;
 }

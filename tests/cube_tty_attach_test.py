@@ -40,6 +40,16 @@ def wait_for_event(path, predicate, description):
     raise AssertionError(f"missing {description}: {load_events(path)!r}")
 
 
+def wait_for_event_after(path, predicate, description, after):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        events = load_events(path)
+        if any(predicate(event) for event in events[after:]):
+            return events
+        time.sleep(0.05)
+    raise AssertionError(f"missing {description}: {load_events(path)!r}")
+
+
 def read_available(fd):
     output = bytearray()
     while True:
@@ -452,6 +462,91 @@ def main():
                     "kill",
                     "--cleanup",
                     "live-query-probe",
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
+            )
+
+            resize_recorder_output = os.path.join(tmpdir, "cube-resize.jsonl")
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "run",
+                    "--bg",
+                    "--tty",
+                    "--name",
+                    "cube-resize-probe",
+                    sys.executable,
+                    recorder,
+                    "--output",
+                    resize_recorder_output,
+                ],
+                stdout=subprocess.DEVNULL,
+                env=env,
+            )
+            wait_for_event(
+                resize_recorder_output,
+                lambda event: event.get("event") == "start",
+                "cube resize recorder start",
+            )
+            resize_master_fd, resize_slave_fd = pty.openpty()
+            set_window_size(resize_master_fd, 10, 40)
+            resize_connect = subprocess.Popen(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "connect",
+                    "cube-resize-probe",
+                ],
+                stdin=resize_slave_fd,
+                stdout=resize_slave_fd,
+                stderr=resize_slave_fd,
+                env=env,
+                close_fds=True,
+            )
+            os.close(resize_slave_fd)
+            try:
+                events = wait_for_event(
+                    resize_recorder_output,
+                    lambda event: event.get("event") == "resize"
+                    and event.get("rows") == 10
+                    and event.get("columns") == 40,
+                    "cube connect initial resize",
+                )
+                set_window_size(resize_master_fd, 18, 70)
+                resize_connect.send_signal(signal.SIGWINCH)
+                wait_for_event_after(
+                    resize_recorder_output,
+                    lambda event: event.get("event") == "resize"
+                    and event.get("rows") == 18
+                    and event.get("columns") == 70,
+                    "cube connect SIGWINCH resize",
+                    len(events),
+                )
+                os.write(resize_master_fd, b"\x1cd")
+                resize_connect.wait(timeout=5)
+            finally:
+                if resize_connect.poll() is None:
+                    resize_connect.terminate()
+                    resize_connect.wait(timeout=5)
+                os.close(resize_master_fd)
+            check_call(
+                [
+                    cube,
+                    "--manager-socket",
+                    socket_path,
+                    "--workspace",
+                    "Project A",
+                    "kill",
+                    "--cleanup",
+                    "cube-resize-probe",
                 ],
                 stdout=subprocess.DEVNULL,
                 env=env,
