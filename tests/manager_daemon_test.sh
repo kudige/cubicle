@@ -184,14 +184,16 @@ printf "%s" "$workspace_list_response" | grep -q '"name": "Project A"'
 printf "%s" "$workspace_list_response" | grep -q '"name": "Project B"'
 
 # Endpoint tests for workspace macros
-macro_save_response=$(send_manager_rpc workspace.macro.save "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":1,\"name\":\"build\",\"text\":\"make test\",\"target_pane\":1,\"key_name\":\"C-B\"}")
+macro_save_response=$(send_manager_rpc workspace.macro.save "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":1,\"name\":\"build\",\"text\":\"make test\",\"target_pane\":0,\"target_process_name\":\"build-pane\",\"key_name\":\"C-B\"}")
 printf "%s" "$macro_save_response" | grep -q '"success": true'
 printf "%s" "$macro_save_response" | grep -q '"name": "build"'
 printf "%s" "$macro_save_response" | grep -q '"text": "make test"'
+printf "%s" "$macro_save_response" | grep -q '"target_process_name": "build-pane"'
 macro_second_response=$(send_manager_rpc workspace.macro.save "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":2,\"name\":\"run gdb\",\"text\":\"gdb ./cube\",\"target_pane\":2}")
 printf "%s" "$macro_second_response" | grep -q '"success": true'
 macro_list_response=$(send_manager_rpc workspace.macro.list "{\"workspace_id\":\"$workspace_b_id\"}")
 printf "%s" "$macro_list_response" | grep -q '"name": "build"'
+printf "%s" "$macro_list_response" | grep -q '"target_process_name": "build-pane"'
 printf "%s" "$macro_list_response" | grep -q '"key_name": "C-B"'
 printf "%s" "$macro_list_response" | grep -q '"name": "run gdb"'
 macro_reorder_response=$(send_manager_rpc workspace.macro.reorder "{\"workspace_id\":\"$workspace_b_id\",\"ordinal\":2,\"new_ordinal\":1}")

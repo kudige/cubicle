@@ -1612,6 +1612,170 @@ def run_desk_click_inactive_title(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_macro_target_persists(desk, env, state_dir):
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        [desk, "--workspace", "DeskMacroTarget"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    opened_root = False
+    opened_macros = False
+    opened_name = False
+    opened_text = False
+    opened_target = False
+    selected_target = False
+    saved_macro = False
+    reopened_name = False
+    reopened_text = False
+    reopened_target = False
+    saw_persisted_target = False
+    closed_target = False
+    sent_quit = False
+    closed_target_at = 0.0
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not opened_root and b"macro-build" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18o")
+                opened_root = True
+
+            if opened_root and not opened_macros and b"Open cube" in captured:
+                captured.clear()
+                os.write(master_fd, b"m")
+                opened_macros = True
+
+            if opened_macros and not opened_name and b"New macro" in captured:
+                captured.clear()
+                os.write(master_fd, b"\r")
+                opened_name = True
+
+            if opened_name and not opened_text and b"Macro name" in captured:
+                captured.clear()
+                os.write(master_fd, b"install\r")
+                opened_text = True
+
+            if opened_text and not opened_target and b"Macro text" in captured:
+                captured.clear()
+                os.write(master_fd, b"make install\r")
+                opened_target = True
+
+            if (
+                opened_target
+                and not selected_target
+                and b"Macro target" in captured
+                and b"Active Pane" in captured
+                and b"macro-build" in captured
+            ):
+                captured.clear()
+                os.write(master_fd, b"j\r")
+                selected_target = True
+
+            if selected_target and not saved_macro and b"saved macro install" in captured:
+                macro_path = os.path.join(state_dir, "workspace-macros.tsv")
+                with open(macro_path, "r", encoding="utf-8") as handle:
+                    macro_state = handle.read()
+                if "\tinstall\tmake install\t0\tmacro-build\t" not in macro_state:
+                    raise AssertionError(
+                        f"macro target was not persisted:\n{macro_state}"
+                    )
+                captured.clear()
+                os.write(master_fd, b"\r")
+                saved_macro = True
+
+            if saved_macro and not reopened_name and b"Macro name" in captured:
+                captured.clear()
+                os.write(master_fd, b"\r")
+                reopened_name = True
+
+            if reopened_name and not reopened_text and b"Macro text" in captured:
+                captured.clear()
+                os.write(master_fd, b"\r")
+                reopened_text = True
+
+            if reopened_text and not reopened_target and b"Macro target" in captured:
+                reopened_target = True
+
+            if reopened_target and not saw_persisted_target:
+                if re.search(
+                    rb"\x1b\[[0-9]+;[0-9]+H\x1b\[1;7;48;5;236mmacro-build",
+                    captured,
+                ):
+                    saw_persisted_target = True
+                    captured.clear()
+                    os.write(master_fd, b"q")
+                    closed_target = True
+                    closed_target_at = time.time()
+
+            if (
+                closed_target
+                and not sent_quit
+                and time.time() - closed_target_at > 0.2
+            ):
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not opened_root:
+            raise AssertionError(f"desk did not render macro target pane: {captured!r}")
+        if not opened_macros:
+            raise AssertionError(f"desk did not open macro list: {captured!r}")
+        if not opened_name:
+            raise AssertionError(f"desk did not start new macro prompt: {captured!r}")
+        if not opened_text:
+            raise AssertionError(f"desk did not continue to macro text: {captured!r}")
+        if not opened_target:
+            raise AssertionError(f"desk did not continue to macro target: {captured!r}")
+        if not selected_target:
+            raise AssertionError(f"desk did not expose named macro target: {captured!r}")
+        if not saved_macro:
+            raise AssertionError(f"desk did not save targeted macro: {captured!r}")
+        if not reopened_target:
+            raise AssertionError(f"desk did not reopen target prompt: {captured!r}")
+        if not saw_persisted_target:
+            raise AssertionError(f"desk did not keep named macro target selected: {captured!r}")
+        if not closed_target:
+            raise AssertionError("desk was not asked to close the target prompt")
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk macro target test exited with {proc.returncode}; output={captured!r}"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_open_other_workspace_process(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -3277,6 +3441,35 @@ def main():
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_desk_enter_workspace_switch(desk, cube, env)
         run_checked([cube, "--workspace", "DeskEnter", "kill", "--all", "--cleanup"], env)
+
+        run_checked([cube, "workspace", "create", "DeskMacroTarget"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskMacroTarget",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "macro-build",
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY macro-build\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(10)\n"
+                ),
+            ],
+            env,
+        )
+        run_desk_macro_target_persists(desk, env, state_dir)
+        run_checked([cube, "--workspace", "DeskMacroTarget", "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskMacroTarget"], env)
+        clear_desk_defaults(env)
 
         run_checked([cube, "workspace", "create", "DeskOther"], env)
         safe_workspace_id = find_workspace_id(cube, env, "DeskSafe")

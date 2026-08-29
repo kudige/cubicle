@@ -7390,6 +7390,13 @@ static int desk_save_macro(desk_session_t *session,
                      : "macro save failed");
         return -1;
     }
+    if (saved.target_pane != macro->target_pane ||
+        strcmp(saved.target_process_name, macro->target_process_name) != 0 ||
+        strcmp(saved.key_name, macro->key_name) != 0) {
+        snprintf(error, error_size,
+                 "macro save did not persist all fields; restart manager");
+        return -1;
+    }
     cache->valid = false;
     return desk_active_macro_cache(session, true, error, error_size) == NULL
                ? -1
