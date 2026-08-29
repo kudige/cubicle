@@ -625,7 +625,7 @@ use `Prefix-KEY`; direct shortcuts omit `Prefix-`. Long aliases such as
 pane keeps while the current `desk` process is running.
 Supported command names are
 `pane.next`, `pane.previous`, `pane.left`, `pane.right`, `pane.above`,
-`pane.below`, `layout.zoom`, `layout.resize.toggle`,
+`pane.below`, `layout.zoom`, `layout.resize.toggle`, `layout.movepane`,
 `layout.transpose`, `layout.split.horizontal`, `layout.split.vertical`,
 `layout.delete`, `layout.reset`, `layout.zoom.horizontal`,
 `layout.zoom.vertical`, `layout.save`, `layout.load`, `bindings.show`,

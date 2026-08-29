@@ -301,7 +301,7 @@ Keys:
   displayed in canonical `S-`, `C-`, and `M-` form.
   `COMMAND` is one of `pane.next`, `pane.previous`, `pane.left`, `pane.right`,
   `pane.above`, `pane.below`, `layout.zoom`, `layout.resize.toggle`,
-  `layout.transpose`, `layout.split.horizontal`,
+  `layout.movepane`, `layout.transpose`, `layout.split.horizontal`,
   `layout.split.vertical`, `layout.delete`, `layout.reset`,
   `layout.zoom.horizontal`, `layout.zoom.vertical`, `layout.save`,
   `layout.load`, `bindings.show`, `scroll.page_up`, `scroll.page_down`,

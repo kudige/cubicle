@@ -476,6 +476,7 @@ pane.above
 pane.below
 layout.zoom
 layout.resize.toggle
+layout.movepane
 layout.transpose
 layout.split.horizontal
 layout.split.vertical

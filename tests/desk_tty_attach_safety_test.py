@@ -517,8 +517,7 @@ def run_desk_three_pane_default_layout(desk, cube, env):
                         and b"three-bottom" not in latest_frame
                     ):
                         saw_vertical_zoom_preserved = True
-                        os.write(master_fd, b"\x18srq")
-                        os.write(master_fd, b"\x18q")
+                        os.write(master_fd, b"\x18srq\x18g\x1b[Cq\x18q")
                         sent_quit = True
                     elif (
                         time.time() - sent_vertical_switch_at > 0.3
@@ -599,10 +598,10 @@ def run_desk_three_pane_default_layout(desk, cube, env):
         if (
             top["pane_id"] != 1
             or top["label"] != "three-top"
-            or bottom["pane_id"] != 2
-            or bottom["label"] != "three-bottom"
-            or right["pane_id"] != 3
-            or right["label"] != "three-right"
+            or bottom["pane_id"] != 3
+            or bottom["label"] != "three-right"
+            or right["pane_id"] != 2
+            or right["label"] != "three-bottom"
         ):
             raise AssertionError(f"unexpected three-pane leaf assignment:\n{layout}")
     finally:
@@ -1210,6 +1209,7 @@ def run_desk_bindings_overlay(desk, env):
     saw_reopened_overlay = False
     overlay_count_before_reopen = 0
     closed_at = 0.0
+    config_path = os.path.join(env["XDG_CONFIG_HOME"], "cubicle", "config.cfg")
     deadline = time.time() + 5
     try:
         while time.time() < deadline:
@@ -1233,15 +1233,16 @@ def run_desk_bindings_overlay(desk, env):
             if sent_overlay and not saw_overlay:
                 if (
                     b"Key bindings" in captured
-                    and b"[bindings.show]" in captured
-                    and b"Prefix-?" in captured
+                    and b"[pane.next]" in captured
+                    and b"Prefix-n" in captured
+                    and b"[layout.movepane]" in captured
                     and b"[layout.save]" in captured
                     and b"Prefix-:" in captured
                 ):
                     saw_overlay = True
 
             if saw_overlay and not sent_edit:
-                os.write(master_fd, b"j" * 17 + b"e")
+                os.write(master_fd, b"j" * 18 + b"e")
                 sent_edit = True
 
             if sent_edit and not saw_edit_prompt:
@@ -1253,12 +1254,9 @@ def run_desk_bindings_overlay(desk, env):
                 sent_new_key = True
 
             if sent_new_key and not saw_edited_binding:
-                if (
-                    b"Key bindings" in captured
-                    and b"[bindings.show]" in captured
-                    and b"C-G" in captured
-                ):
-                    saw_edited_binding = True
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    if "C-G bindings.show" in handle.read():
+                        saw_edited_binding = True
 
             if saw_edited_binding and not sent_close:
                 overlay_count_before_reopen = captured.count(b"Key bindings")
@@ -1304,9 +1302,6 @@ def run_desk_bindings_overlay(desk, env):
             raise AssertionError(
                 f"desk bindings overlay exited with {proc.returncode}; output={captured!r}"
             )
-        config_path = os.path.join(
-            env["XDG_CONFIG_HOME"], "cubicle", "config.cfg"
-        )
         with open(config_path, "r", encoding="utf-8") as handle:
             config_text = handle.read()
         if "cubicle-desk-managed-keys: begin" not in config_text:
@@ -2898,6 +2893,7 @@ def main():
                 "bind.12=Prefix-Right pane.right\n"
                 "bind.13=Prefix-Up pane.above\n"
                 "bind.14=Prefix-Down pane.below\n"
+                "bind.15=Prefix-g layout.movepane\n"
             ),
         )
         run_checked([cube, "workspace", "create", "DeskThree"], env)

@@ -375,6 +375,7 @@ typedef struct desk_pane_layout {
     desk_zoom_t zoom;
     int zoom_pane_id;
     bool resize_mode;
+    bool move_mode;
     char status[128];
 } desk_pane_layout_t;
 
@@ -1109,6 +1110,7 @@ static void pane_layout_reset(desk_pane_layout_t *panes)
     panes->next_pane_id = 5;
     panes->zoom = DESK_ZOOM_NONE;
     panes->resize_mode = false;
+    panes->move_mode = false;
 }
 
 static bool pane_subtree_contains(const desk_pane_layout_t *panes, int node,
@@ -1585,6 +1587,40 @@ static bool pane_layout_select_direction(desk_pane_layout_t *panes,
     return true;
 }
 
+static bool pane_layout_swap_direction(desk_pane_layout_t *panes,
+                                       const desk_terminal_t *terminal,
+                                       size_t pane_count,
+                                       desk_pane_direction_t direction)
+{
+    int active_id = panes->active_pane_id;
+    if (!pane_layout_select_direction(panes, terminal, pane_count,
+                                      direction)) {
+        return false;
+    }
+
+    int target_id = panes->active_pane_id;
+    int active_node = pane_find_leaf_node(panes, panes->root, active_id);
+    int target_node = pane_find_leaf_node(panes, panes->root, target_id);
+    if (active_node < 0 || target_node < 0) {
+        panes->active_pane_id = active_id;
+        return false;
+    }
+
+    desk_pane_node_t *active = &panes->nodes[active_node];
+    desk_pane_node_t *target = &panes->nodes[target_node];
+    int pane_id = active->pane_id;
+    char active_label[sizeof(active->label)];
+    char target_label[sizeof(target->label)];
+    snprintf(active_label, sizeof(active_label), "%s", active->label);
+    snprintf(target_label, sizeof(target_label), "%s", target->label);
+    active->pane_id = target->pane_id;
+    snprintf(active->label, sizeof(active->label), "%s", target_label);
+    target->pane_id = pane_id;
+    snprintf(target->label, sizeof(target->label), "%s", active_label);
+    panes->active_pane_id = active_id;
+    return true;
+}
+
 static bool pane_content_rect_for_pane(const desk_pane_layout_t *panes,
                                        const desk_terminal_t *terminal,
                                        int pane_id,
@@ -2018,6 +2054,7 @@ static int pane_layout_finish_loaded(desk_pane_layout_t *panes,
                                    : loaded->active_pane_id;
     }
     loaded->resize_mode = false;
+    loaded->move_mode = false;
     *panes = *loaded;
     return 0;
 }
@@ -2102,6 +2139,7 @@ static int pane_layout_grid(desk_pane_layout_t *panes, int rows, int cols)
     panes->next_pane_id = rows * cols + 1;
     panes->zoom = DESK_ZOOM_NONE;
     panes->resize_mode = false;
+    panes->move_mode = false;
     return 0;
 }
 
@@ -2130,6 +2168,7 @@ static int pane_layout_three_panes(desk_pane_layout_t *panes)
     panes->next_pane_id = 4;
     panes->zoom = DESK_ZOOM_NONE;
     panes->resize_mode = false;
+    panes->move_mode = false;
     return 0;
 }
 
@@ -2776,14 +2815,17 @@ static void pane_canvas_write_label(const char **canvas,
                                     const desk_terminal_t *terminal,
                                     desk_rect_t rect, const char *pane_label,
                                     bool active,
-                                    bool resize_mode)
+                                    bool resize_mode,
+                                    bool move_mode)
 {
     if (rect.rows <= 0 || rect.cols <= 0) {
         return;
     }
     char label[32];
     int length = 0;
-    if (active && resize_mode) {
+    if (active && move_mode) {
+        length = snprintf(label, sizeof(label), "{%s}", pane_label);
+    } else if (active && resize_mode) {
         length = snprintf(label, sizeof(label), "<%s>", pane_label);
     } else if (active) {
         length = snprintf(label, sizeof(label), "[%s]", pane_label);
@@ -2828,7 +2870,7 @@ static void pane_render_node(const desk_pane_layout_t *panes,
     if (entry->split == DESK_SPLIT_NONE) {
         pane_canvas_write_label(canvas, terminal, rect, entry->label,
                                 entry->pane_id == panes->active_pane_id,
-                                panes->resize_mode);
+                                panes->resize_mode, panes->move_mode);
         return;
     }
 
@@ -4056,6 +4098,27 @@ static bool parse_plain_arrow_key(const unsigned char *input,
     }
     *consumed = 3;
     return true;
+}
+
+static bool desk_direction_from_arrow_key(cubicle_terminal_key_t key,
+                                          desk_pane_direction_t *direction)
+{
+    switch (key) {
+    case CUBICLE_TERMINAL_KEY_UP:
+        *direction = DESK_PANE_ABOVE;
+        return true;
+    case CUBICLE_TERMINAL_KEY_DOWN:
+        *direction = DESK_PANE_BELOW;
+        return true;
+    case CUBICLE_TERMINAL_KEY_RIGHT:
+        *direction = DESK_PANE_RIGHT;
+        return true;
+    case CUBICLE_TERMINAL_KEY_LEFT:
+        *direction = DESK_PANE_LEFT;
+        return true;
+    default:
+        return false;
+    }
 }
 
 static void desk_apply_pane_labels(desk_session_t *session)
@@ -5479,6 +5542,9 @@ static const char *desk_command_description(const char *command)
     if (strcmp(command, "layout.resize.toggle") == 0) {
         return "Toggle layout mode";
     }
+    if (strcmp(command, "layout.movepane") == 0) {
+        return "Move active pane";
+    }
     if (strcmp(command, "layout.transpose") == 0) {
         return "Transpose panes on axis";
     }
@@ -5630,6 +5696,7 @@ static void desk_begin_bindings_overlay(desk_session_t *session)
     desk_add_bindings_item(session, "pane.below");
     desk_add_bindings_item(session, "layout.zoom");
     desk_add_bindings_item(session, "layout.resize.toggle");
+    desk_add_bindings_item(session, "layout.movepane");
     desk_add_bindings_item(session, "layout.transpose");
     desk_add_bindings_item(session, "layout.split.horizontal");
     desk_add_bindings_item(session, "layout.split.vertical");
@@ -8578,6 +8645,25 @@ static bool desk_execute_command(desk_session_t *session,
     }
     if (strcmp(command, "layout.resize.toggle") == 0) {
         session->layout.resize_mode = !session->layout.resize_mode;
+        if (session->layout.resize_mode) {
+            session->layout.move_mode = false;
+            pane_layout_status(&session->layout,
+                               "resize mode: arrows resize, q exits");
+        } else {
+            pane_layout_clear_status(&session->layout);
+        }
+        *layout_changed = true;
+        return true;
+    }
+    if (strcmp(command, "layout.movepane") == 0) {
+        session->layout.move_mode = !session->layout.move_mode;
+        if (session->layout.move_mode) {
+            session->layout.resize_mode = false;
+            pane_layout_status(&session->layout,
+                               "move pane mode: arrows swap panes, q exits");
+        } else {
+            pane_layout_clear_status(&session->layout);
+        }
         *layout_changed = true;
         return true;
     }
@@ -8618,6 +8704,7 @@ static bool desk_execute_command(desk_session_t *session,
     if (strcmp(command, "layout.reset") == 0) {
         int active_pane_id = session->layout.active_pane_id;
         bool resize_mode = session->layout.resize_mode;
+        bool move_mode = session->layout.move_mode;
         if (pane_layout_auto(&session->layout, session->pane_count) == 0) {
             desk_apply_pane_labels(session);
             if (active_pane_id > 0 &&
@@ -8625,10 +8712,19 @@ static bool desk_execute_command(desk_session_t *session,
                 session->layout.active_pane_id = active_pane_id;
             }
             session->layout.resize_mode = resize_mode;
+            session->layout.move_mode = move_mode;
             session->zoomed = false;
             session->layout.zoom = DESK_ZOOM_NONE;
             session->layout.zoom_pane_id = 0;
-            pane_layout_clear_status(&session->layout);
+            if (move_mode) {
+                pane_layout_status(&session->layout,
+                                   "move pane mode: arrows swap panes, q exits");
+            } else if (resize_mode) {
+                pane_layout_status(&session->layout,
+                                   "resize mode: arrows resize, q exits");
+            } else {
+                pane_layout_clear_status(&session->layout);
+            }
             *layout_changed = true;
         }
         return true;
@@ -8904,6 +9000,54 @@ static int handle_input(desk_session_t *session,
             start = i + 1;
             continue;
         }
+        if (session->layout.move_mode &&
+            (input[i] == 'm' || input[i] == 'q')) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            session->layout.move_mode = false;
+            pane_layout_clear_status(&session->layout);
+            *layout_changed = true;
+            start = i + 1;
+            continue;
+        }
+        cubicle_terminal_key_t move_key;
+        desk_pane_direction_t move_direction;
+        if (session->layout.move_mode &&
+            parse_plain_arrow_key(input, length, i, &move_key, &consumed) &&
+            desk_direction_from_arrow_key(move_key, &move_direction)) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            if (pane_layout_swap_direction(&session->layout, terminal,
+                                           session->pane_count,
+                                           move_direction)) {
+                session->zoomed = false;
+                session->layout.zoom = DESK_ZOOM_NONE;
+                session->layout.zoom_pane_id = 0;
+                *layout_changed = true;
+            }
+            i += consumed - 1;
+            start = i + 1;
+            continue;
+        }
+        if (session->layout.move_mode && input[i] == 0x1b) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            session->layout.move_mode = false;
+            pane_layout_clear_status(&session->layout);
+            *layout_changed = true;
+            start = i + 1;
+            continue;
+        }
+        if (session->layout.move_mode) {
+            if (flush_active_input(session, input, start, i) < 0) {
+                return -1;
+            }
+            start = i + 1;
+            continue;
+        }
         if (session->layout.resize_mode &&
             (input[i] == 's' || input[i] == 'q' || input[i] == 't' ||
              input[i] == 'H' || input[i] == 'V' || input[i] == 'D' ||
@@ -8959,7 +9103,7 @@ static int handle_input(desk_session_t *session,
             continue;
         }
         cubicle_terminal_key_t terminal_key;
-        if (!session->layout.resize_mode &&
+        if (!session->layout.resize_mode && !session->layout.move_mode &&
             parse_plain_arrow_key(input, length, i, &terminal_key,
                                   &consumed)) {
             if (flush_active_input(session, input, start, i) < 0) {

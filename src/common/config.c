@@ -639,6 +639,7 @@ static int desk_command_is_known(const char *command)
            strcmp(command, "pane.below") == 0 ||
            strcmp(command, "layout.zoom") == 0 ||
            strcmp(command, "layout.resize.toggle") == 0 ||
+           strcmp(command, "layout.movepane") == 0 ||
            strcmp(command, "layout.transpose") == 0 ||
            strcmp(command, "layout.split.horizontal") == 0 ||
            strcmp(command, "layout.split.vertical") == 0 ||
