@@ -6284,7 +6284,7 @@ static int desk_apply_named_layout(desk_session_t *session,
     }
 
     bool changed = false;
-    if (resize_all_panes(session, terminal, &changed) < 0 ||
+    if (resize_all_panes_or_reflow(session, terminal, &changed) < 0 ||
         attach_all_panes(session, error, error_size) != 0) {
         for (int i = 0; i < 32; ++i) {
             cubicle_client_disconnect(pane_managers[i]);
