@@ -535,6 +535,17 @@ typedef struct desk_menu_geometry {
     int visible_items;
 } desk_menu_geometry_t;
 
+static bool desk_menu_geometry_equal(const desk_menu_geometry_t *left,
+                                     const desk_menu_geometry_t *right)
+{
+    return left->row == right->row &&
+           left->col == right->col &&
+           left->rows == right->rows &&
+           left->cols == right->cols &&
+           left->item_row == right->item_row &&
+           left->visible_items == right->visible_items;
+}
+
 typedef struct desk_session {
     cubicle_client_t *manager;
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
@@ -9709,6 +9720,13 @@ static int desk_run_workspace(const char *workspace_arg,
                     break;
                 }
                 bool menu_closed = false;
+                bool had_open_menu =
+                    session.open_menu.level != DESK_MENU_CLOSED;
+                desk_menu_geometry_t previous_menu_geometry;
+                bool had_menu_geometry =
+                    had_open_menu &&
+                    desk_menu_geometry(&terminal, &session,
+                                       &previous_menu_geometry);
                 if (session.open_menu.level != DESK_MENU_CLOSED) {
                     if (handle_open_menu_input(&session, &terminal,
                                                handled_input,
@@ -9737,9 +9755,20 @@ static int desk_run_workspace(const char *workspace_arg,
                     }
                     layout_changed = false;
                 } else if (session.open_menu.level != DESK_MENU_CLOSED) {
-                    render_all_panes(&terminal, &session);
-                    desk_render_open_menu(&terminal, &session);
-                } else if (menu_closed) {
+                    desk_menu_geometry_t current_menu_geometry;
+                    bool has_menu_geometry =
+                        desk_menu_geometry(&terminal, &session,
+                                           &current_menu_geometry);
+                    if (had_open_menu && had_menu_geometry &&
+                        has_menu_geometry &&
+                        desk_menu_geometry_equal(&previous_menu_geometry,
+                                                 &current_menu_geometry)) {
+                        desk_render_open_menu(&terminal, &session);
+                    } else {
+                        render_all_panes(&terminal, &session);
+                        desk_render_open_menu(&terminal, &session);
+                    }
+                } else if (menu_closed || had_open_menu) {
                     render_all_panes(&terminal, &session);
                 } else if (session.redraw_requested) {
                     session.redraw_requested = false;
