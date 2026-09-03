@@ -429,6 +429,7 @@ typedef struct desk_pane {
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char remote_name[CUBICLE_NAME_MAX];
     bool manager_relay_attachments;
+    char load_error[256];
     desk_grid_t grid;
     cubicle_resize_tracker_t resize;
     cubicle_terminal_model_t *terminal_model;
@@ -2438,8 +2439,8 @@ static int desk_save_named_layout(desk_session_t *session, const char *name)
                     ? pane->process.workspace_id
                     : session->workspace.id;
             const char *pane_manager_uri =
-                pane->manager != NULL ? pane->manager_uri
-                                      : session->manager_uri;
+                pane->manager_uri[0] != '\0' ? pane->manager_uri
+                                             : session->manager_uri;
             const char *pane_remote_name =
                 pane->remote_name[0] != '\0' ? pane->remote_name
                                              : session->remote_name;
@@ -3899,9 +3900,13 @@ static void desk_cursor_tick(const desk_terminal_t *terminal,
 
 static const char *desk_pane_base_name(const desk_pane_t *pane)
 {
-    return pane->process.friendly_name[0] != '\0'
-               ? pane->process.friendly_name
-               : pane->process.id;
+    if (pane->process.friendly_name[0] != '\0') {
+        return pane->process.friendly_name;
+    }
+    if (pane->process.id[0] != '\0') {
+        return pane->process.id;
+    }
+    return "unavailable";
 }
 
 static void desk_format_pane_title(const desk_pane_t *pane,
@@ -4032,6 +4037,67 @@ static void desk_render_cube_grid_rows(const desk_terminal_t *terminal,
 
     if (scrollback_view) {
         dirty_only = false;
+    }
+
+    if (pane->attachment == NULL && pane->load_error[0] != '\0') {
+        const char *message = pane->load_error;
+        const char *hint = "Use Prefix-o to replace this pane.";
+        for (int row = 0; row < rect.rows; ++row) {
+            if (dirty_only && grid->dirty_rows != NULL &&
+                !grid->dirty_rows[row]) {
+                continue;
+            }
+            char cursor[32];
+            int terminal_row = rect.row + row + 1;
+            int cursor_length = snprintf(cursor, sizeof(cursor),
+                                         "\x1b[%d;%dH", terminal_row,
+                                         rect.col + 1);
+            if (cursor_length > 0 && (size_t)cursor_length < sizeof(cursor)) {
+                append_text(frame, sizeof(frame), &used, cursor);
+            }
+            append_text(frame, sizeof(frame), &used, "\x1b[2m");
+            for (int col = 0; col < rect.cols; ++col) {
+                append_text(frame, sizeof(frame), &used, " ");
+            }
+            if (grid->dirty_rows != NULL) {
+                grid->dirty_rows[row] = false;
+            }
+        }
+
+        if (!dirty_only && rect.rows > 0 && rect.cols > 0) {
+            char cursor[32];
+            int message_length = snprintf(cursor, sizeof(cursor),
+                                          "\x1b[%d;%dH", rect.row + 1,
+                                          rect.col + 1);
+            if (message_length > 0 &&
+                (size_t)message_length < sizeof(cursor)) {
+                append_text(frame, sizeof(frame), &used, cursor);
+            }
+            append_text(frame, sizeof(frame), &used, "\x1b[31m");
+            append_cell_text(frame, sizeof(frame), &used, message,
+                             rect.cols);
+            if (rect.rows > 1) {
+                message_length = snprintf(cursor, sizeof(cursor),
+                                          "\x1b[%d;%dH", rect.row + 2,
+                                          rect.col + 1);
+                if (message_length > 0 &&
+                    (size_t)message_length < sizeof(cursor)) {
+                    append_text(frame, sizeof(frame), &used, cursor);
+                }
+                append_text(frame, sizeof(frame), &used, "\x1b[2m");
+                append_cell_text(frame, sizeof(frame), &used, hint,
+                                 rect.cols);
+            }
+        }
+
+        append_text(frame, sizeof(frame), &used, "\x1b[0m");
+        (void)cubeui_write_all(STDOUT_FILENO, frame, used);
+        char pane_title[160];
+        desk_format_pane_title(pane, pane_title, sizeof(pane_title));
+        desk_render_pane_title(terminal, panes, pane_id, pane_title,
+                               pane->remote_name[0] != '\0',
+                               mouse_titles);
+        return;
     }
 
     size_t total_rows = pane->scrollback_count +
@@ -4683,6 +4749,7 @@ static cubicle_error_code_t attach_pane(desk_session_t *session,
                        cubicle_attachment_stream_fd(pane->attachment,
                                                    CUBICLE_STREAM_TTY));
     }
+    pane->load_error[0] = '\0';
     desk_debug_log("event=attach_ok pane=%zu process=%s",
                    pane_index + 1, pane->process.friendly_name);
     return CUBICLE_OK;
@@ -4819,6 +4886,24 @@ static int desk_refresh_ended_panes(desk_session_t *session,
         if (pane->process.id[0] == '\0') {
             ++i;
             continue;
+        }
+
+        if (pane->manager == NULL && pane->manager_uri[0] != '\0' &&
+            strcmp(pane->manager_uri, session->manager_uri) != 0) {
+            cubicle_client_t *manager = NULL;
+            cubicle_error_code_t connect_code =
+                cubicle_client_connect_uri(pane->manager_uri, NULL, &manager);
+            if (connect_code == CUBICLE_OK) {
+                pane->manager = manager;
+                desk_debug_log("event=pane_manager_reconnect_ok pane=%zu uri=%s",
+                               i + 1, pane->manager_uri);
+            } else {
+                desk_debug_log("event=pane_manager_reconnect_failed pane=%zu uri=%s code=%d",
+                               i + 1, pane->manager_uri,
+                               (int)connect_code);
+                ++i;
+                continue;
+            }
         }
 
         cubicle_process_info_t updated;
@@ -6459,25 +6544,40 @@ static int desk_apply_named_layout(desk_session_t *session,
     cubicle_process_info_t processes[32];
     cubicle_workspace_info_t workspaces[32];
     cubicle_client_t *pane_managers[32];
+    char pane_errors[32][256];
     memset(processes, 0, sizeof(processes));
     memset(workspaces, 0, sizeof(workspaces));
     memset(pane_managers, 0, sizeof(pane_managers));
+    memset(pane_errors, 0, sizeof(pane_errors));
     for (int pane_id = 1; pane_id <= max_pane_id; ++pane_id) {
         if (!leaf_panes[pane_id - 1]) {
             continue;
         }
         desk_named_layout_pane_t *target = &pane_targets[pane_id - 1];
         if (target->process_id[0] == '\0') {
-            snprintf(error, error_size, "layout is missing a cube for pane %d",
+            snprintf(pane_errors[pane_id - 1],
+                     sizeof(pane_errors[pane_id - 1]),
+                     "Pane %d unavailable: layout is missing a cube",
                      pane_id);
-            for (int i = 0; i < 32; ++i) {
-                cubicle_client_disconnect(pane_managers[i]);
-            }
-            return -1;
+            continue;
         }
         const char *workspace_id = target->workspace_id[0] != '\0'
                                        ? target->workspace_id
                                        : session->workspace.id;
+        snprintf(processes[pane_id - 1].id,
+                 sizeof(processes[pane_id - 1].id), "%s",
+                 target->process_id);
+        snprintf(processes[pane_id - 1].workspace_id,
+                 sizeof(processes[pane_id - 1].workspace_id), "%s",
+                 workspace_id);
+        snprintf(processes[pane_id - 1].friendly_name,
+                 sizeof(processes[pane_id - 1].friendly_name), "pane %d",
+                 pane_id);
+        snprintf(workspaces[pane_id - 1].id,
+                 sizeof(workspaces[pane_id - 1].id), "%s", workspace_id);
+        snprintf(workspaces[pane_id - 1].name,
+                 sizeof(workspaces[pane_id - 1].name), "%s", workspace_id);
+
         cubicle_client_t *manager = session->manager;
         bool use_pane_manager =
             target->manager_uri[0] != '\0' &&
@@ -6487,12 +6587,11 @@ static int desk_apply_named_layout(desk_session_t *session,
                 cubicle_client_connect_uri(target->manager_uri, NULL,
                                            &pane_managers[pane_id - 1]);
             if (connect_code != CUBICLE_OK) {
-                snprintf(error, error_size,
-                         "failed to connect to manager for pane %d", pane_id);
-                for (int i = 0; i < 32; ++i) {
-                    cubicle_client_disconnect(pane_managers[i]);
-                }
-                return -1;
+                snprintf(pane_errors[pane_id - 1],
+                         sizeof(pane_errors[pane_id - 1]),
+                         "Pane %d unavailable: failed to connect to manager",
+                         pane_id);
+                continue;
             }
             manager = pane_managers[pane_id - 1];
         }
@@ -6500,12 +6599,24 @@ static int desk_apply_named_layout(desk_session_t *session,
             manager, target->process_id, workspace_id,
             &processes[pane_id - 1]);
         if (code != CUBICLE_OK || !process_is_attachable(&processes[pane_id - 1])) {
-            snprintf(error, error_size, "cube for pane %d is not attachable",
-                     pane_id);
-            for (int i = 0; i < 32; ++i) {
-                cubicle_client_disconnect(pane_managers[i]);
+            const cubicle_error_t *last = cubicle_client_last_error(manager);
+            const char *message =
+                code != CUBICLE_OK
+                    ? (last != NULL && last->message[0] != '\0'
+                           ? last->message
+                           : "cube lookup failed")
+                    : "cube is not attachable";
+            snprintf(pane_errors[pane_id - 1],
+                     sizeof(pane_errors[pane_id - 1]),
+                     "Pane %d unavailable: %.220s", pane_id, message);
+            if (code == CUBICLE_OK) {
+                snprintf(processes[pane_id - 1].id,
+                         sizeof(processes[pane_id - 1].id), "%s",
+                         target->process_id);
+                snprintf(processes[pane_id - 1].workspace_id,
+                         sizeof(processes[pane_id - 1].workspace_id), "%s",
+                         workspace_id);
             }
-            return -1;
         }
         if (cubicle_workspace_get(manager, workspace_id,
                                   &workspaces[pane_id - 1]) != CUBICLE_OK) {
@@ -6532,10 +6643,18 @@ static int desk_apply_named_layout(desk_session_t *session,
             if (pane_managers[pane_id - 1] != NULL) {
                 pane->manager = pane_managers[pane_id - 1];
                 pane_managers[pane_id - 1] = NULL;
+                pane->manager_relay_attachments =
+                    target->manager_relay_attachments;
+            }
+            if (target->manager_uri[0] != '\0') {
                 snprintf(pane->manager_uri, sizeof(pane->manager_uri), "%s",
                          target->manager_uri);
                 pane->manager_relay_attachments =
                     target->manager_relay_attachments;
+            }
+            if (pane_errors[pane_id - 1][0] != '\0') {
+                snprintf(pane->load_error, sizeof(pane->load_error), "%s",
+                         pane_errors[pane_id - 1]);
             }
             desk_set_pane_display_context(session, pane,
                                           &workspaces[pane_id - 1],
@@ -6544,15 +6663,32 @@ static int desk_apply_named_layout(desk_session_t *session,
     }
 
     bool changed = false;
-    if (resize_all_panes_or_reflow(session, terminal, &changed) < 0 ||
-        attach_all_panes(session, error, error_size) != 0) {
+    if (resize_all_panes_or_reflow(session, terminal, &changed) < 0) {
         for (int i = 0; i < 32; ++i) {
             cubicle_client_disconnect(pane_managers[i]);
         }
         return -1;
     }
+    for (size_t i = 0; i < session->pane_count; ++i) {
+        desk_pane_t *pane = &session->panes[i];
+        if (pane->load_error[0] != '\0') {
+            continue;
+        }
+        cubicle_error_code_t attach_code =
+            attach_pane(session, i, error, error_size);
+        if (attach_code != CUBICLE_OK) {
+            snprintf(pane->load_error, sizeof(pane->load_error),
+                     "Pane %zu unavailable: %.180s", i + 1,
+                     error[0] != '\0' ? error : "failed to attach");
+            desk_debug_log("event=named_layout_pane_attach_failed pane=%zu code=%d message=\"%s\"",
+                           i + 1, (int)attach_code, pane->load_error);
+            error[0] = '\0';
+        }
+    }
     if (desk_load_all_pane_macro_caches(session, error, error_size) < 0) {
-        return -1;
+        desk_debug_log("event=named_layout_macro_cache_failed message=\"%s\"",
+                       error);
+        error[0] = '\0';
     }
     if (pane_find_leaf_node(&session->layout, session->layout.root,
                             loaded_layout.active_pane_id) >= 0) {
@@ -7181,7 +7317,9 @@ static int write_pane_by_id(desk_session_t *session,
     }
     desk_pane_t *pane = &session->panes[(size_t)pane_id - 1];
     if (pane->attachment == NULL) {
-        return write_active_pane(session, buffer, length);
+        desk_debug_log("event=write_skipped pane=%d process=%s reason=detached",
+                       pane_id, pane->process.friendly_name);
+        return 0;
     }
     return cubicle_attachment_write(pane->attachment, buffer, length) < 0 ? -1
                                                                          : 0;
@@ -7350,6 +7488,11 @@ static int desk_load_macro_cache_for_pane(desk_session_t *session,
                                           char *error,
                                           size_t error_size)
 {
+    if (pane->load_error[0] != '\0' && pane->manager == NULL &&
+        pane->manager_uri[0] != '\0' &&
+        strcmp(pane->manager_uri, session->manager_uri) != 0) {
+        return 0;
+    }
     return desk_get_macro_cache(session, desk_pane_manager(session, pane),
                                 desk_pane_manager_uri(session, pane),
                                 desk_pane_workspace_id(session, pane),

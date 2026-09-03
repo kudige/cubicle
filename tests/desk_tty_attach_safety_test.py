@@ -1214,6 +1214,145 @@ def run_desk_load_layout_preserves_active_pane(desk, cube, env):
         os.close(master_fd)
 
 
+def run_desk_load_layout_keeps_failed_pane_placeholder(desk, cube, env):
+    workspace_id = find_workspace_id(cube, env, "DeskFailedLayout")
+    layout_path = find_saved_layout_file(env, "failed-pane")
+    os.makedirs(os.path.dirname(layout_path), exist_ok=True)
+    with open(layout_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "desk-named-layout-v1\n"
+            f"workspace {workspace_id}\n"
+            f"pane 1 layout-live {workspace_id} 0 - -\n"
+            f"pane 2 missing-process {workspace_id} 0 - -\n"
+            "root 2\n"
+            "active 1\n"
+            "next 3\n"
+            "zoom 0\n"
+            "zoom_pane 0\n"
+            "node 0 1 0 0 0 0 layout-live\n"
+            "node 1 2 0 0 0 0 missing-process\n"
+            "node 2 0 1 0 1 0\n"
+        )
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", 24, 100, 0, 0))
+    proc = subprocess.Popen(
+        [desk, "--workspace", "DeskFailedLayout"],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=subprocess.PIPE,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    captured = bytearray()
+    sent_picker = False
+    sent_filter = False
+    sent_load = False
+    saw_placeholder = False
+    sent_probe = False
+    saw_live_probe = False
+    sent_quit = False
+    deadline = time.time() + 8
+    try:
+        while time.time() < deadline:
+            fds = [master_fd]
+            if proc.stderr is not None:
+                fds.append(proc.stderr.fileno())
+            readable, _, _ = select.select(fds, [], [], 0.05)
+            for fd in readable:
+                if fd == master_fd:
+                    try:
+                        captured.extend(os.read(master_fd, 8192))
+                    except OSError:
+                        pass
+                elif proc.stderr is not None:
+                    os.read(proc.stderr.fileno(), 4096)
+
+            if not sent_picker and b"layout-live" in captured:
+                captured.clear()
+                os.write(master_fd, b"\x18;")
+                sent_picker = True
+
+            if sent_picker and not sent_filter and b"Load layout" in captured:
+                os.write(master_fd, b"failed-pane")
+                sent_filter = True
+
+            if sent_filter and not sent_load and b"failed-pane" in captured:
+                os.write(master_fd, b"\r")
+                sent_load = True
+
+            if sent_load and not saw_placeholder:
+                if b"Pane 2 unavailable:" in captured:
+                    saw_placeholder = True
+
+            if saw_placeholder and not sent_probe:
+                os.write(master_fd, b"LAYOUT_OK")
+                sent_probe = True
+
+            if sent_probe and not saw_live_probe:
+                live_logs = subprocess.run(
+                    [cube, "--workspace", "DeskFailedLayout",
+                     "logs", "--stdout", "layout-live"],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if "GOT_LAYOUT_OK" in live_logs.stdout:
+                    saw_live_probe = True
+
+            if saw_live_probe and not sent_quit:
+                os.write(master_fd, b"\x18q")
+                sent_quit = True
+
+            if proc.poll() is not None:
+                break
+
+        if not sent_picker:
+            raise AssertionError(f"desk did not render failed-layout workspace: {captured!r}")
+        if not sent_filter:
+            raise AssertionError(f"desk did not open layout picker: {captured!r}")
+        if not sent_load:
+            raise AssertionError(f"desk did not show failed-pane layout: {captured!r}")
+        if not saw_placeholder:
+            raise AssertionError(f"desk did not render failed pane placeholder: {captured!r}")
+        if not sent_probe:
+            raise AssertionError("desk was not sent live-pane probe")
+        if not saw_live_probe:
+            live_logs = subprocess.run(
+                [cube, "--workspace", "DeskFailedLayout",
+                 "logs", "--stdout", "layout-live"],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            raise AssertionError(
+                f"live pane did not receive input after failed-pane load:\n"
+                f"{live_logs.stdout}\noutput={captured!r}"
+            )
+        if not sent_quit:
+            raise AssertionError("desk was not asked to quit after failed-pane load")
+        if proc.poll() is None:
+            proc.wait(timeout=2)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"desk exited with {proc.returncode}; output={captured!r}"
+            )
+        clear_desk_defaults(env)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master_fd)
+
+
 def run_desk_layout_mode_keys(desk, cube, env):
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
@@ -3646,6 +3785,44 @@ def main():
                      "kill", "--all", "--cleanup"], env)
         run_checked([cube, "workspace", "DeskSafe"], env)
         run_checked([cube, "workspace", "delete", "DeskActiveReload"], env)
+        run_checked([cube, "workspace", "create", "DeskFailedLayout"], env)
+        run_checked(
+            [
+                cube,
+                "--workspace",
+                "DeskFailedLayout",
+                "run",
+                "--bg",
+                "--tty",
+                "--name",
+                "layout-live",
+                sys.executable,
+                "-c",
+                (
+                    "import os,select,sys,time,tty\n"
+                    "tty.setraw(0)\n"
+                    "sys.stdout.write('READY layout-live\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "deadline=time.time()+12\n"
+                    "data=b''\n"
+                    "while time.time()<deadline:\n"
+                    "    r,_,_=select.select([sys.stdin],[],[],0.05)\n"
+                    "    if r:\n"
+                    "        data+=os.read(0,64)\n"
+                    "    if b'LAYOUT_OK' in data:\n"
+                    "        sys.stdout.write('GOT_LAYOUT_OK\\n')\n"
+                    "        sys.stdout.flush()\n"
+                    "        data=data.replace(b'LAYOUT_OK',b'',1)\n"
+                ),
+            ],
+            env,
+        )
+        run_checked([cube, "workspace", "DeskFailedLayout"], env)
+        run_desk_load_layout_keeps_failed_pane_placeholder(desk, cube, env)
+        run_checked([cube, "--workspace", "DeskFailedLayout",
+                     "kill", "--all", "--cleanup"], env)
+        run_checked([cube, "workspace", "DeskSafe"], env)
+        run_checked([cube, "workspace", "delete", "DeskFailedLayout"], env)
 
         run_checked(
             [
