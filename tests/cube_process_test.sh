@@ -127,6 +127,19 @@ json_id() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["id"])'
 }
 
+histfile_capture="$tmpdir/histfile-env"
+hist_process_id=$(api process-start --workspace "$workspace_id" \
+    --friendly-name "hist check" -- /bin/sh -c \
+    'printf "%s" "$HISTFILE" > "$1"' sh "$histfile_capture" | json_id)
+api process-wait "$hist_process_id" --timeout-ms 2000 | grep -q '"success":true'
+expected_histfile="$state_dir/history/Project_A.hist_check.log"
+if [ "$(cat "$histfile_capture")" != "$expected_histfile" ]; then
+    echo "unexpected HISTFILE: $(cat "$histfile_capture")" >&2
+    echo "expected HISTFILE: $expected_histfile" >&2
+    exit 1
+fi
+cube remove "hist check" >/dev/null
+
 update_process_id=$(api process-start --workspace "$workspace_id" \
     --friendly-name update-me -- sh -c 'sleep 30' | json_id)
 api process-update update-me --workspace "$workspace_id" --restart | grep -q '"restart":true'

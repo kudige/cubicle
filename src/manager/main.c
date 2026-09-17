@@ -16,6 +16,7 @@
 #include "../common/rpc_internal.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -314,6 +315,73 @@ static int controller_socket_path(char path[PATH_MAX],
 {
     int result = snprintf(path, PATH_MAX, "%s/controllers/%s/control.sock",
                           state->runtime_dir, process_id);
+    if (result < 0 || result >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void sanitize_history_component(char *destination,
+                                       size_t destination_size,
+                                       const char *source,
+                                       const char *fallback)
+{
+    if (destination_size == 0) {
+        return;
+    }
+
+    size_t written = 0;
+    const char *value = source != NULL && source[0] != '\0' ? source : fallback;
+    if (value == NULL || value[0] == '\0') {
+        value = "cube";
+    }
+
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0' && written + 1 < destination_size; ++cursor) {
+        unsigned char ch = *cursor;
+        destination[written++] =
+            (isalnum(ch) || ch == '-' || ch == '_' || ch == '.') ? (char)ch : '_';
+    }
+
+    if (written == 0) {
+        const char *default_value = "cube";
+        while (*default_value != '\0' && written + 1 < destination_size) {
+            destination[written++] = *default_value++;
+        }
+    }
+
+    destination[written] = '\0';
+}
+
+static int process_history_file_path(char path[PATH_MAX],
+                                     const manager_state_t *state,
+                                     const char *workspace_name,
+                                     const char *workspace_id,
+                                     const char *friendly_name,
+                                     const char *process_id)
+{
+    char directory[PATH_MAX];
+    int result = snprintf(directory, sizeof(directory), "%s/history", state->dir);
+    if (result < 0 || (size_t)result >= sizeof(directory)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (cubicle_mkdir_p(directory) < 0) {
+        return -1;
+    }
+
+    char workspace_component[CUBICLE_NAME_MAX];
+    char process_component[CUBICLE_NAME_MAX];
+    sanitize_history_component(workspace_component, sizeof(workspace_component),
+                               workspace_name, workspace_id);
+    sanitize_history_component(process_component, sizeof(process_component),
+                               friendly_name, process_id);
+
+    result = snprintf(path, PATH_MAX, "%s/%s.%s.log", directory,
+                      workspace_component, process_component);
     if (result < 0 || result >= PATH_MAX) {
         errno = ENAMETOOLONG;
         return -1;
@@ -2953,6 +3021,7 @@ static int launch_controller(const manager_state_t *state,
                              const char *mode,
                              const char *stdin_policy,
                              const char *cwd,
+                             const char *histfile,
                              char **command);
 
 static int reconcile_process_records(const manager_state_t *state)
@@ -3170,9 +3239,18 @@ static int autostart_restart_processes(const manager_state_t *state)
         const char *cwd = old->cwd[0] == '\0' ? workspace.directory : old->cwd;
         const char *stdin_policy =
             old->stdin_policy[0] == '\0' ? "open" : old->stdin_policy;
+        char histfile[PATH_MAX];
+        if (process_history_file_path(histfile, state, workspace.name,
+                                      workspace.id, old->friendly_name,
+                                      process_id) < 0) {
+            free_argv_copy(command_argv);
+            result = -1;
+            break;
+        }
         char process_state[32];
         if (launch_controller(state, controller_state, controller_log,
                               control_socket, old->mode, stdin_policy, cwd,
+                              histfile,
                               command_argv) < 0 ||
             wait_for_controller_ready(control_socket, metadata_path,
                                       events_path, process_state,
@@ -3440,6 +3518,7 @@ static int launch_controller(const manager_state_t *state,
                              const char *mode,
                              const char *stdin_policy,
                              const char *cwd,
+                             const char *histfile,
                              char **command)
 {
     size_t command_count = 0;
@@ -3450,7 +3529,7 @@ static int launch_controller(const manager_state_t *state,
     int controller_debug_enabled =
         state->controller_debug[0] != '\0' &&
         strcmp(state->controller_debug, "none") != 0;
-    size_t argv_count = 15 + (controller_debug_enabled ? 2 : 0) +
+    size_t argv_count = 17 + (controller_debug_enabled ? 2 : 0) +
                         command_count + 1;
     char **controller_argv = calloc(argv_count, sizeof(char *));
     if (controller_argv == NULL) {
@@ -3472,6 +3551,8 @@ static int launch_controller(const manager_state_t *state,
     controller_argv[index++] = (char *)mode;
     controller_argv[index++] = "--cwd";
     controller_argv[index++] = (char *)cwd;
+    controller_argv[index++] = "--histfile";
+    controller_argv[index++] = (char *)histfile;
     if (controller_debug_enabled) {
         controller_argv[index++] = "--debug";
         controller_argv[index++] = (char *)state->controller_debug;
@@ -3652,8 +3733,17 @@ static int command_process_start(const manager_state_t *state, int argc,
     }
 
     char process_state[32];
+    char histfile[PATH_MAX];
+    if (process_history_file_path(histfile, state, workspace_record.name,
+                                  workspace_record.id, friendly_name,
+                                  process_id) < 0) {
+        cubicle_log(CUBICLE_LOG_ERROR, "manager", strerror(errno));
+        unlock_state(lock_fd);
+        return 1;
+    }
     if (launch_controller(state, controller_state, controller_log, control_socket, mode,
-                          stdin_policy, cwd, &argv[command_index]) < 0 ||
+                          stdin_policy, cwd, histfile,
+                          &argv[command_index]) < 0 ||
         wait_for_controller_ready(control_socket, metadata_path, events_path,
                                   process_state,
                                   sizeof(process_state)) < 0) {
@@ -6246,8 +6336,21 @@ static int handle_manager_client(const manager_state_t *state, int client_fd,
         }
 
         char process_state[32];
+        char histfile[PATH_MAX];
+        if (process_history_file_path(histfile, state, workspace.name,
+                                      workspace.id, friendly_name,
+                                      process_id) < 0) {
+            int saved_errno = errno;
+            unlock_state(lock_fd);
+            free(command_argv);
+            MANAGER_RETURN(manager_api_error(client_fd, request_id,
+                                             CUBICLE_ERR_IO,
+                                             "failed to prepare history path",
+                                             true, saved_errno));
+        }
         if (launch_controller(state, controller_state, controller_log, control_socket, mode,
-                              stdin_policy, cwd, command_argv) < 0 ||
+                              stdin_policy, cwd, histfile,
+                              command_argv) < 0 ||
             wait_for_controller_ready(control_socket, metadata_path,
                                       events_path,
                                       process_state,

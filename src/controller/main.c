@@ -157,6 +157,7 @@ int main(int argc, char **argv)
     const char *log_dir = NULL;
     const char *control_socket = NULL;
     const char *cwd = NULL;
+    const char *histfile = NULL;
     stdin_policy_t stdin_policy = STDIN_POLICY_OPEN;
     int daemon = 0;
     int completed_retention_ms = 0;
@@ -207,6 +208,11 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(argv[i], "--histfile") == 0 && i + 1 < argc) {
+            histfile = argv[++i];
+            continue;
+        }
+
         if (strcmp(argv[i], "--stdin-policy") == 0 && i + 1 < argc) {
             if (parse_stdin_policy(argv[++i], &stdin_policy) < 0) {
                 fprintf(stderr, "Unknown stdin policy: %s\n", argv[i]);
@@ -247,14 +253,17 @@ int main(int argc, char **argv)
 
     if (process_mode == CUBICLE_PROCESS_TTY) {
         return run_tty(&argv[command_index], state_dir, log_dir, control_socket,
-                       cwd, stdin_policy, completed_retention_ms, debug_flags);
+                       cwd, histfile, stdin_policy, completed_retention_ms,
+                       debug_flags);
     }
 
     if (process_mode == CUBICLE_PROCESS_TTY_CAPTURED_STDERR) {
         return run_term(&argv[command_index], state_dir, log_dir, control_socket,
-                        cwd, stdin_policy, completed_retention_ms, debug_flags);
+                        cwd, histfile, stdin_policy, completed_retention_ms,
+                        debug_flags);
     }
 
     return run_stream(&argv[command_index], state_dir, log_dir, control_socket,
-                      cwd, stdin_policy, completed_retention_ms, debug_flags);
+                      cwd, histfile, stdin_policy, completed_retention_ms,
+                      debug_flags);
 }

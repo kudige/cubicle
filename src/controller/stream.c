@@ -956,10 +956,19 @@ static void child_chdir_or_exit(const char *cwd)
     }
 }
 
+static void child_set_histfile_or_exit(const char *histfile)
+{
+    if (histfile != NULL && histfile[0] != '\0' &&
+        setenv("HISTFILE", histfile, 1) < 0) {
+        _exit(127);
+    }
+}
+
 int run_stream(char **command, const char *state_dir,
                const char *log_dir,
                const char *control_socket,
                const char *cwd,
+               const char *histfile,
                stdin_policy_t stdin_policy,
                int completed_retention_ms,
                unsigned int debug_flags)
@@ -1004,6 +1013,7 @@ int run_stream(char **command, const char *state_dir,
         close_if_open(&stderr_pipe[1]);
 
         child_chdir_or_exit(cwd);
+        child_set_histfile_or_exit(histfile);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -1140,6 +1150,7 @@ static int run_pty_mode(char **command, const char *state_dir,
                         const char *log_dir,
                         const char *control_socket,
                         const char *cwd,
+                        const char *histfile,
                         stdin_policy_t stdin_policy,
                         int completed_retention_ms,
                         cubicle_process_mode_t process_mode,
@@ -1191,6 +1202,7 @@ static int run_pty_mode(char **command, const char *state_dir,
         close_if_open(&slave_fd);
         close_if_open(&stdout_slave_fd);
         child_chdir_or_exit(cwd);
+        child_set_histfile_or_exit(histfile);
         execvp(command[0], command);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -1371,12 +1383,13 @@ int run_tty(char **command, const char *state_dir,
             const char *log_dir,
             const char *control_socket,
             const char *cwd,
+            const char *histfile,
             stdin_policy_t stdin_policy,
             int completed_retention_ms,
             unsigned int debug_flags)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
-                        stdin_policy, completed_retention_ms,
+                        histfile, stdin_policy, completed_retention_ms,
                         CUBICLE_PROCESS_TTY, debug_flags);
 }
 
@@ -1384,11 +1397,12 @@ int run_term(char **command, const char *state_dir,
              const char *log_dir,
              const char *control_socket,
              const char *cwd,
+             const char *histfile,
              stdin_policy_t stdin_policy,
              int completed_retention_ms,
              unsigned int debug_flags)
 {
     return run_pty_mode(command, state_dir, log_dir, control_socket, cwd,
-                        stdin_policy, completed_retention_ms,
+                        histfile, stdin_policy, completed_retention_ms,
                         CUBICLE_PROCESS_TTY_CAPTURED_STDERR, debug_flags);
 }
