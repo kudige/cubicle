@@ -552,6 +552,8 @@ typedef struct desk_session {
     char manager_uri[CUBICLE_ENDPOINT_URI_MAX];
     char remote_name[CUBICLE_NAME_MAX];
     bool manager_relay_attachments;
+    char home_manager_uri[CUBICLE_ENDPOINT_URI_MAX];
+    bool home_manager_relay_attachments;
     cubicle_workspace_info_t workspace;
     desk_pane_t panes[32];
     size_t pane_count;
@@ -5658,38 +5660,62 @@ static int desk_open_root_menu(desk_session_t *session)
                  "failed to read remote registry");
     }
 
-    cubicle_workspace_info_t *workspaces = NULL;
-    size_t workspace_count = 0;
-    memset(&page, 0, sizeof(page));
-    code = cubicle_workspace_list(session->manager, NULL, &workspaces,
-                                  &workspace_count, &page);
-    if (code != CUBICLE_OK) {
-        const cubicle_error_t *last = cubicle_client_last_error(session->manager);
-        snprintf(menu->status, sizeof(menu->status), "%s",
-                 last != NULL && last->message[0] != '\0'
-                     ? last->message
-                     : "workspace list failed");
-        return -1;
-    }
-    for (size_t i = 0; i < workspace_count; ++i) {
-        if (strcmp(workspaces[i].id, session->workspace.id) != 0 &&
-            !(remotes_loaded &&
-              desk_workspace_is_remote_alias(&workspaces[i],
-                                             session->remote_caches,
-                                             session->remote_cache_count))) {
-            (void)desk_menu_add_workspace(session, &workspaces[i],
-                                          session->manager_uri,
-                                          session->manager_relay_attachments,
-                                          NULL);
+    /* The workspace picker is global. Keep the configured home manager
+     * unqualified even after the active workspace switches to a remote. */
+    cubicle_client_t *home_manager = session->manager;
+    bool temporary_home_manager = false;
+    bool home_is_active =
+        session->home_manager_uri[0] == '\0' ||
+        strcmp(session->home_manager_uri, session->manager_uri) == 0;
+    if (!home_is_active) {
+        code = cubicle_client_connect_uri(session->home_manager_uri, NULL,
+                                          &home_manager);
+        if (code != CUBICLE_OK) {
+            home_manager = NULL;
+            snprintf(menu->status, sizeof(menu->status),
+                     "home manager unavailable");
+        } else {
+            temporary_home_manager = true;
         }
     }
-    cubicle_workspace_list_free(workspaces);
+
+    if (home_manager != NULL) {
+        cubicle_workspace_info_t *workspaces = NULL;
+        size_t workspace_count = 0;
+        memset(&page, 0, sizeof(page));
+        code = cubicle_workspace_list(home_manager, NULL, &workspaces,
+                                      &workspace_count, &page);
+        if (code != CUBICLE_OK) {
+            const cubicle_error_t *last = cubicle_client_last_error(home_manager);
+            snprintf(menu->status, sizeof(menu->status), "%s",
+                     last != NULL && last->message[0] != '\0'
+                         ? last->message
+                         : "workspace list failed");
+        } else {
+            for (size_t i = 0; i < workspace_count; ++i) {
+                if ((!home_is_active ||
+                     strcmp(workspaces[i].id, session->workspace.id) != 0) &&
+                    !(remotes_loaded &&
+                      desk_workspace_is_remote_alias(
+                          &workspaces[i], session->remote_caches,
+                          session->remote_cache_count))) {
+                    (void)desk_menu_add_workspace(
+                        session, &workspaces[i], session->home_manager_uri,
+                        session->home_manager_relay_attachments, NULL);
+                }
+            }
+        }
+        cubicle_workspace_list_free(workspaces);
+    }
+    if (temporary_home_manager) {
+        cubicle_client_disconnect(home_manager);
+    }
     if (remotes_loaded) {
         for (size_t remote_index = 0;
              remote_index < session->remote_cache_count; ++remote_index) {
             desk_remote_cache_t *remote =
                 &session->remote_caches[remote_index];
-            if (strcmp(remote->uri, session->manager_uri) == 0) {
+            if (strcmp(remote->uri, session->home_manager_uri) == 0) {
                 continue;
             }
             code = desk_remote_cache_load_workspaces(remote, false);
@@ -9577,6 +9603,15 @@ static int desk_run_workspace(const char *workspace_arg,
         return 2;
     }
     desk_crash_configure(&config);
+    char home_endpoint[CUBICLE_ENDPOINT_URI_MAX];
+    const char *home_manager_uri = cubeui_resolve_manager_endpoint(
+        NULL, &config, home_endpoint, sizeof(home_endpoint));
+    if (home_manager_uri != NULL) {
+        snprintf(session.home_manager_uri, sizeof(session.home_manager_uri),
+                 "%s", home_manager_uri);
+        session.home_manager_relay_attachments =
+            strncmp(home_manager_uri, "tls://", 6) == 0;
+    }
     if (session.manager_uri[0] == '\0') {
         char configured_endpoint[CUBICLE_ENDPOINT_URI_MAX];
         const char *resolved = cubeui_resolve_manager_endpoint(
