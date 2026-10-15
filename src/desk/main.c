@@ -459,6 +459,7 @@ typedef enum desk_menu_level {
     DESK_MENU_NEW_COMMAND,
     DESK_MENU_SAVE_LAYOUT,
     DESK_MENU_LAYOUT_PICKER,
+    DESK_MENU_LAYOUT_DELETE_CONFIRM,
     DESK_MENU_BINDINGS,
     DESK_MENU_BINDING_EDIT,
     DESK_MENU_MACROS,
@@ -519,6 +520,7 @@ typedef struct desk_open_menu {
     size_t scroll_offset;
     char command[DESK_NEW_COMMAND_MAX];
     size_t command_length;
+    char pending_layout_name[CUBICLE_NAME_MAX];
     char edit_command[CUBICLE_DESK_COMMAND_NAME_MAX];
     size_t edit_macro_index;
     uint64_t edit_macro_ordinal;
@@ -2395,6 +2397,15 @@ static int desk_named_layout_path(const char *name, char path[PATH_MAX])
     }
     int length = snprintf(path, PATH_MAX, "%s/%s", dir, file_name);
     return length < 0 || length >= PATH_MAX ? -1 : 0;
+}
+
+static int desk_delete_named_layout(const char *name)
+{
+    char path[PATH_MAX];
+    if (desk_named_layout_path(name, path) < 0) {
+        return -1;
+    }
+    return unlink(path);
 }
 
 static void desk_layout_collect_leaf_panes(const desk_pane_layout_t *layout,
@@ -5770,6 +5781,34 @@ static void desk_begin_layout_picker(desk_session_t *session)
     (void)desk_load_layout_picker_items(session);
 }
 
+static void desk_begin_layout_delete_confirm(desk_session_t *session,
+                                             const char *layout_name)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    cubicle_workspace_info_t workspace = menu->workspace;
+    char name[CUBICLE_NAME_MAX];
+    snprintf(name, sizeof(name), "%s", layout_name);
+    memset(menu, 0, sizeof(*menu));
+    menu->level = DESK_MENU_LAYOUT_DELETE_CONFIRM;
+    menu->workspace = workspace;
+    snprintf(menu->pending_layout_name, sizeof(menu->pending_layout_name),
+             "%s", name);
+}
+
+static bool desk_begin_selected_layout_delete(desk_session_t *session)
+{
+    desk_open_menu_t *menu = &session->open_menu;
+    if (menu->selected >= menu->item_count) {
+        return false;
+    }
+    desk_menu_item_t *item = &menu->items[menu->selected];
+    if (item->disabled || item->kind != DESK_MENU_ITEM_LAYOUT) {
+        return false;
+    }
+    desk_begin_layout_delete_confirm(session, item->layout_name);
+    return true;
+}
+
 static const char *desk_command_description(const char *command)
 {
     if (strcmp(command, "pane.next") == 0) {
@@ -6803,6 +6842,7 @@ static bool desk_menu_geometry(const desk_terminal_t *terminal,
     desk_rect_t pane_rect;
     if (menu->level == DESK_MENU_SAVE_LAYOUT ||
         menu->level == DESK_MENU_LAYOUT_PICKER ||
+        menu->level == DESK_MENU_LAYOUT_DELETE_CONFIRM ||
         menu->level == DESK_MENU_BINDINGS ||
         menu->level == DESK_MENU_BINDING_EDIT ||
         menu->level == DESK_MENU_MACROS ||
@@ -6885,6 +6925,8 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
         heading = "Save layout";
     } else if (menu->level == DESK_MENU_LAYOUT_PICKER) {
         heading = "Load layout";
+    } else if (menu->level == DESK_MENU_LAYOUT_DELETE_CONFIRM) {
+        heading = "Delete layout";
     } else if (menu->level == DESK_MENU_BINDINGS) {
         heading = "Key bindings";
     } else if (menu->level == DESK_MENU_BINDING_EDIT) {
@@ -6942,7 +6984,9 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
                           : menu->level == DESK_MENU_MACRO_TARGET
                           ? "Enter selects target. j/k or arrows scroll."
                           : menu->level == DESK_MENU_LAYOUT_PICKER
-                          ? "Type to filter. Enter loads. q closes."
+                          ? "Type to filter. Enter loads. d deletes. q closes."
+                          : menu->level == DESK_MENU_LAYOUT_DELETE_CONFIRM
+                          ? "y deletes. n or Esc cancels."
                           : menu->level == DESK_MENU_ROOT
                           ? "Enter selects. m macros. q closes. Esc goes back."
                           : "Enter selects. q closes. Esc goes back.");
@@ -6988,6 +7032,17 @@ static void desk_render_open_menu(const desk_terminal_t *terminal,
             append_text(frame, sizeof(frame), &used, line);
         }
         row++;
+    }
+
+    if (menu->level == DESK_MENU_LAYOUT_DELETE_CONFIRM) {
+        length = snprintf(line, sizeof(line),
+                          "\x1b[%d;%dH\x1b[48;5;236mDelete layout '%.*s'?\x1b[0m",
+                          row, box_col + 3, inner_cols - 17,
+                          menu->pending_layout_name);
+        if (length > 0 && (size_t)length < sizeof(line)) {
+            append_text(frame, sizeof(frame), &used, line);
+        }
+        goto render_menu_status;
     }
 
     if (menu->item_count == 0) {
@@ -8258,6 +8313,33 @@ static int handle_open_menu_input(desk_session_t *session,
                                   bool *menu_closed)
 {
     for (size_t i = 0; i < length; ++i) {
+        if (session->open_menu.level == DESK_MENU_LAYOUT_DELETE_CONFIRM) {
+            unsigned char ch = input[i];
+            if (ch == 'y' || ch == 'Y') {
+                char layout_name[CUBICLE_NAME_MAX];
+                snprintf(layout_name, sizeof(layout_name), "%s",
+                         session->open_menu.pending_layout_name);
+                if (desk_delete_named_layout(layout_name) < 0) {
+                    desk_begin_layout_picker(session);
+                    snprintf(session->open_menu.status,
+                             sizeof(session->open_menu.status),
+                             "failed to delete layout '%.*s'", 220,
+                             layout_name);
+                } else {
+                    if (strcmp(session->named_layout_name, layout_name) == 0) {
+                        desk_clear_named_layout(session);
+                        cubeui_clear_desk_layout();
+                    }
+                    desk_begin_layout_picker(session);
+                    snprintf(session->open_menu.status,
+                             sizeof(session->open_menu.status),
+                             "deleted layout '%.*s'", 230, layout_name);
+                }
+            } else if (ch == 'n' || ch == 'N' || ch == 0x1b) {
+                desk_begin_layout_picker(session);
+            }
+            continue;
+        }
         if (session->open_menu.level == DESK_MENU_NEW_COMMAND ||
             session->open_menu.level == DESK_MENU_SAVE_LAYOUT ||
             session->open_menu.level == DESK_MENU_BINDING_EDIT ||
@@ -8368,6 +8450,10 @@ static int handle_open_menu_input(desk_session_t *session,
                 continue;
             }
             unsigned char ch = input[i];
+            if (ch == 'd' && session->open_menu.command_length == 0 &&
+                desk_begin_selected_layout_delete(session)) {
+                continue;
+            }
             if (ch == '\r' || ch == '\n') {
                 if (desk_open_menu_select(session, terminal, menu_closed) < 0) {
                     return -1;
@@ -8508,6 +8594,11 @@ static int handle_open_menu_input(desk_session_t *session,
         if (session->open_menu.level == DESK_MENU_ROOT &&
             input[i] == 'm') {
             desk_begin_macro_list(session);
+            continue;
+        }
+        if ((session->open_menu.level == DESK_MENU_ROOT ||
+             session->open_menu.level == DESK_MENU_LAYOUT_PICKER) &&
+            input[i] == 'd' && desk_begin_selected_layout_delete(session)) {
             continue;
         }
         if (session->open_menu.level == DESK_MENU_BINDINGS &&

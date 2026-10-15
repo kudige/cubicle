@@ -928,6 +928,16 @@ def run_desk_save_and_load_layout(desk, env):
     saw_picker = False
     sent_filter = False
     sent_load = False
+    sent_delete_picker = False
+    sent_delete_prompt = False
+    saw_delete_confirmation = False
+    sent_delete_cancel = False
+    saw_picker_after_cancel = False
+    sent_second_delete_prompt = False
+    saw_second_delete_confirmation = False
+    sent_delete_confirm = False
+    saw_delete_complete = False
+    closed_delete_picker_at = None
     sent_quit = False
     deadline = time.time() + 7
     try:
@@ -1003,8 +1013,56 @@ def run_desk_save_and_load_layout(desk, env):
                 os.write(master_fd, b"\r")
                 sent_load = True
 
-            if sent_load and not sent_quit:
+            if sent_load and not sent_delete_picker:
                 time.sleep(0.2)
+                if proc.poll() is not None:
+                    break
+                with open(desk_default_layout_file(env), "r", encoding="utf-8") as handle:
+                    if handle.read().strip() != "saved-alpha":
+                        raise AssertionError("desk did not persist loaded layout")
+                captured.clear()
+                os.write(master_fd, b"\x18;")
+                sent_delete_picker = True
+
+            if sent_delete_picker and not sent_delete_prompt and b"Load layout" in captured:
+                captured.clear()
+                os.write(master_fd, b"d")
+                sent_delete_prompt = True
+
+            if sent_delete_prompt and not saw_delete_confirmation:
+                if b"Delete layout" in captured and b"saved-alpha" in captured:
+                    saw_delete_confirmation = True
+                    os.write(master_fd, b"n")
+                    sent_delete_cancel = True
+
+            if sent_delete_cancel and not saw_picker_after_cancel:
+                if b"Load layout" in captured and b"saved-alpha" in captured:
+                    saw_picker_after_cancel = True
+                    captured.clear()
+                    os.write(master_fd, b"d")
+                    sent_second_delete_prompt = True
+
+            if sent_second_delete_prompt and not saw_second_delete_confirmation:
+                if b"Delete layout" in captured and b"saved-alpha" in captured:
+                    saw_second_delete_confirmation = True
+                    os.write(master_fd, b"y")
+                    sent_delete_confirm = True
+
+            if sent_delete_confirm and not saw_delete_complete:
+                if b"deleted layout 'saved-alpha'" in captured:
+                    saw_delete_complete = True
+                    if os.path.exists(saved_file):
+                        raise AssertionError("desk did not delete named layout")
+
+            if saw_delete_complete and closed_delete_picker_at is None:
+                os.write(master_fd, b"q")
+                closed_delete_picker_at = time.time()
+
+            if (
+                closed_delete_picker_at is not None
+                and not sent_quit
+                and time.time() - closed_delete_picker_at >= 0.1
+            ):
                 if proc.poll() is not None:
                     break
                 os.write(master_fd, b"\x18q")
@@ -1031,11 +1089,18 @@ def run_desk_save_and_load_layout(desk, env):
             raise AssertionError(f"desk did not show filtered layout picker: {captured!r}")
         if not sent_load:
             raise AssertionError(f"desk did not show saved layout entry: {captured!r}")
+        if not saw_delete_confirmation:
+            raise AssertionError(f"desk did not confirm layout deletion: {captured!r}")
+        if not saw_picker_after_cancel:
+            raise AssertionError("desk did not cancel layout deletion")
+        if not saw_second_delete_confirmation:
+            raise AssertionError("desk did not reopen layout deletion confirmation")
+        if not saw_delete_complete:
+            raise AssertionError(f"desk did not delete saved layout: {captured!r}")
         if not sent_quit:
             raise AssertionError("desk was not asked to quit after loading layout")
-        with open(desk_default_layout_file(env), "r", encoding="utf-8") as handle:
-            if handle.read().strip() != "saved-alpha":
-                raise AssertionError("desk did not persist loaded layout")
+        if os.path.exists(desk_default_layout_file(env)):
+            raise AssertionError("desk kept deleted layout as its default")
         if proc.poll() is None:
             proc.wait(timeout=2)
         if proc.returncode != 0:

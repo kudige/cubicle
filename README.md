@@ -428,7 +428,8 @@ Prefix-;      Open searchable layout picker
 ```
 
 The layout picker has a search area at the top, supports scrolling for long
-lists, and loads the selected layout into the current workspace.
+lists, and loads the selected layout into the current workspace. Press `d` on
+a selected layout, then `y`, to delete it; `n` or Escape cancels deletion.
 
 ### Bindings Overlay
 

@@ -597,7 +597,9 @@ is disabled. Press `Prefix-:` to save the current pane layout and cube
 assignments under a user-global name. Press `Prefix-;` to open a centered
 searchable layout picker for all saved layouts owned by the user; type to
 filter, use the arrow keys to move through long lists, and press
-Enter to load the selected layout into the current workspace. Saved layouts are
+Enter to load the selected layout into the current workspace. Press `d` on a
+selected layout and then `y` to delete it; `n` or Escape cancels deletion.
+Saved layouts are
 also listed below workspaces in the `Prefix-o` menu. Press `Prefix-s`
 to enter layout mode. In layout mode, arrows resize the active pane side,
 Shift-arrows resize the opposite side, `H`/`V` split the active pane and open
