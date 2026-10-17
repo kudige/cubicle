@@ -90,16 +90,6 @@ int cubeui_autostart_manager(const char *manager_uri,
         return 0;
     }
 
-    char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
-    int length = snprintf(listen_uri, sizeof(listen_uri), "unix://%s",
-                          socket_path);
-    if (length < 0 || (size_t)length >= sizeof(listen_uri)) {
-        if (error != NULL && error_size > 0) {
-            snprintf(error, error_size, "manager socket path is too long");
-        }
-        return -1;
-    }
-
     char manager_binary[CUBICLE_PATH_MAX];
     if (manager_binary_path(config, manager_binary,
                             sizeof(manager_binary)) < 0) {
@@ -118,9 +108,6 @@ int cubeui_autostart_manager(const char *manager_uri,
         return -1;
     }
     if (pid == 0) {
-        const char *startup_uri =
-            strncmp(config->manager_listen_uri, "unix://", 7) == 0
-                ? listen_uri : config->manager_listen_uri;
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             (void)dup2(devnull, STDIN_FILENO);
@@ -130,12 +117,8 @@ int cubeui_autostart_manager(const char *manager_uri,
                 close(devnull);
             }
         }
-        execl(manager_binary, manager_binary, "--listen", startup_uri,
-              "--control-socket", socket_path,
-              (char *)NULL);
-        execlp("cubicle-manager", "cubicle-manager", "--listen", startup_uri,
-               "--control-socket", socket_path,
-               (char *)NULL);
+        execl(manager_binary, manager_binary, (char *)NULL);
+        execlp("cubicle-manager", "cubicle-manager", (char *)NULL);
         _exit(127);
     }
 

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import socket
+import shlex
 import ssl
 import subprocess
 import tempfile
@@ -16,9 +17,19 @@ def check_startup(mode, tls):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         config = root / "config.cfg"
+        bindir = Path(os.environ["CUBICLE_MANAGER"]).parent
+        if mode == "auto":
+            bindir = root / "bin"
+            bindir.mkdir()
+            launcher = bindir / "cubicle-manager"
+            launcher.write_text(
+                '#!/bin/sh\n[ "$#" -eq 0 ] || exit 99\nexec '
+                + shlex.quote(os.environ["CUBICLE_MANAGER"]) + '\n'
+            )
+            launcher.chmod(0o700)
         listener = f"listen=tls://127.0.0.1:{port}\n" if tls else ""
         config.write_text(
-            f"[installation]\nbindir={Path(os.environ['CUBICLE_MANAGER']).parent}\n"
+            f"[installation]\nbindir={bindir}\n"
             f"[manager]\nstate_dir={root / 'state'}\nruntime_dir={runtime}\n"
             f"log_dir={root / 'log'}\n{listener}"
             f"[client]\nmanager=unix://{local_socket}\n[cube]\nautomanager=true\n"
