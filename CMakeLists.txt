@@ -572,6 +572,15 @@ add_test(
 )
 
 add_test(
+    NAME cubicle-manager-startup-config-test
+    COMMAND ${CMAKE_COMMAND} -E env
+            CUBE=$<TARGET_FILE:cube>
+            CUBICLE_MANAGER=$<TARGET_FILE:cubicle-manager>
+            CUBICLE_API_CLIENT=${CMAKE_CURRENT_SOURCE_DIR}/tests/api_client.py
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/manager_startup_config_test.py
+)
+
+add_test(
     NAME cubicle-automanager-test
     COMMAND ${CMAKE_COMMAND} -E env
             CUBE=$<TARGET_FILE:cube>

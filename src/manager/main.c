@@ -211,6 +211,7 @@ static void print_usage(const char *program)
             program, program, program, program, program, program, program,
             program, program, program);
     fprintf(stderr, "Global options: --config PATH, --state-dir dir, --runtime-dir dir, --log-dir dir\n");
+    fprintf(stderr, "With no command, runs in the background (also --daemon), using manager.listen or the default Unix socket.\n");
 }
 
 static int apply_config_option_prescan(int argc, char **argv)
@@ -8469,6 +8470,8 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
             allow_insecure = 1;
         } else if (strcmp(argv[i], "--foreground") == 0) {
             foreground = 1;
+        } else if (strcmp(argv[i], "--daemon") == 0) {
+            foreground = 0;
         } else if (strcmp(argv[i], "--event-interval-ms") == 0 && i + 1 < argc) {
             poll_interval_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--max-clients") == 0 && i + 1 < argc) {
@@ -8504,6 +8507,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
     size_t listener_count = 0;
     char listen_uri[CUBICLE_ENDPOINT_URI_MAX];
 
+    if (requested_uri == NULL && requested_socket == NULL) {
+        requested_uri = state->listen_uri;
+    }
     if (requested_uri != NULL) {
         if (manager_listen_uri(listen_uri, state, NULL, requested_uri) < 0) {
             manager_log_error(errno);
@@ -8525,8 +8531,9 @@ static int command_daemon(const manager_state_t *state, int argc, char **argv)
         if (strncmp(listen_uri, "tcp://", 6) == 0 ||
             strncmp(listen_uri, "tls://", 6) == 0) {
             char local_uri[CUBICLE_ENDPOINT_URI_MAX];
-            if (manager_listen_uri(local_uri, state, requested_socket,
-                                   NULL) < 0) {
+            if ((requested_socket != NULL
+                     ? manager_listen_uri(local_uri, state, requested_socket, NULL)
+                     : manager_listen_uri_for_runtime(local_uri, state->runtime_dir)) < 0) {
                 manager_log_error(errno);
                 close_manager_listeners(listeners, listener_count);
                 unlock_state(daemon_lock_fd);
@@ -8800,6 +8807,12 @@ int main(int argc, char **argv)
     }
     snprintf(state.listen_uri, sizeof(state.listen_uri), "%s",
              config.manager_listen_uri);
+    if (config.origins[CUBICLE_CONFIG_MANAGER_LISTEN].kind ==
+            CUBICLE_CONFIG_SOURCE_BUILTIN &&
+        manager_listen_uri_for_runtime(state.listen_uri, state.runtime_dir) < 0) {
+        fprintf(stderr, "Manager socket path is too long\n");
+        return 2;
+    }
     state.socket_mode = (mode_t)config.manager_socket_mode;
     snprintf(state.socket_group, sizeof(state.socket_group), "%s",
              config.manager_socket_group);

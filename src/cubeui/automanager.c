@@ -118,6 +118,9 @@ int cubeui_autostart_manager(const char *manager_uri,
         return -1;
     }
     if (pid == 0) {
+        const char *startup_uri =
+            strncmp(config->manager_listen_uri, "unix://", 7) == 0
+                ? listen_uri : config->manager_listen_uri;
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             (void)dup2(devnull, STDIN_FILENO);
@@ -127,9 +130,11 @@ int cubeui_autostart_manager(const char *manager_uri,
                 close(devnull);
             }
         }
-        execl(manager_binary, manager_binary, "--listen", listen_uri,
+        execl(manager_binary, manager_binary, "--listen", startup_uri,
+              "--control-socket", socket_path,
               (char *)NULL);
-        execlp("cubicle-manager", "cubicle-manager", "--listen", listen_uri,
+        execlp("cubicle-manager", "cubicle-manager", "--listen", startup_uri,
+               "--control-socket", socket_path,
                (char *)NULL);
         _exit(127);
     }
