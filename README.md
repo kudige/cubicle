@@ -23,7 +23,7 @@ The system is built around:
 Build and test from source:
 
 ```console
-sudo apt install cmake pkg-config libeconf-dev libssl-dev libvterm-dev
+sudo apt install cmake pkg-config libssl-dev libvterm-dev
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -72,7 +72,7 @@ sudo pacman -U ./build/cubicle-0.1.0-1-*.pkg.tar.*
 Create and install a native macOS package:
 
 ```console
-brew install cmake pkg-config libeconf openssl libvterm
+brew install cmake pkg-config openssl libvterm
 cmake -S . -B build
 cmake --build build --target macos-package
 sudo installer -pkg ./build/cubicle-0.1.0-macos-*.pkg -target /
@@ -95,6 +95,17 @@ The Debian and pacman packages install:
 After installing new binaries, restart the manager and start new cubes for
 controller-side changes to take effect. Existing controllers keep running the
 old executable image until their managed process exits or is restarted.
+
+### Configuration Parser
+
+Cubicle uses `libeconf` when it is installed, but it is optional. Builds on
+older distributions without it use Cubicle's built-in INI parser and accept the
+same sectioned `key=value` configuration files. To force the portable parser,
+configure with:
+
+```console
+cmake -S . -B build -DCUBICLE_USE_SYSTEM_LIBECONF=OFF
+```
 
 ## Manager And Runtime Paths
 

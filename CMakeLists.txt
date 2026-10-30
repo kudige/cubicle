@@ -4,7 +4,12 @@ project(cubicle VERSION 0.1.0 LANGUAGES C)
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
-pkg_check_modules(LIBECONF REQUIRED IMPORTED_TARGET libeconf)
+option(CUBICLE_USE_SYSTEM_LIBECONF
+       "Use libeconf when it is available; otherwise use the built-in INI parser"
+       ON)
+if(CUBICLE_USE_SYSTEM_LIBECONF)
+    pkg_check_modules(LIBECONF QUIET IMPORTED_TARGET libeconf)
+endif()
 pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
 pkg_check_modules(LIBSSL REQUIRED IMPORTED_TARGET libssl)
 pkg_check_modules(LIBVTERM REQUIRED IMPORTED_TARGET vterm)
@@ -45,6 +50,7 @@ add_library(cubicle_common
     src/common/auth_crypto.c
     src/common/auth_protocol.c
     src/common/config.c
+    src/common/config_parser.c
     src/common/json.c
     src/common/log.c
     src/common/process.c
@@ -55,8 +61,14 @@ add_library(cubicle_common
 )
 
 target_include_directories(cubicle_common PUBLIC include)
-target_include_directories(cubicle_common PRIVATE third_party/yyjson)
-target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF PkgConfig::LIBCRYPTO PkgConfig::LIBSSL PkgConfig::LIBVTERM)
+target_include_directories(cubicle_common PRIVATE src/common third_party/yyjson)
+target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBCRYPTO PkgConfig::LIBSSL PkgConfig::LIBVTERM)
+if(LIBECONF_FOUND)
+    target_compile_definitions(cubicle_common PRIVATE CUBICLE_HAVE_LIBECONF=1)
+    target_link_libraries(cubicle_common PUBLIC PkgConfig::LIBECONF)
+else()
+    message(STATUS "libeconf not found; using the built-in INI configuration parser")
+endif()
 
 target_compile_options(cubicle_common PRIVATE
     -Wall
@@ -246,6 +258,19 @@ target_compile_options(cubicle-config-test PRIVATE
 )
 
 add_test(NAME cubicle-config-test COMMAND cubicle-config-test)
+
+add_executable(cubicle-config-parser-fallback-test
+    src/common/config_parser.c
+    tests/config_parser_fallback_test.c
+)
+target_include_directories(cubicle-config-parser-fallback-test PRIVATE src/common)
+target_compile_options(cubicle-config-parser-fallback-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+add_test(NAME cubicle-config-parser-fallback-test
+         COMMAND cubicle-config-parser-fallback-test)
 
 add_executable(cubicle-auth-crypto-test
     tests/auth_crypto_test.c

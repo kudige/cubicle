@@ -89,7 +89,8 @@ future command design is tracked separately in `docs/cli-command-spec.md`.
 4. built-in/configured defaults
 
 Installed packages provide `/usr/lib/cubicle/config.cfg`. Administrators can
-override through system configuration handled by `libeconf`, such as
+override through system configuration handled by the configuration parser
+(`libeconf` when available), such as
 `/etc/cubicle/config.cfg`. User configuration is read from
 `$XDG_CONFIG_HOME/cubicle/config.cfg`, or `~/.config/cubicle/config.cfg` when
 `XDG_CONFIG_HOME` is unset. Passing `--config /path/to/config.cfg` or setting

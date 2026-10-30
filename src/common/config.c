@@ -2,12 +2,12 @@
 
 #include "cubicle/config.h"
 #include "cubicle/rpc.h"
+#include "config_parser.h"
 
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libeconf.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1144,7 +1144,7 @@ void cubicle_config_defaults(cubicle_config_t *config)
                     "built-in defaults");
 }
 
-static int get_optional_string(econf_file *file,
+static int get_optional_string(cubicle_config_file_t *file,
                                const char *group,
                                const char *key,
                                char *destination,
@@ -1157,14 +1157,16 @@ static int get_optional_string(econf_file *file,
         *present_out = 0;
     }
     char *value = NULL;
-    econf_err result = econf_getStringValue(file, group, key, &value);
-    if (result == ECONF_NOKEY || result == ECONF_NOGROUP) {
+    char parser_error[128] = "";
+    cubicle_config_parser_result_t result = cubicle_config_file_get_string(
+        file, group, key, &value, parser_error, sizeof(parser_error));
+    if (result == CUBICLE_CONFIG_PARSER_NOT_FOUND) {
         return 0;
     }
-    if (result != ECONF_SUCCESS) {
+    if (result != CUBICLE_CONFIG_PARSER_SUCCESS) {
         if (error != NULL && error_size > 0) {
             snprintf(error, error_size, "%s.%s: %s", group, key,
-                     econf_errString(result));
+                     parser_error[0] != '\0' ? parser_error : "parse error");
         }
         return -1;
     }
@@ -1178,8 +1180,8 @@ static int get_optional_string(econf_file *file,
     return copy_result;
 }
 
-static int apply_econf_file(cubicle_config_t *config,
-                            econf_file *file,
+static int apply_config_file(cubicle_config_t *config,
+                             cubicle_config_file_t *file,
                             cubicle_config_source_kind_t source_kind,
                             int allow_manager_control_keys,
                             const char *source,
@@ -1402,17 +1404,20 @@ static int apply_econf_file(cubicle_config_t *config,
 
     size_t desk_key_count = 0;
     char **desk_keys = NULL;
-    econf_err keys_result = econf_getKeys(file, "desk.keys",
-                                          &desk_key_count, &desk_keys);
-    if (keys_result != ECONF_SUCCESS && keys_result != ECONF_NOGROUP &&
-        keys_result != ECONF_NOKEY) {
+    char parser_error[128] = "";
+    cubicle_config_parser_result_t keys_result = cubicle_config_file_get_keys(
+        file, "desk.keys", &desk_key_count, &desk_keys, parser_error,
+        sizeof(parser_error));
+    if (keys_result != CUBICLE_CONFIG_PARSER_SUCCESS &&
+        keys_result != CUBICLE_CONFIG_PARSER_NOT_FOUND) {
         if (error != NULL && error_size > 0) {
             snprintf(error, error_size, "desk.keys: %s",
-                     econf_errString(keys_result));
+                     parser_error[0] != '\0' ? parser_error : "parse error");
         }
         return -1;
     }
-    for (size_t i = 0; keys_result == ECONF_SUCCESS && i < desk_key_count;
+    for (size_t i = 0;
+         keys_result == CUBICLE_CONFIG_PARSER_SUCCESS && i < desk_key_count;
          ++i) {
         if (strncmp(desk_keys[i], "bind.", 5) != 0) {
             continue;
@@ -1425,7 +1430,7 @@ static int apply_econf_file(cubicle_config_t *config,
             (binding_value[0] != '\0' &&
              parse_desk_binding_value(config, binding_value, error,
                                       error_size) < 0)) {
-            econf_free(desk_keys);
+            cubicle_config_file_free_keys(desk_keys, desk_key_count);
             return -1;
         }
         if (binding_value[0] != '\0') {
@@ -1433,7 +1438,7 @@ static int apply_econf_file(cubicle_config_t *config,
         }
     }
     if (desk_keys != NULL) {
-        econf_free(desk_keys);
+        cubicle_config_file_free_keys(desk_keys, desk_key_count);
     }
 
     value[0] = '\0';
@@ -1528,26 +1533,28 @@ static int apply_config_path(cubicle_config_t *config,
         *loaded_out = 0;
     }
 
-    econf_file *file = NULL;
-    econf_err result = econf_readFile(&file, path, "=", "#");
-    if (result == ECONF_NOFILE && !required) {
+    cubicle_config_file_t *file = NULL;
+    char parser_error[128] = "";
+    cubicle_config_parser_result_t result = cubicle_config_file_read(
+        &file, path, parser_error, sizeof(parser_error));
+    if (result == CUBICLE_CONFIG_PARSER_NO_FILE && !required) {
         return 0;
     }
-    if (result != ECONF_SUCCESS) {
+    if (result != CUBICLE_CONFIG_PARSER_SUCCESS) {
         if (error != NULL && error_size > 0) {
             snprintf(error, error_size, "%s: %s", path,
-                     econf_errString(result));
+                     parser_error[0] != '\0' ? parser_error : "file not found");
         }
         return -1;
     }
 
-    if (apply_econf_file(config, file, source_kind,
+    if (apply_config_file(config, file, source_kind,
                          allow_manager_control_keys, path, error,
                          error_size) < 0) {
-        econf_free(file);
+        cubicle_config_file_free(file);
         return -1;
     }
-    econf_free(file);
+    cubicle_config_file_free(file);
     snprintf(config->source, sizeof(config->source), "%s", path);
     if (loaded_out != NULL) {
         *loaded_out = 1;

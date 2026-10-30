@@ -18,7 +18,10 @@ Cubicle configuration must support:
 - diagnostics that show the effective value and its source,
 - safe atomic updates from `cube config` and `cube defaults`.
 
-Configuration parsing and file merging should use `libeconf`. Cubicle remains responsible for schema validation, precedence across non-file sources, security policy, path normalization, and converting values into typed runtime structures.
+Configuration parsing uses `libeconf` when available and Cubicle's built-in
+INI parser otherwise. Cubicle remains responsible for file-layer precedence,
+schema validation, security policy, path normalization, and converting values
+into typed runtime structures.
 
 ## 2. Design principles
 
@@ -35,20 +38,20 @@ Configuration parsing and file merging should use `libeconf`. Cubicle remains re
 
 ## 3. Configuration library
 
-Cubicle should use `libeconf` for:
+The configuration parser backend must provide:
 
 - parsing INI-style sectioned `key=value` files,
-- merging vendor, system, runtime, and drop-in files,
+- enumerating keys in a section,
 - typed value retrieval where appropriate,
 - reporting file and parse errors.
 
-Cubicle must add a typed validation layer above `libeconf`:
+Cubicle must add a typed validation layer above the parser backend:
 
 ```text
 configuration files
         |
         v
-libeconf parsing and merging
+configuration parsing
         |
         v
 Cubicle schema and policy validation
@@ -60,7 +63,9 @@ path and endpoint normalization
 typed cubicle_config_t
 ```
 
-`libeconf` is an implementation dependency, not part of the public protocol or `libcubicle` API.
+`libeconf` is an optional implementation dependency, not part of the public
+protocol or `libcubicle` API. The built-in parser is the portability fallback
+for systems where it is unavailable.
 
 ## 4. Configuration files and precedence
 
@@ -770,7 +775,7 @@ Rule regular expressions must be bounded in size and evaluated by a regex implem
 
 ### Phase 1: Core read-only configuration
 
-- Add `libeconf` dependency.
+- Prefer `libeconf` and provide a built-in INI parser fallback. `DONE`
 - Implement compiled defaults.
 - Load `/usr/lib/cubicle/config.cfg` and `/etc/cubicle/config.cfg`.
 - Parse `[manager]`, `[client]`, and `[defaults]`.
@@ -855,7 +860,7 @@ The configuration implementation must include tests for:
 
 The first usable configuration milestone is complete when:
 
-1. The manager reads `/etc/cubicle/config.cfg` through `libeconf`.
+1. The manager reads `/etc/cubicle/config.cfg` through the configuration parser.
 2. `state_dir`, `runtime_dir`, `listen`, and `controller_binary` affect runtime behaviour.
 3. The client reads `client.manager` and launch defaults.
 4. Invalid configuration prevents startup with an actionable error.
@@ -869,4 +874,6 @@ The first usable configuration milestone is complete when:
 
 The configuration system should follow this principle:
 
-> `libeconf` parses and merges configuration files; Cubicle owns the schema, security policy, typed values, precedence across non-file sources, and runtime meaning of every setting.
+> The configuration parser reads individual files; Cubicle owns file-layer
+> precedence, schema, security policy, typed values, and runtime meaning of
+> every setting.
